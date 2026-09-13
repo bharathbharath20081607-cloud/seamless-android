@@ -12,9 +12,12 @@ dependencyResolutionManagement {
         mavenCentral()
         // Guardian Project raw GitHub Maven (hosts info.guardianproject:arti-mobile-ex)
         maven { url = uri("https://raw.githubusercontent.com/guardianproject/gpmaven/master") }
+        // Briar Project Maven (hosts org.briarproject:onionwrapper-android for hidden services)
+        maven { url = uri("https://briarproject.org/raw/maven/") }
     }
 }
 
-rootProject.name = "bitchat-android"
+rootProject.name = "seamless-android"
 include(":app")
+
 // Using published Arti AAR; local module not included

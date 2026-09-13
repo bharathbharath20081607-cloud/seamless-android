@@ -6,4 +6,8 @@
     <files-path
         name="files"
         path="." />
+    <!-- Required for received_files in getExternalFilesDir() -->
+    <external-files-path
+        name="external_files"
+        path="." />
 </paths>
