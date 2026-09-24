@@ -1,0 +1,68 @@
+package com.seamless.android.net
+
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import com.seamless.android.MainActivity
+import com.seamless.android.R
+
+/** Displays a local notification after an encrypted Tor message is persisted. */
+class TorMessageNotifier(private val context: Context) {
+
+    companion object {
+        private const val CHANNEL_ID = "tor_messages"
+    }
+
+    fun showIncoming(contact: OnionContactManager.OnionContact, preview: String, isPhoto: Boolean = false) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+        ) return
+
+        ensureChannel()
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            contact.id.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val text = if (isPhoto) "Sent a photo" else preview.take(160)
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(contact.nickname)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        NotificationManagerCompat.from(context).notify(contact.id.hashCode(), notification)
+    }
+
+    private fun ensureChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "Tor messages",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "New encrypted messages received through Tor"
+            enableVibration(true)
+            setShowBadge(true)
+        }
+        context.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+    }
+}

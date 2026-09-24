@@ -1,0 +1,501 @@
+package com.seamless.android.net
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.net.Uri
+import android.util.Log
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
+import com.seamless.android.crypto.EncryptionService
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.net.URLDecoder
+import java.net.URLEncoder
+import java.security.MessageDigest
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Manages Onion contacts for zero-server P2P messaging.
+ */
+class OnionContactManager private constructor(private val context: Context) {
+    companion object {
+        private const val TAG = "OnionContactManager"
+        private const val PREFS_NAME = "onion_contacts"
+        private const val KEY_CONTACTS = "contacts"
+        private const val SEAMLESS_URI_SCHEME = "seamless://"
+        private const val UNRESOLVED_ONION = "not-available.onion:18888"
+
+        @Volatile
+        private var instance: OnionContactManager? = null
+
+        fun getInstance(context: Context): OnionContactManager {
+            return instance ?: synchronized(this) {
+                instance ?: OnionContactManager(context.applicationContext).also { instance = it }
+            }
+        }
+    }
+
+    private val contacts = ConcurrentHashMap<String, OnionContact>()
+    private val _contactsFlow = MutableStateFlow<List<OnionContact>>(emptyList())
+    val contactsFlow: StateFlow<List<OnionContact>> = _contactsFlow.asStateFlow()
+    private val gson = Gson()
+    private val prefs: SharedPreferences by lazy {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    }
+
+    init {
+        loadContacts()
+    }
+
+    data class OnionContact(
+        val id: String,
+        val nickname: String,
+        val onionAddress: String,
+        val publicKey: String,
+        val addedAt: Long = System.currentTimeMillis(),
+        val isFavorite: Boolean = false,
+        val notes: String? = null,
+        val needsRendezvous: Boolean = false,
+        val mailboxOnion: String? = null,
+        val lastSeenOnline: Long = 0L,
+        val ephemeralRendezvousId: String? = null,
+        val trustState: TorContactTrustState? = TorContactTrustState.UNVERIFIED,
+        val verifiedAt: Long = 0L
+    ) {
+        fun requiresRendezvous(): Boolean {
+            val canonicalOnion = canonicalizeOnionEndpoint(onionAddress)
+            return needsRendezvous ||
+                canonicalOnion.isBlank() ||
+                canonicalOnion.equals(UNRESOLVED_ONION, ignoreCase = true) ||
+                !canonicalOnion.contains(".onion", ignoreCase = true)
+        }
+
+        fun toShareableLink(): String {
+            val canonicalOnion = canonicalizeOnionEndpoint(onionAddress)
+            val builder = Uri.parse(SEAMLESS_URI_SCHEME).buildUpon()
+                .authority("add")
+                .appendQueryParameter("k", publicKey)
+                .appendQueryParameter("n", nickname)
+
+            if (!requiresRendezvous()) {
+                builder.appendQueryParameter("o", canonicalOnion)
+            }
+            mailboxOnion?.takeIf { it.isNotBlank() }?.let {
+                builder.appendQueryParameter("m", it)
+            }
+            ephemeralRendezvousId?.takeIf { it.isNotBlank() }?.let {
+                builder.appendQueryParameter("r", it)
+            }
+            return builder.build().toString()
+        }
+
+        fun toEphemeralShareLink(): String {
+            val rendezvousId = ephemeralRendezvousId ?: UUID.randomUUID().toString()
+            return Uri.parse(SEAMLESS_URI_SCHEME).buildUpon()
+                .authority("add")
+                .appendQueryParameter("k", publicKey)
+                .appendQueryParameter("n", nickname)
+                .appendQueryParameter("r", rendezvousId)
+                .build()
+                .toString()
+        }
+
+        fun toQrData(): String {
+            val name = URLEncoder.encode(nickname, "UTF-8")
+            val canonicalOnion = canonicalizeOnionEndpoint(onionAddress)
+            val mailbox = mailboxOnion?.takeIf { it.isNotBlank() }?.let {
+                "|${URLEncoder.encode(it, "UTF-8")}"
+            } ?: ""
+            return if (requiresRendezvous()) {
+                "|$publicKey|$name$mailbox"
+            } else {
+                "${URLEncoder.encode(canonicalOnion, "UTF-8")}|$publicKey|$name$mailbox"
+            }
+        }
+
+        fun effectiveTrustState(): TorContactTrustState {
+            return trustState ?: TorContactTrustState.UNVERIFIED
+        }
+
+        fun safetyNumber(): String {
+            val input = "$publicKey|$onionAddress".toByteArray(Charsets.UTF_8)
+            val digest = MessageDigest.getInstance("SHA-256").digest(input)
+            return digest.joinToString("") { "%02x".format(it) }
+                .chunked(4)
+                .take(12)
+                .joinToString(" ")
+                .uppercase()
+        }
+
+        companion object {
+            fun canonicalizeOnionEndpoint(raw: String): String {
+                val clean = raw.trim()
+                    .removePrefix("http://")
+                    .removePrefix("https://")
+                    .trimEnd('/')
+                val host = clean.substringBefore(":").trim().lowercase()
+                if (host.isBlank() || host == UNRESOLVED_ONION.substringBefore(":")) return ""
+                val portPart = clean.substringAfter(":", "").trim()
+                val port = portPart.toIntOrNull()
+                val onionHost = when {
+                    host.endsWith(".onion") -> host
+                    host.length == 56 && host.all { it in 'a'..'z' || it in '2'..'7' } -> "$host.onion"
+                    else -> host
+                }
+                return if (port != null) "$onionHost:$port" else onionHost
+            }
+
+            fun fromShareableLink(uri: String): OnionContact? {
+                return try {
+                    if (!uri.startsWith(SEAMLESS_URI_SCHEME)) return null
+                    val parsed = Uri.parse(uri)
+                    val publicKey = parsed.getQueryParameter("k")?.trim().orEmpty()
+                    val nickname = parsed.getQueryParameter("n")?.trim().orEmpty()
+                    if (publicKey.isBlank() || nickname.isBlank()) return null
+
+                    val onionAddress = canonicalizeOnionEndpoint(parsed.getQueryParameter("o")?.trim().orEmpty())
+                    val mailboxOnion = parsed.getQueryParameter("m")?.trim()
+                    val rendezvousId = parsed.getQueryParameter("r")?.trim()
+                    val unresolved = onionAddress.isBlank() ||
+                        onionAddress.equals(UNRESOLVED_ONION, ignoreCase = true)
+
+                    OnionContact(
+                        id = UUID.randomUUID().toString(),
+                        nickname = nickname,
+                        onionAddress = if (unresolved) "" else onionAddress,
+                        publicKey = publicKey,
+                        needsRendezvous = unresolved,
+                        mailboxOnion = mailboxOnion,
+                        ephemeralRendezvousId = rendezvousId,
+                        trustState = TorContactTrustState.UNVERIFIED
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to parse contact link: ${e.message}")
+                    null
+                }
+            }
+
+            fun fromQrData(data: String): OnionContact? {
+                return try {
+                    if (data.startsWith(SEAMLESS_URI_SCHEME)) return fromShareableLink(data)
+
+                    val parts = data.split("|")
+                    if (parts.size < 3) return null
+
+                    val onion = canonicalizeOnionEndpoint(URLDecoder.decode(parts[0], "UTF-8").trim())
+                    val publicKey = parts[1].trim()
+                    val nickname = URLDecoder.decode(parts[2], "UTF-8").trim()
+                    val mailbox = parts.getOrNull(3)?.let {
+                        URLDecoder.decode(it, "UTF-8").trim()
+                    }?.takeIf { it.isNotBlank() }
+
+                    if (publicKey.isBlank() || nickname.isBlank()) return null
+                    val unresolved = onion.isBlank() || onion.equals(UNRESOLVED_ONION, ignoreCase = true)
+
+                    OnionContact(
+                        id = UUID.randomUUID().toString(),
+                        nickname = nickname,
+                        onionAddress = if (unresolved) "" else onion,
+                        publicKey = publicKey,
+                        needsRendezvous = unresolved,
+                        mailboxOnion = mailbox,
+                        trustState = TorContactTrustState.UNVERIFIED
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to parse QR contact: ${e.message}")
+                    null
+                }
+            }
+        }
+    }
+
+    fun getMyContactInfo(): OnionContact {
+        val onion = TorHiddenServiceManager.getInstance(context)
+            .getOnionAddress()
+            .let { OnionContact.canonicalizeOnionEndpoint(it) }
+            .takeIf { it.isNotBlank() && !it.equals(UNRESOLVED_ONION, ignoreCase = true) }
+            .orEmpty()
+        val publicKey = getMyPublicKeyHex()
+        val nickname = context.getSharedPreferences("bitchat_prefs", Context.MODE_PRIVATE)
+            .getString("nickname", null)
+            ?.takeIf { it.isNotBlank() }
+            ?: "anon-${publicKey.take(6).ifBlank { "tor" }}"
+
+        return OnionContact(
+            id = "me",
+            nickname = nickname,
+            onionAddress = onion,
+            publicKey = publicKey,
+            needsRendezvous = onion.isBlank(),
+            trustState = TorContactTrustState.VERIFIED,
+            verifiedAt = System.currentTimeMillis()
+        )
+    }
+
+    fun getMyShareableLink(): String = getMyContactInfo().toShareableLink()
+
+    fun getMyQrData(): String = getMyContactInfo().toQrData()
+
+    fun addContact(contact: OnionContact): Boolean {
+        val normalized = normalize(contact)
+        if (normalized.publicKey.isBlank() || normalized.nickname.isBlank()) return false
+
+        val samePublicKey = contacts.values.find {
+            it.publicKey.equals(normalized.publicKey, ignoreCase = true)
+        }
+        if (samePublicKey != null) {
+            if (!normalized.requiresRendezvous() &&
+                (samePublicKey.requiresRendezvous() ||
+                    normalizeOnion(samePublicKey.onionAddress) != normalizeOnion(normalized.onionAddress))
+            ) {
+                contacts[samePublicKey.id] = samePublicKey.copy(
+                    nickname = normalized.nickname,
+                    onionAddress = normalized.onionAddress,
+                    needsRendezvous = false,
+                    mailboxOnion = normalized.mailboxOnion ?: samePublicKey.mailboxOnion,
+                    ephemeralRendezvousId = normalized.ephemeralRendezvousId ?: samePublicKey.ephemeralRendezvousId,
+                    lastSeenOnline = System.currentTimeMillis()
+                )
+                saveContacts()
+                updateFlow()
+                Log.i(TAG, "Updated contact ${normalized.nickname} with current onion address")
+                return true
+            }
+            Log.w(TAG, "Contact with this public key already exists")
+            return false
+        }
+
+        val sameUnresolvedNickname = contacts.values.find {
+            it.requiresRendezvous() &&
+                it.nickname.equals(normalized.nickname, ignoreCase = true) &&
+                !normalized.requiresRendezvous()
+        }
+        if (sameUnresolvedNickname != null) {
+            contacts[sameUnresolvedNickname.id] = sameUnresolvedNickname.copy(
+                nickname = normalized.nickname,
+                onionAddress = normalized.onionAddress,
+                publicKey = normalized.publicKey,
+                needsRendezvous = false,
+                mailboxOnion = normalized.mailboxOnion ?: sameUnresolvedNickname.mailboxOnion,
+                ephemeralRendezvousId = normalized.ephemeralRendezvousId ?: sameUnresolvedNickname.ephemeralRendezvousId,
+                trustState = TorContactTrustState.UNVERIFIED,
+                verifiedAt = 0L
+            )
+            saveContacts()
+            updateFlow()
+            Log.i(TAG, "Upgraded unresolved contact ${normalized.nickname} with a real onion address")
+            return true
+        }
+
+        if (!normalized.requiresRendezvous()) {
+            val sameOnion = getContactByOnion(normalized.onionAddress)
+            if (sameOnion != null && !sameOnion.publicKey.equals(normalized.publicKey, ignoreCase = true)) {
+                contacts[sameOnion.id] = sameOnion.copy(
+                    nickname = normalized.nickname.ifBlank { sameOnion.nickname },
+                    publicKey = normalized.publicKey,
+                    mailboxOnion = normalized.mailboxOnion ?: sameOnion.mailboxOnion,
+                    lastSeenOnline = System.currentTimeMillis(),
+                    trustState = TorContactTrustState.KEY_CHANGED,
+                    verifiedAt = 0L
+                )
+                saveContacts()
+                updateFlow()
+                Log.w(TAG, "Key change detected for ${sameOnion.nickname}; updated key and marked unverified")
+                return false
+            }
+        }
+
+        contacts[normalized.id] = normalized
+        saveContacts()
+        updateFlow()
+        Log.i(TAG, "Added onion contact ${normalized.nickname}")
+        return true
+    }
+
+    fun addContactByPublicKeyOnly(publicKey: String, nickname: String): OnionContact? {
+        val contact = OnionContact(
+            id = UUID.randomUUID().toString(),
+            nickname = nickname.trim().ifBlank { "Unknown" },
+            onionAddress = "",
+            publicKey = publicKey.trim(),
+            needsRendezvous = true,
+            trustState = TorContactTrustState.UNVERIFIED
+        )
+        return if (addContact(contact)) contact else getContactByPublicKey(publicKey)
+    }
+
+    fun resolveRendezvousAddress(contactId: String, resolvedOnion: String) {
+        val contact = contacts[contactId] ?: return
+        contacts[contactId] = contact.copy(
+            onionAddress = resolvedOnion,
+            needsRendezvous = false,
+            lastSeenOnline = System.currentTimeMillis()
+        )
+        saveContacts()
+        updateFlow()
+    }
+
+    fun updateMailboxAddress(contactId: String, mailboxOnion: String) {
+        val contact = contacts[contactId] ?: return
+        contacts[contactId] = contact.copy(mailboxOnion = mailboxOnion)
+        saveContacts()
+        updateFlow()
+    }
+
+    fun updateLastSeen(contactId: String) {
+        val contact = contacts[contactId] ?: return
+        contacts[contactId] = contact.copy(lastSeenOnline = System.currentTimeMillis())
+        saveContacts()
+        updateFlow()
+    }
+
+    fun verifyContact(contactId: String) {
+        val contact = contacts[contactId] ?: return
+        contacts[contactId] = contact.copy(
+            trustState = TorContactTrustState.VERIFIED,
+            verifiedAt = System.currentTimeMillis()
+        )
+        saveContacts()
+        updateFlow()
+    }
+
+    fun blockContact(contactId: String) {
+        val contact = contacts[contactId] ?: return
+        contacts[contactId] = contact.copy(trustState = TorContactTrustState.BLOCKED)
+        saveContacts()
+        updateFlow()
+    }
+
+    fun markUnverified(contactId: String) {
+        val contact = contacts[contactId] ?: return
+        contacts[contactId] = contact.copy(
+            trustState = TorContactTrustState.UNVERIFIED,
+            verifiedAt = 0L
+        )
+        saveContacts()
+        updateFlow()
+    }
+
+    fun getMailboxContacts(): List<OnionContact> {
+        return getAllContacts().filter { !it.mailboxOnion.isNullOrBlank() }
+    }
+
+    fun getRendezvousContacts(): List<OnionContact> {
+        return getAllContacts().filter { it.requiresRendezvous() }
+    }
+
+    fun addContactFromLink(link: String): OnionContact? {
+        val contact = OnionContact.fromShareableLink(link) ?: return null
+        return if (addContact(contact)) contact else getContactByPublicKey(contact.publicKey)
+    }
+
+    fun addContactFromQr(qrData: String): OnionContact? {
+        val contact = OnionContact.fromQrData(qrData) ?: return null
+        return if (addContact(contact)) contact else getContactByPublicKey(contact.publicKey)
+    }
+
+    fun removeContact(contactId: String) {
+        contacts.remove(contactId)
+        saveContacts()
+        updateFlow()
+    }
+
+    fun updateContact(contact: OnionContact) {
+        contacts[contact.id] = normalize(contact)
+        saveContacts()
+        updateFlow()
+    }
+
+    fun getAllContacts(): List<OnionContact> {
+        return contacts.values.sortedByDescending { it.lastSeenOnline.takeIf { seen -> seen > 0L } ?: it.addedAt }
+    }
+
+    fun getContact(contactId: String): OnionContact? = contacts[contactId]
+
+    fun getContactByOnion(onionAddress: String): OnionContact? {
+        val wanted = normalizeOnion(onionAddress)
+        if (wanted.isBlank()) return null
+        return contacts.values.find { normalizeOnion(it.onionAddress) == wanted }
+    }
+
+    fun getContactByPublicKey(publicKey: String): OnionContact? {
+        return contacts.values.find { it.publicKey.equals(publicKey, ignoreCase = true) }
+    }
+
+    fun toggleFavorite(contactId: String) {
+        val contact = contacts[contactId] ?: return
+        contacts[contactId] = contact.copy(isFavorite = !contact.isFavorite)
+        saveContacts()
+        updateFlow()
+    }
+
+    fun searchContacts(query: String): List<OnionContact> {
+        val q = query.trim().lowercase()
+        if (q.isBlank()) return getAllContacts()
+        return getAllContacts().filter {
+            it.nickname.lowercase().contains(q) ||
+                it.onionAddress.lowercase().contains(q) ||
+                it.publicKey.lowercase().contains(q)
+        }
+    }
+
+    private fun loadContacts() {
+        try {
+            val json = prefs.getString(KEY_CONTACTS, null) ?: return
+            val type = object : TypeToken<List<OnionContact>>() {}.type
+            val loaded: List<OnionContact> = gson.fromJson(json, type) ?: emptyList()
+            contacts.clear()
+            loaded.map { normalize(it) }.forEach { contacts[it.id] = it }
+            updateFlow()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load onion contacts: ${e.message}")
+        }
+    }
+
+    private fun saveContacts() {
+        try {
+            prefs.edit().putString(KEY_CONTACTS, gson.toJson(getAllContacts())).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save onion contacts: ${e.message}")
+        }
+    }
+
+    private fun updateFlow() {
+        _contactsFlow.value = getAllContacts()
+    }
+
+    private fun normalize(contact: OnionContact): OnionContact {
+        val canonicalOnion = OnionContact.canonicalizeOnionEndpoint(contact.onionAddress)
+        val unresolved = canonicalOnion.isBlank() ||
+            canonicalOnion.equals(UNRESOLVED_ONION, ignoreCase = true)
+        return contact.copy(
+            onionAddress = if (unresolved) "" else canonicalOnion,
+            publicKey = contact.publicKey.trim(),
+            nickname = contact.nickname.trim().ifBlank { "Unknown" },
+            needsRendezvous = unresolved,
+            trustState = contact.trustState ?: TorContactTrustState.UNVERIFIED
+        )
+    }
+
+    private fun normalizeOnion(onionAddress: String): String {
+        return OnionContact.canonicalizeOnionEndpoint(onionAddress)
+            .lowercase()
+            .takeIf { it != UNRESOLVED_ONION }
+            .orEmpty()
+    }
+
+    private fun getMyPublicKeyHex(): String {
+        val encryptionService = EncryptionService(context)
+        val key = encryptionService.getStaticPublicKey()
+            ?: ByteArray(0)
+        return key.joinToString("") { "%02x".format(it) }
+    }
+
+    @Suppress("unused")
+    private fun hexStringToByteArray(hex: String): ByteArray {
+        val clean = hex.filter { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
+        return clean.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+    }
+}

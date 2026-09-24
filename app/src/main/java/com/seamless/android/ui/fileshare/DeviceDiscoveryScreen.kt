@@ -1,0 +1,1037 @@
+package com.seamless.android.ui.fileshare
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.*
+import com.seamless.android.ui.theme.SeamlessCyan
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.lifecycle.viewmodel.compose.viewModel
+import android.net.wifi.p2p.WifiP2pDevice
+import androidx.compose.runtime.livedata.observeAsState
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.Manifest
+import android.os.Build
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
+import android.content.pm.PackageManager
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
+import com.seamless.android.service.HyperDropIdentity
+
+/**
+ * Screen for discovering and connecting to nearby devices for file sharing
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DeviceDiscoveryScreen(
+    onDeviceSelected: (String) -> Unit,
+    onBackClick: () -> Unit,
+    isHosting: Boolean = false,
+    viewModel: FileShareViewModel = viewModel()
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+
+    // Permission state
+    var permissionsGranted by remember { mutableStateOf(false) }
+    var showPermissionRationale by remember { mutableStateOf(false) }
+
+    // Define the permissions needed based on Android version
+    val requiredPermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        arrayOf(Manifest.permission.NEARBY_WIFI_DEVICES)
+    } else {
+        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
+
+    // Permission launcher
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        permissionsGranted = permissions.all { it.value }
+        if (permissionsGranted) {
+            if (isHosting) {
+                viewModel.startHosting()
+            } else {
+                viewModel.startDeviceDiscovery()
+            }
+        } else {
+            showPermissionRationale = true
+        }
+    }
+
+    // Check permissions on start
+    LaunchedEffect(Unit) {
+        val allPermissionsGranted = requiredPermissions.all { permission ->
+            ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+        }
+        
+        if (allPermissionsGranted) {
+            permissionsGranted = true
+            if (isHosting) {
+                viewModel.startHosting()
+            } else {
+                viewModel.startDeviceDiscovery()
+            }
+        } else {
+            permissionLauncher.launch(requiredPermissions)
+        }
+    }
+    
+    // Determine dark mode state reliably
+    val themePref by com.seamless.android.ui.theme.ThemePreferenceManager.themeFlow.collectAsState(initial = com.seamless.android.ui.theme.ThemePreference.System)
+    val isDark = when (themePref) {
+        com.seamless.android.ui.theme.ThemePreference.Dark -> true
+        com.seamless.android.ui.theme.ThemePreference.Light -> false
+        com.seamless.android.ui.theme.ThemePreference.System -> androidx.compose.foundation.isSystemInDarkTheme()
+    }
+
+    // Observe ViewModel state
+    val isDiscovering by viewModel.isDiscovering.observeAsState(false)
+    val discoveredDevices by viewModel.discoveredDevices.observeAsState(emptyList())
+    val connectionInfo by viewModel.connectionInfo.observeAsState()
+    val statusMessage by viewModel.statusMessage.observeAsState()
+    val errorMessage by viewModel.errorMessage.observeAsState()
+    val pendingFile by viewModel.pendingFile.observeAsState()
+    val currentTransfer by viewModel.currentTransfer.observeAsState()
+
+    // Observe incoming file requests (Secure Handover)
+    val incomingRequest by viewModel.incomingRequest.observeAsState()
+    
+    // Observe batch transfer state
+    val incomingBatchRequest by viewModel.incomingBatchRequest.observeAsState()
+    val batchTransferFiles by viewModel.batchTransferFiles.observeAsState(emptyList())
+    val currentBatchFileIndex by viewModel.currentBatchFileIndex.observeAsState(0)
+    val isBatchTransferComplete by viewModel.isBatchTransferComplete.observeAsState(false)
+
+    // Stop discovery when screen closes
+    DisposableEffect(Unit) {
+        onDispose {
+            viewModel.stopDeviceDiscovery()
+        }
+    }
+
+    // Observe transfer screen state for showing progress screens
+    val transferScreenState by viewModel.transferScreenState.observeAsState(TransferScreenState.NONE)
+    val lastTransferResult by viewModel.lastTransferResult.observeAsState()
+    
+    // Determine if transfer is complete or failed
+    val isComplete = lastTransferResult?.success == true
+    val isFailed = lastTransferResult?.success == false
+
+    // Show full-screen progress screens based on transfer state
+    when (transferScreenState) {
+        TransferScreenState.ANIMATING_SEND -> {
+            HyperDropSenderAnimation(
+                onAnimationEnd = { viewModel.onAnimationCompleted() },
+                progress = currentTransfer?.progress ?: 0,
+                fileName = currentTransfer?.fileName ?: "",
+                fileSize = currentTransfer?.totalBytes ?: 0L
+            )
+            return // Don't show device discovery
+        }
+        
+        TransferScreenState.ANIMATING_RECEIVE -> {
+            HyperDropReceiverAnimation(
+                onAnimationEnd = { viewModel.onAnimationCompleted() },
+                progress = currentTransfer?.progress ?: 0,
+                fileName = currentTransfer?.fileName ?: "",
+                fileSize = currentTransfer?.totalBytes ?: 0L
+            )
+            return // Don't show device discovery
+        }
+
+        TransferScreenState.SENDING -> {
+            SendProgressScreen(
+                fileName = currentTransfer?.fileName ?: lastTransferResult?.fileName ?: "Unknown",
+                fileSize = currentTransfer?.totalBytes ?: lastTransferResult?.fileSize ?: 0L,
+                progress = currentTransfer?.progress ?: if (isComplete) 100 else 0,
+                bytesTransferred = currentTransfer?.bytesTransferred ?: 0L,
+                isComplete = isComplete,
+                isFailed = isFailed,
+                errorMessage = lastTransferResult?.errorMessage ?: errorMessage,
+                speedBytesPerSec = currentTransfer?.speedBytesPerSec ?: 0L,
+                estimatedSecondsRemaining = currentTransfer?.estimatedSecondsRemaining ?: -1,
+                fileIndex = currentTransfer?.fileIndex ?: 1,
+                totalFiles = currentTransfer?.totalFiles ?: 1,
+                onCancel = {
+                    viewModel.disconnect()
+                    viewModel.dismissTransferScreen()
+                },
+                onDone = {
+                    viewModel.dismissTransferScreen()
+                    onBackClick()
+                },
+                onRetry = null
+            )
+            return // Don't show device discovery
+        }
+        
+        TransferScreenState.RECEIVING -> {
+            // Use BatchReceiveProgressScreen if we have batch files
+            if (batchTransferFiles.isNotEmpty()) {
+                BatchReceiveProgressScreen(
+                    files = batchTransferFiles,
+                    currentFileIndex = currentBatchFileIndex,
+                    isBatchComplete = isBatchTransferComplete,
+                    isFailed = isFailed,
+                    senderName = incomingBatchRequest?.senderName ?: "Unknown Device",
+                    showAcceptReject = false,
+                    onCancel = {
+                        viewModel.resetBatchTransfer()
+                        viewModel.disconnect()
+                        viewModel.dismissTransferScreen()
+                    },
+                    onDone = {
+                        viewModel.resetBatchTransfer()
+                        viewModel.dismissTransferScreen()
+                        onBackClick()
+                    }
+                )
+            } else {
+                // Fallback to single-file screen
+                ReceiveProgressScreen(
+                    fileName = currentTransfer?.fileName ?: lastTransferResult?.fileName ?: incomingRequest?.fileName,
+                    fileSize = currentTransfer?.totalBytes ?: lastTransferResult?.fileSize ?: incomingRequest?.fileSize ?: 0L,
+                    progress = currentTransfer?.progress ?: if (isComplete) 100 else 0,
+                    bytesTransferred = currentTransfer?.bytesTransferred ?: 0L,
+                    isWaitingForTransfer = false,
+                    isReceiving = true,
+                    isComplete = isComplete,
+                    isFailed = isFailed,
+                    errorMessage = lastTransferResult?.errorMessage ?: errorMessage,
+                    showAcceptReject = false,
+                    speedBytesPerSec = currentTransfer?.speedBytesPerSec ?: 0L,
+                    estimatedSecondsRemaining = currentTransfer?.estimatedSecondsRemaining ?: -1,
+                    fileIndex = currentTransfer?.fileIndex ?: 1,
+                    totalFiles = currentTransfer?.totalFiles ?: 1,
+                    onAccept = {},
+                    onReject = {},
+                    onCancel = {
+                        viewModel.disconnect()
+                        viewModel.dismissTransferScreen()
+                    },
+                    onDone = {
+                        viewModel.dismissTransferScreen()
+                        onBackClick()
+                    },
+                    onOpenFile = null
+                )
+            }
+            return // Don't show device discovery
+        }
+        TransferScreenState.WAITING -> {
+            // Use BatchReceiveProgressScreen if we have a batch request
+            if (incomingBatchRequest != null && incomingBatchRequest!!.files.size > 1) {
+                BatchReceiveProgressScreen(
+                    files = incomingBatchRequest!!.files,
+                    currentFileIndex = 0,
+                    isBatchComplete = false,
+                    isFailed = false,
+                    senderName = incomingBatchRequest!!.senderName,
+                    showAcceptReject = true,
+                    onAccept = { viewModel.acceptBatchTransfer() },
+                    onReject = { viewModel.rejectBatchTransfer() },
+                    onCancel = {
+                        viewModel.rejectBatchTransfer()
+                        viewModel.disconnect()
+                        viewModel.dismissTransferScreen()
+                        onBackClick()
+                    },
+                    onDone = {
+                        viewModel.dismissTransferScreen()
+                        onBackClick()
+                    }
+                )
+            } else {
+                // Fallback to single-file screen
+                ReceiveProgressScreen(
+                    fileName = incomingRequest?.fileName,
+                    fileSize = incomingRequest?.fileSize ?: 0L,
+                    progress = 0,
+                    bytesTransferred = 0L,
+                    isWaitingForTransfer = true,
+                    isReceiving = false,
+                    isComplete = false,
+                    isFailed = false,
+                    errorMessage = null,
+                    showAcceptReject = incomingRequest != null,
+                    onAccept = { viewModel.acceptIncomingTransfer() },
+                    onReject = { viewModel.rejectIncomingTransfer() },
+                    onCancel = {
+                        viewModel.disconnect()
+                        viewModel.dismissTransferScreen()
+                        onBackClick()
+                    },
+                    onDone = {
+                        viewModel.dismissTransferScreen()
+                        onBackClick()
+                    },
+                    onOpenFile = null
+                )
+            }
+            return // Don't show device discovery
+        }
+        TransferScreenState.NONE -> {
+            // Continue to show device discovery screen below
+        }
+    }
+
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // Show status messages as snackbars
+    LaunchedEffect(statusMessage) {
+        statusMessage?.let {
+            snackbarHostState.showSnackbar(
+                message = it,
+                duration = SnackbarDuration.Short
+            )
+        }
+    }
+
+    // Show error messages as snackbars
+    LaunchedEffect(errorMessage) {
+        errorMessage?.let {
+            snackbarHostState.showSnackbar(
+                message = it,
+                duration = SnackbarDuration.Long,
+                withDismissAction = true
+            )
+        }
+    }
+
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        topBar = {
+            TopAppBar(
+                title = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = onBackClick,
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            @Suppress("DEPRECATION")
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                                tint = colorScheme.primary
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        Text(
+                            text = "Find Devices",
+                            style = HyperDropTypography.DisplayMedium,
+                            color = HyperDropColors.TextPrimary
+                        )
+                    }
+                },
+                actions = {
+                    // Refresh button
+                    IconButton(
+                        onClick = {
+                            viewModel.stopDeviceDiscovery()
+                            viewModel.startDeviceDiscovery()
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Refresh,
+                            contentDescription = "Refresh",
+                            tint = HyperDropColors.AccentBlue
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Color.Transparent
+                )
+            )
+        }
+    ) { paddingValues ->
+        // Premium gradient background matching the global theme
+        val backgroundGradient = Brush.verticalGradient(
+            colors = if (isDark) {
+                listOf(
+                    com.seamless.android.ui.theme.SeamlessColors.DarkGradientBackgroundStart,
+                    com.seamless.android.ui.theme.SeamlessColors.DarkGradientBackgroundEnd
+                )
+            } else {
+                 listOf(
+                    com.seamless.android.ui.theme.SeamlessColors.LightBackground,
+                    com.seamless.android.ui.theme.SeamlessColors.LightBackground
+                )
+            }
+        )
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(backgroundGradient)
+                .padding(paddingValues)
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize()
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 24.dp, bottom = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val radarStyle = if (isHosting) com.seamless.android.ui.components.RadarStyle.RECEIVER else com.seamless.android.ui.components.RadarStyle.SENDER
+                    val title = if (isHosting) stringResource(com.seamless.android.R.string.waiting_for_sender) else if (isDiscovering) stringResource(com.seamless.android.R.string.scanning_devices) else stringResource(com.seamless.android.R.string.ready_to_scan)
+                    val subtitle = if (isHosting) stringResource(com.seamless.android.R.string.ask_sender) else if (isDiscovering) {
+                        if (discoveredDevices.isNotEmpty()) "${discoveredDevices.size} device${if (discoveredDevices.size > 1) "s" else ""} nearby"
+                        else stringResource(com.seamless.android.R.string.ensure_wifi_on)
+                    } else stringResource(com.seamless.android.R.string.tap_refresh)
+                    
+                    com.seamless.android.ui.components.RadarScanner(
+                        isScanning = isDiscovering || isHosting,
+                        title = title,
+                        subtitle = subtitle,
+                        style = radarStyle,
+                        deviceCount = discoveredDevices.size
+                    )
+                }
+
+                // This Device card (AirDrop/Quick Share inspired)
+                // Shows the user's quirky alias so senders know who they're connecting to
+                if (isHosting) {
+                    val deviceAlias = remember { HyperDropIdentity.getAlias(context) }
+                    val deviceModel = remember { HyperDropIdentity.getDeviceModel() }
+                    
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = HyperDropColors.CardSurface.copy(alpha = 0.9f)
+                        ),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Device icon with glow
+                            HyperDropIconCircle(
+                                icon = Icons.Filled.Person,
+                                tint = HyperDropColors.PrimaryCyan,
+                                backgroundColor = HyperDropColors.PrimaryCyan.copy(alpha = 0.15f),
+                                size = 56.dp,
+                                iconSize = 32.dp,
+                                showGlow = true
+                            )
+                            
+                            Spacer(modifier = Modifier.width(16.dp))
+                            
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "This Device",
+                                    style = HyperDropTypography.Caption.copy(
+                                        color = HyperDropColors.PrimaryCyan.copy(alpha = 0.8f)
+                                    )
+                                )
+                                Text(
+                                    text = deviceAlias,
+                                    style = HyperDropTypography.TitleMedium
+                                )
+                                Text(
+                                    text = deviceModel,
+                                    style = HyperDropTypography.BodySmall
+                                )
+                            }
+                            
+                            // Visibility indicator
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(12.dp)
+                                        .background(HyperDropColors.SuccessGreen, CircleShape)
+                                )
+                                Text(
+                                    text = "Visible",
+                                    style = HyperDropTypography.Caption.copy(
+                                        color = HyperDropColors.SuccessGreen.copy(alpha = 0.8f)
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Connection status (only show when connected)
+                connectionInfo?.let { info ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = HyperDropColors.PrimaryCyan.copy(alpha = 0.15f)
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Wifi,
+                                contentDescription = null,
+                                tint = HyperDropColors.PrimaryCyan,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = stringResource(com.seamless.android.R.string.connected),
+                                    style = HyperDropTypography.LabelBold.copy(
+                                        color = HyperDropColors.PrimaryCyan
+                                    )
+                                )
+                                Text(
+                                    text = if (info.isGroupOwner) stringResource(com.seamless.android.R.string.group_owner) else stringResource(com.seamless.android.R.string.client),
+                                    style = HyperDropTypography.BodySmall.copy(
+                                        color = HyperDropColors.TextTertiary
+                                    )
+                                )
+                            }
+                            TextButton(onClick = { viewModel.disconnect() }) {
+                                Text(stringResource(com.seamless.android.R.string.disconnect), color = HyperDropColors.PrimaryCyan)
+                            }
+                        }
+                    }
+                }
+
+                // Pending File Send Action
+                if (connectionInfo != null && pendingFile != null) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = HyperDropColors.PrimaryCyan.copy(alpha = 0.15f)
+                        ),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp)
+                        ) {
+                            Text(
+                                text = stringResource(com.seamless.android.R.string.ready_to_send),
+                                style = HyperDropTypography.Caption.copy(
+                                    color = HyperDropColors.PrimaryCyan
+                                )
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = pendingFile?.fileName ?: stringResource(com.seamless.android.R.string.unknown),
+                                style = HyperDropTypography.BodyLarge.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = HyperDropColors.TextPrimary
+                                )
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            PremiumButton(
+                                text = stringResource(com.seamless.android.R.string.send_now),
+                                onClick = { viewModel.sendPendingFile() },
+                                icon = Icons.AutoMirrored.Filled.Send,
+                                color = HyperDropColors.PrimaryCyan
+                            )
+                        }
+                    }
+                }
+
+                // Device list
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (discoveredDevices.isEmpty() && !isDiscovering) {
+                        item {
+                            // Premium empty state with pulsing radar animation
+                            EmptyDeviceState(
+                                onScanAgain = {
+                                    viewModel.stopDeviceDiscovery()
+                                    viewModel.startDeviceDiscovery()
+                                }
+                            )
+                        }
+                    } else {
+                        items(discoveredDevices) { device ->
+                            DeviceListItem(
+                                device = device,
+                                onClick = {
+                                    viewModel.connectToDevice(device.deviceAddress)
+                                    onDeviceSelected(device.deviceAddress)
+                                },
+                                isConnected = device.status == WifiP2pDevice.CONNECTED
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Incoming File Request — Custom bottom-sheet style card with slide animation
+            val showIncomingRequest = incomingRequest != null
+            AnimatedVisibility(
+                visible = showIncomingRequest,
+                enter = slideInVertically { it },
+                exit = slideOutVertically { it },
+                modifier = Modifier.align(Alignment.BottomCenter)
+            ) {
+                incomingRequest?.let { request ->
+                    val fileName = request.fileName ?: "Unknown file"
+                    val fileSize = request.fileSize ?: 0L
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
+                        GlassCard(
+                            modifier = Modifier.fillMaxWidth(),
+                            showShimmerBorder = true
+                        ) {
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                // Drag handle
+                                Box(
+                                    modifier = Modifier
+                                        .width(40.dp)
+                                        .height(4.dp)
+                                        .clip(RoundedCornerShape(2.dp))
+                                        .background(HyperDropColors.TextDisabled)
+                                )
+
+                                Spacer(modifier = Modifier.height(HyperDropSpacing.lg))
+
+                                // Title
+                                Text(
+                                    text = "Incoming File Request",
+                                    style = HyperDropTypography.TitleLarge
+                                )
+
+                                Spacer(modifier = Modifier.height(HyperDropSpacing.lg))
+
+                                // File info row
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    // File type icon
+                                    HyperDropIconCircle(
+                                        icon = HyperDropUtils.getFileTypeIcon(fileName),
+                                        tint = HyperDropUtils.getFileTypeColor(fileName),
+                                        backgroundColor = HyperDropUtils.getFileTypeColor(fileName).copy(alpha = 0.12f),
+                                        showGlow = true
+                                    )
+
+                                    Spacer(modifier = Modifier.width(HyperDropSpacing.md))
+
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Device wants to send you a file:",
+                                            style = HyperDropTypography.BodySmall
+                                        )
+                                        Spacer(modifier = Modifier.height(HyperDropSpacing.xs))
+                                        Text(
+                                            text = HyperDropUtils.formatFileName(fileName),
+                                            style = HyperDropTypography.TitleMedium
+                                        )
+                                        Text(
+                                            text = HyperDropUtils.formatFileSize(fileSize),
+                                            style = HyperDropTypography.BodySmall
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(HyperDropSpacing.xxl))
+
+                                // Accept button (PremiumButton)
+                                PremiumButton(
+                                    text = "Accept",
+                                    onClick = { viewModel.acceptIncomingTransfer() },
+                                    icon = Icons.Filled.Download,
+                                    color = HyperDropColors.SuccessGreen
+                                )
+
+                                Spacer(modifier = Modifier.height(HyperDropSpacing.sm))
+
+                                // Decline button (TextButton)
+                                TextButton(
+                                    onClick = { viewModel.rejectIncomingTransfer() },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = "Decline",
+                                        color = HyperDropColors.ErrorRed,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Premium empty state with pulsing radar animation
+ */
+@Composable
+private fun EmptyDeviceState(
+    onScanAgain: () -> Unit
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "empty_radar")
+
+    // Pulsing radar circles
+    val radarPulse1 by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "radar1"
+    )
+    val radarPulse2 by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2000, delayMillis = 700, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "radar2"
+    )
+    val radarPulse3 by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2000, delayMillis = 1400, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "radar3"
+    )
+
+    // Animated ellipsis
+    val ellipsisPhase by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 4f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "ellipsis"
+    )
+    val dots = ".".repeat(ellipsisPhase.toInt().coerceIn(0, 3))
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(32.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Pulsing radar animation
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier.size(120.dp)
+            ) {
+                // Expanding and fading radar circles
+                Canvas(modifier = Modifier.size(120.dp)) {
+                    val center = Offset(size.width / 2, size.height / 2)
+                    val maxRadius = size.minDimension / 2
+
+                    listOf(radarPulse1, radarPulse2, radarPulse3).forEach { pulse ->
+                        val radius = maxRadius * pulse
+                        val alpha = (1f - pulse) * 0.5f
+                        drawCircle(
+                            color = HyperDropColors.AccentBlue.copy(alpha = alpha),
+                            radius = radius,
+                            center = center,
+                            style = Stroke(width = 2.dp.toPx())
+                        )
+                    }
+                }
+
+                // Center icon
+                HyperDropIconCircle(
+                    icon = Icons.Outlined.Devices,
+                    tint = HyperDropColors.AccentBlue,
+                    backgroundColor = HyperDropColors.AccentBlue.copy(alpha = 0.12f),
+                    size = 52.dp,
+                    iconSize = 28.dp,
+                    showGlow = true
+                )
+            }
+
+            Text(
+                text = "Looking for nearby devices$dots",
+                style = HyperDropTypography.TitleLarge,
+                color = HyperDropColors.TextPrimary
+            )
+            Text(
+                text = "Make sure the other device has HyperDrop open",
+                style = HyperDropTypography.BodyMedium,
+                color = HyperDropColors.TextTertiary,
+                textAlign = TextAlign.Center
+            )
+            
+            Spacer(modifier = Modifier.height(8.dp))
+
+            PremiumButton(
+                text = stringResource(com.seamless.android.R.string.scan_again),
+                onClick = onScanAgain,
+                icon = Icons.Filled.Refresh,
+                color = HyperDropColors.AccentBlue
+            )
+        }
+    }
+}
+
+
+@Composable
+private fun DeviceListItem(
+    device: WifiP2pDevice,
+    onClick: () -> Unit,
+    isConnected: Boolean = false
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "signal")
+    val signalPulse by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "signalPulse"
+    )
+
+    val cardColor by animateColorAsState(
+        targetValue = if (isConnected && device.status == WifiP2pDevice.CONNECTED)
+            HyperDropColors.PrimaryCyan.copy(alpha = 0.15f)
+        else
+            HyperDropColors.CardSurfaceDark.copy(alpha = 0.7f),
+        animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+        label = "deviceCardColor"
+    )
+
+    val cardScale by animateFloatAsState(
+        targetValue = if (isConnected && device.status == WifiP2pDevice.CONNECTED) 1.02f else 1f,
+        animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+        label = "deviceCardScale"
+    )
+
+    val borderColor = if (isConnected && device.status == WifiP2pDevice.CONNECTED)
+        HyperDropColors.PrimaryCyan.copy(alpha = 0.4f)
+    else
+        HyperDropColors.BorderSubtle
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .scale(cardScale)
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(20.dp),
+        color = Color.Transparent,
+        border = androidx.compose.foundation.BorderStroke(1.dp, borderColor)
+    ) {
+        Box(
+            modifier = Modifier.background(cardColor)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Device icon with radial glow background
+                HyperDropIconCircle(
+                    icon = Icons.Filled.Smartphone,
+                    tint = HyperDropColors.PrimaryCyan,
+                    backgroundColor = HyperDropColors.PrimaryCyan.copy(alpha = 0.1f),
+                    size = HyperDropSpacing.iconCircleSize,
+                    iconSize = HyperDropSpacing.iconSize,
+                    showGlow = true
+                )
+
+                Spacer(modifier = Modifier.width(14.dp))
+
+                Column(
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        text = device.deviceName.ifEmpty { stringResource(com.seamless.android.R.string.unknown_device) },
+                        style = HyperDropTypography.BodyLarge.copy(
+                            fontWeight = FontWeight.SemiBold,
+                            color = HyperDropColors.TextPrimary
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = getDeviceStatusText(device),
+                        style = HyperDropTypography.BodySmall
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        // Animated signal strength bars
+                        val isAvailable = device.status == WifiP2pDevice.AVAILABLE || device.status == WifiP2pDevice.CONNECTED
+                        val barColor = if (device.status == WifiP2pDevice.CONNECTED) HyperDropColors.PrimaryCyan
+                                       else if (isAvailable) HyperDropColors.AccentBlue
+                                       else HyperDropColors.ErrorRed
+                        
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            verticalAlignment = Alignment.Bottom
+                        ) {
+                            // 3 signal bars with staggered animation
+                            for (i in 0..2) {
+                                val barAlpha = if (isAvailable) {
+                                    if (i == 2) signalPulse * 0.8f else 1f
+                                } else 0.3f
+                                Box(
+                                    modifier = Modifier
+                                        .width(4.dp)
+                                        .height((8 + i * 5).dp)
+                                        .background(
+                                            color = barColor.copy(alpha = barAlpha),
+                                            shape = RoundedCornerShape(2.dp)
+                                        )
+                                )
+                            }
+                        }
+                        
+                        Spacer(modifier = Modifier.width(4.dp))
+                        
+                        Text(
+                            text = getDeviceStatus(device),
+                            style = HyperDropTypography.Caption.copy(
+                                color = barColor.copy(alpha = 0.8f)
+                            )
+                        )
+                    }
+                }
+
+                if (isConnected && device.status == WifiP2pDevice.CONNECTED) {
+                    Icon(
+                        imageVector = Icons.Filled.CheckCircle,
+                        contentDescription = "Connected",
+                        tint = HyperDropColors.PrimaryCyan,
+                        modifier = Modifier.size(24.dp)
+                    )
+                } else {
+                    // Glowing arrow
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(HyperDropColors.PrimaryCyan.copy(alpha = 0.1f))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.ChevronRight,
+                            contentDescription = "Connect",
+                            tint = HyperDropColors.PrimaryCyan.copy(alpha = 0.8f),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun getDeviceStatus(device: WifiP2pDevice): String {
+    return when (device.status) {
+        WifiP2pDevice.AVAILABLE -> stringResource(com.seamless.android.R.string.device_available)
+        WifiP2pDevice.INVITED -> stringResource(com.seamless.android.R.string.device_invited)
+        WifiP2pDevice.CONNECTED -> stringResource(com.seamless.android.R.string.device_connected)
+        WifiP2pDevice.FAILED -> stringResource(com.seamless.android.R.string.device_failed)
+        WifiP2pDevice.UNAVAILABLE -> stringResource(com.seamless.android.R.string.device_unavailable)
+        else -> stringResource(com.seamless.android.R.string.unknown)
+    }
+}
+
+@Composable
+private fun getDeviceStatusText(device: WifiP2pDevice): String {
+    // Wi-Fi P2P primaryDeviceType uses WPS format: "category-OUI-subcategory"
+    // Category 10 = Phone, 7 = Display, 1 = Computer, 3 = Printer, 9 = Camera
+    val category = device.primaryDeviceType?.split("-")?.firstOrNull()?.toIntOrNull()
+    return when (category) {
+        1 -> stringResource(com.seamless.android.R.string.device_type_computer)
+        10 -> stringResource(com.seamless.android.R.string.device_type_phone)
+        9 -> stringResource(com.seamless.android.R.string.device_type_tablet) // Closest match
+        else -> {
+            // Fallback: try matching device name patterns
+            val name = device.deviceName.lowercase()
+            when {
+                name.contains("phone") || name.contains("pixel") || name.contains("galaxy") || name.contains("iphone") -> stringResource(com.seamless.android.R.string.device_type_phone)
+                name.contains("tablet") || name.contains("pad") -> stringResource(com.seamless.android.R.string.device_type_tablet)
+                name.contains("pc") || name.contains("laptop") || name.contains("computer") -> stringResource(com.seamless.android.R.string.device_type_computer)
+                else -> stringResource(com.seamless.android.R.string.unknown_device)
+            }
+        }
+    }
+}
