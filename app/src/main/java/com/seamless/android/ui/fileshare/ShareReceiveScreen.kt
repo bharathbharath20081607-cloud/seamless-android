@@ -3,6 +3,7 @@ package com.seamless.android.ui.fileshare
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -89,8 +90,8 @@ fun ShareReceiveScreen(
                     title = stringResource(R.string.share_things),
                     subtitle = stringResource(R.string.share_things_desc),
                     icon = Icons.Filled.Share,
-                    primaryColor = HyperDropColors.PrimaryCyan,
-                    secondaryColor = HyperDropColors.AccentBlue,
+                    primaryColor = HyperDropColors.TextPrimary,
+                    secondaryColor = HyperDropColors.TextSecondary,
                     onClick = onShareThingsClick
                 )
 
@@ -101,8 +102,8 @@ fun ShareReceiveScreen(
                     title = stringResource(R.string.receive_things),
                     subtitle = stringResource(R.string.receive_things_desc),
                     icon = Icons.Filled.Download,
-                    primaryColor = HyperDropColors.SecondaryTeal,
-                    secondaryColor = HyperDropColors.SecondaryTeal,
+                    primaryColor = HyperDropColors.TextPrimary,
+                    secondaryColor = HyperDropColors.TextSecondary,
                     onClick = onReceiveThingsClick
                 )
                 
@@ -276,37 +277,21 @@ private fun HyperDropActionCard(
                 .offset(x = (-HyperDropSpacing.cardPadding))
                 .offset(y = (-HyperDropSpacing.cardPadding))
         ) {
-            // Vertical gradient accent strip (6dp wide)
+            // Specular light accent
             Box(
                 modifier = Modifier
-                    .width(6.dp)
+                    .width(3.dp)
                     .fillMaxHeight()
                     .background(
                         Brush.verticalGradient(
                             colors = listOf(
-                                primaryColor,
-                                secondaryColor,
-                                primaryColor.copy(alpha = 0.5f)
+                                Color.White.copy(alpha = 0.5f),
+                                Color.White.copy(alpha = 0.1f),
+                                Color.Transparent
                             )
                         )
                     )
             )
-            
-            // Glow effect
-            Canvas(
-                modifier = Modifier.fillMaxSize()
-            ) {
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            primaryColor.copy(alpha = glowAlpha * 0.3f),
-                            Color.Transparent
-                        ),
-                        center = Offset(size.width * 0.9f, size.height / 2),
-                        radius = 200f
-                    )
-                )
-            }
             
             Row(
                 modifier = Modifier
@@ -497,7 +482,8 @@ private fun DeviceIdentityChip() {
         modifier = Modifier
             .scale(chipScale)
             .clip(RoundedCornerShape(24.dp))
-            .background(HyperDropColors.CardSurface.copy(alpha = 0.8f))
+            .background(HyperDropColors.CardSurface.copy(alpha = 0.85f))
+            .border(1.dp, HyperDropColors.BorderSubtle, RoundedCornerShape(24.dp))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null

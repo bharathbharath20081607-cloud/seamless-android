@@ -44,26 +44,26 @@ import com.seamless.android.ui.MessageInput
 import kotlin.math.cos
 import kotlin.math.sin
 
-// Premium Mesh Design Tokens
+// Premium Mesh Design Tokens — Obsidian & Optical Light
 private object MeshColors {
-    // Public mesh - Space Cyan
-    val PrimaryCyan = Color(0xFF00E5FF)
-    val PrimaryCyanDim = Color(0xFF00E5FF).copy(alpha = 0.15f)
-    // Private mesh - Electric Violet
-    val PrivateViolet = Color(0xFFB388FF)
-    val PrivateMagenta = Color(0xFFE040FB)
-    val PrivateDarkBg = Color(0xFF0D0221)
-    val PrivateCardBg = Color(0xFF1A0A3E)
+    // Optical Monochrome
+    val PrimaryCyan = Color(0xFFFFFFFF)              // Pure Optical White
+    val PrimaryCyanDim = Color.White.copy(alpha = 0.12f)
+    // Private mesh - Titanium & Lunar Light
+    val PrivateViolet = Color(0xFFFFFFFF)            // Optical White
+    val PrivateMagenta = Color(0xFFE5E5EA)           // Lunar Silver
+    val PrivateDarkBg = Color(0xFF070709)            // Deep Obsidian
+    val PrivateCardBg = Color(0xFF101014)            // Titanium Card Surface
     // Shared
-    val GlassWhite = Color.White.copy(alpha = 0.06f)
-    val GlassBorder = Color.White.copy(alpha = 0.12f)
+    val GlassWhite = Color.White.copy(alpha = 0.04f) // Translucent glass fill
+    val GlassBorder = Color.White.copy(alpha = 0.08f)// 1px hairline border
     val TextPrimary = Color.White
-    val TextSecondary = Color.White.copy(alpha = 0.7f)
-    val TextMuted = Color.White.copy(alpha = 0.4f)
-    val SuccessGreen = Color(0xFF00E676)
-    val ErrorRed = Color(0xFFFF5252)
-    val DarkBg = Color(0xFF050510)
-    val SpaceNavy = Color(0xFF0A1025)
+    val TextSecondary = Color(0xFFB0B0B8)            // Titanium secondary
+    val TextMuted = Color(0xFF6B6B75)                // Muted tertiary
+    val SuccessGreen = Color(0xFF30D158)             // Apple System Emerald
+    val ErrorRed = Color(0xFFFF453A)                 // Apple System Coral
+    val DarkBg = Color(0xFF000000)                   // True OLED Black
+    val SpaceNavy = Color(0xFF070709)                // Deep Obsidian
 }
 
 // Legacy aliases mapped to design tokens
@@ -159,27 +159,28 @@ fun PrivateMeshScreen(
     val colorScheme = MaterialTheme.colorScheme
     
     // Use distinct purple theme when inside a private room
+    // Obsidian Luxe background gradient
     val isInRoom = state == PrivateMeshState.HOSTING || state == PrivateMeshState.CONNECTED
     val backgroundGradient = if (isInRoom) {
-        // Purple/Magenta gradient for private room - feels distinct
+        // Deep obsidian gradient for private room with subtle titanium elevation
         Brush.verticalGradient(
             colors = listOf(
                 MeshColors.PrivateDarkBg,
-                Color(0xFF12062A),
+                Color(0xFF0F0F14),
                 MeshColors.DarkBg
             )
         )
     } else {
-        // Deep space gradient for menu/joining states
+        // Deep obsidian canvas for menu/joining states
         Brush.verticalGradient(
             colors = listOf(
                 MeshColors.SpaceNavy,
                 MeshColors.DarkBg,
-                Color(0xFF070720)
+                Color(0xFF0A0A0E)
             )
         )
     }
-    val accentColor = if (isInRoom) MeshColors.PrivateViolet else MeshColors.PrimaryCyan
+    val accentColor = if (isInRoom) MeshColors.SuccessGreen else MeshColors.PrimaryCyan
     
     Box(
         modifier = Modifier

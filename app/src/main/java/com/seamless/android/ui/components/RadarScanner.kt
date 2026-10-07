@@ -50,7 +50,8 @@ fun RadarScanner(
     modifier: Modifier = Modifier
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "radar")
-    val accentColor = if (style == RadarStyle.SENDER) SeamlessCyan else Color(0xFF7C4DFF)
+    // Luxury Monochrome Instrument: Optical White with surgical status semantics
+    val accentColor = Color.White
 
     // ── Main sweep rotation (360° every 3s) ──
     val sweepAngle by infiniteTransition.animateFloat(
@@ -428,9 +429,11 @@ fun RadarScanner(
 
         Text(
             text = title,
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.titleMedium.copy(
+                letterSpacing = (-0.2).sp
+            ),
             fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onBackground,
+            color = Color.White,
             textAlign = TextAlign.Center
         )
 
@@ -439,7 +442,7 @@ fun RadarScanner(
         Text(
             text = subtitle,
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
+            color = Color(0xFFB0B0B8),
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(horizontal = 32.dp)
         )

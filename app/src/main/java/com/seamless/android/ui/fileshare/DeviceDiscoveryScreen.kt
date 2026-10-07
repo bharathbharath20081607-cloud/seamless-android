@@ -389,25 +389,9 @@ fun DeviceDiscoveryScreen(
             )
         }
     ) { paddingValues ->
-        // Premium gradient background matching the global theme
-        val backgroundGradient = Brush.verticalGradient(
-            colors = if (isDark) {
-                listOf(
-                    com.seamless.android.ui.theme.SeamlessColors.DarkGradientBackgroundStart,
-                    com.seamless.android.ui.theme.SeamlessColors.DarkGradientBackgroundEnd
-                )
-            } else {
-                 listOf(
-                    com.seamless.android.ui.theme.SeamlessColors.LightBackground,
-                    com.seamless.android.ui.theme.SeamlessColors.LightBackground
-                )
-            }
-        )
-
-        Box(
+        HyperDropBackground(
             modifier = Modifier
                 .fillMaxSize()
-                .background(backgroundGradient)
                 .padding(paddingValues)
         ) {
             Column(
@@ -445,11 +429,12 @@ fun DeviceDiscoveryScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 8.dp),
-                        shape = RoundedCornerShape(16.dp),
+                        shape = RoundedCornerShape(20.dp),
                         colors = CardDefaults.cardColors(
-                            containerColor = HyperDropColors.CardSurface.copy(alpha = 0.9f)
+                            containerColor = HyperDropColors.CardSurface.copy(alpha = 0.85f)
                         ),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                        border = androidx.compose.foundation.BorderStroke(1.dp, HyperDropColors.BorderSubtle),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                     ) {
                         Row(
                             modifier = Modifier

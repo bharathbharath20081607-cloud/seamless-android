@@ -755,7 +755,11 @@ fun ChatScreen(viewModel: ChatViewModel) {
     }
     
     // Private Mesh Screen
-    if (showPrivateMeshScreen) {
+    androidx.compose.animation.AnimatedVisibility(
+        visible = showPrivateMeshScreen,
+        enter = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenEnter,
+        exit = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenExit
+    ) {
         com.seamless.android.ui.mesh.PrivateMeshScreen(
             meshService = viewModel.meshServiceInstance,
             onBackClick = { showPrivateMeshScreen = false }
@@ -1046,7 +1050,11 @@ private fun ChatDialogs(
     }
     
     // Share Things screen
-    if (showShareReceiveScreen) {
+    androidx.compose.animation.AnimatedVisibility(
+        visible = showShareReceiveScreen,
+        enter = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenEnter,
+        exit = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenExit
+    ) {
         com.seamless.android.ui.fileshare.ShareReceiveScreen(
             onShareThingsClick = onNavigateToFilePicker,
             onReceiveThingsClick = {
@@ -1058,7 +1066,11 @@ private fun ChatDialogs(
     }
     
     // File Picker screen
-    if (showFilePickerScreen) {
+    androidx.compose.animation.AnimatedVisibility(
+        visible = showFilePickerScreen,
+        enter = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenEnter,
+        exit = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenExit
+    ) {
         com.seamless.android.ui.fileshare.FilePickerScreen(
             onFileSelected = { filePath ->
                 // Handle file selection
@@ -1071,7 +1083,11 @@ private fun ChatDialogs(
     }
     
     // Device Discovery screen - handles its own progress screens internally
-    if (showDeviceDiscoveryScreen) {
+    androidx.compose.animation.AnimatedVisibility(
+        visible = showDeviceDiscoveryScreen,
+        enter = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenEnter,
+        exit = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenExit
+    ) {
         com.seamless.android.ui.fileshare.DeviceDiscoveryScreen(
             isHosting = isHostingMode,
             onDeviceSelected = { deviceId ->
@@ -1083,7 +1099,11 @@ private fun ChatDialogs(
     }
     
     // Received Files screen
-    if (showReceivedFilesScreen) {
+    androidx.compose.animation.AnimatedVisibility(
+        visible = showReceivedFilesScreen,
+        enter = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenEnter,
+        exit = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenExit
+    ) {
         com.seamless.android.ui.fileshare.ReceivedFilesScreen(
             onBackClick = onReceivedFilesScreenDismiss
         )

@@ -1,12 +1,14 @@
 package com.seamless.android.ui.fileshare
 
 import android.os.Build
+import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -52,50 +54,55 @@ import kotlin.random.Random
  * ALL HyperDrop files should reference these instead of hardcoded Color() values.
  */
 object HyperDropColors {
-    // --- Backgrounds ---
-    val DeepSpaceBlack = Color(0xFF050510)
-    val SpaceNavy = Color(0xFF0A1025)
-    val SpaceBlue = Color(0xFF101835)
-    val DarkNavy = Color(0xFF0A0E21)
+    // --- Canvas & Atmosphere (Obsidian Luxe) ---
+    val TrueBlack = Color(0xFF000000)               // 100% Pure OLED Black
+    val ObsidianCanvas = Color(0xFF070709)          // Deep luxury atmospheric obsidian
+    val DeepSpaceBlack = TrueBlack                  // Backward compatibility alias
+    val SpaceNavy = ObsidianCanvas                  // Backward compatibility alias
+    val SpaceBlue = Color(0xFF0C0C10)               // Deep dark elevation
+    val DarkNavy = ObsidianCanvas
 
-    // --- Surfaces ---
-    val CardSurface = Color(0xFF1E293B)
-    val CardSurfaceDark = Color(0xFF1A2236)
-    val CardSurfaceLight = Color(0xFF263548)
+    // --- Surfaces (Tonal Elevation) ---
+    val CardSurface = Color(0xFF101014)             // Primary dark titanium card
+    val CardSurfaceDark = Color(0xFF0A0A0E)         // Deep sunken card container
+    val CardSurfaceLight = Color(0xFF16161D)        // Raised titanium surface
+    val CardSurfaceElevated = Color(0xFF1E1E28)     // Active / pressed card state
+    val GlassSurface = Color.White.copy(alpha = 0.04f) // Translucent liquid glass
 
-    // --- Accent ---
-    val PrimaryCyan = SeamlessCyan
-    val SecondaryTeal = SeamlessTeal
-    val AccentBlue = Color(0xFF00D4FF)
-    val BeamCyan = Color(0xFF00FFCC)
-    val GlowPurple = Color(0xFF7C3AED)
+    // --- Optical Whites & Monochromes ---
+    val PrimaryCyan = Color(0xFFFFFFFF)             // 100% Pure Optical White
+    val SecondaryTeal = Color(0xFFB0B0B8)           // Apple Titanium Gray
+    val AccentBlue = Color(0xFFFFFFFF)              // Pure Optical White
+    val BeamCyan = Color(0xFFFFFFFF)                // Diamond White
+    val GlowPurple = Color.White.copy(alpha = 0.12f)// Ethereal lunar luminescence
 
-    // --- Semantic ---
-    val SuccessGreen = Color(0xFF00E676)
-    val ErrorRed = Color(0xFFFF5252)
-    val WarningAmber = Color(0xFFFFD93D)
-    val InfoBlue = Color(0xFF42A5F5)
+    // --- Semantic Accents (Apple HIG Precision) ---
+    val SuccessGreen = Color(0xFF30D158)            // Apple System Emerald (Live / Connected)
+    val ErrorRed = Color(0xFFFF453A)                // Apple System Coral (Error / Decline)
+    val WarningAmber = Color(0xFFFF9F0A)            // Apple System Amber (Warning / Pending)
+    val InfoBlue = Color(0xFFE5E5EA)                // Lunar Silver
 
-    // --- Text ---
-    val TextPrimary = Color.White
-    val TextSecondary = Color.White.copy(alpha = 0.7f)
-    val TextTertiary = Color.White.copy(alpha = 0.5f)
-    val TextDisabled = Color.White.copy(alpha = 0.3f)
+    // --- Typography & Text ---
+    val TextPrimary = Color(0xFFFFFFFF)             // 100% Crisp Optical White
+    val TextSecondary = Color(0xFFB0B0B8)           // Titanium Secondary (zero glare)
+    val TextTertiary = Color(0xFF6B6B75)            // Muted secondary meta
+    val TextDisabled = Color.White.copy(alpha = 0.22f)
 
-    // --- Borders & Dividers ---
-    val BorderSubtle = Color.White.copy(alpha = 0.08f)
-    val BorderDefault = Color.White.copy(alpha = 0.12f)
-    val BorderFocus = SeamlessCyan.copy(alpha = 0.5f)
+    // --- Specular Hairline Borders (Apple Milled Glass) ---
+    val BorderSubtle = Color.White.copy(alpha = 0.08f) // 1px resting hairline
+    val BorderDefault = Color.White.copy(alpha = 0.12f)// Standard hairline
+    val BorderSpecular = Color.White.copy(alpha = 0.18f)// Light-catching active edge
+    val BorderFocus = Color.White.copy(alpha = 0.35f)  // Focused stroke
 
     // --- Visibility States ---
-    val VisibilityHidden = Color(0xFFFF6B6B)
-    val VisibilityContacts = Color(0xFFFFD93D)
-    val VisibilityEveryone = Color(0xFF00E676)
+    val VisibilityHidden = Color(0xFFFF453A)
+    val VisibilityContacts = Color(0xFFFF9F0A)
+    val VisibilityEveryone = Color(0xFF30D158)
 
     // --- Gradients (as color lists) ---
-    val BackgroundGradient = listOf(DeepSpaceBlack, SpaceNavy, SpaceBlue)
-    val CardGlowGradient = listOf(PrimaryCyan.copy(alpha = 0.3f), Color.Transparent)
-    val BeamGradient = listOf(BeamCyan, Color.Transparent)
+    val BackgroundGradient = listOf(TrueBlack, ObsidianCanvas, Color(0xFF0C0C10))
+    val CardGlowGradient = listOf(Color.White.copy(alpha = 0.06f), Color.Transparent)
+    val BeamGradient = listOf(Color.White.copy(alpha = 0.25f), Color.Transparent)
     val SuccessGradient = listOf(SuccessGreen, SuccessGreen.copy(alpha = 0.7f))
     val ErrorGradient = listOf(ErrorRed, ErrorRed.copy(alpha = 0.7f))
 }
@@ -178,7 +185,7 @@ object HyperDropSpacing {
     val iconSize = 28.dp
 }
 
-// ======================== MOTION TOKENS ========================
+// ======================== MOTION & PHYSICS TOKENS ========================
 
 object HyperDropMotion {
     // Durations
@@ -194,18 +201,72 @@ object HyperDropMotion {
     val ExitEasing = FastOutLinearInEasing
     val LinearEasing = androidx.compose.animation.core.LinearEasing
 
-    // Spring specs for bouncy interactions
-    val BouncySpring = spring<Float>(
-        dampingRatio = Spring.DampingRatioMediumBouncy,
+    // ── Apple WWDC Fluid Spring Physics ──
+    // Tactile spring for buttons, cards, touch compression (damping 0.82)
+    val TactileSpring = spring<Float>(
+        dampingRatio = 0.82f,
         stiffness = Spring.StiffnessLow
     )
+
+    // Critically damped spring for state changes & zero-bounce transitions (damping 1.0)
+    val CriticallyDamped = spring<Float>(
+        dampingRatio = Spring.DampingRatioNoBouncy,
+        stiffness = Spring.StiffnessMediumLow
+    )
+
+    // Bouncy spring for playful / celebratory moments
+    val BouncySpring = spring<Float>(
+        dampingRatio = 0.68f,
+        stiffness = Spring.StiffnessLow
+    )
+
+    // Choreographed entrance cascade interval
+    const val STAGGER_INTERVAL_MS = 45L
+}
+
+// ======================== LIQUID TRANSITIONS ========================
+
+/**
+ * Standardized liquid spring sheet and spatial transitions across HyperDrop.
+ * Modeled on Apple VisionOS and iOS modal presentation physics.
+ */
+object HyperDropTransitions {
+    val ScreenEnter: EnterTransition = slideInVertically(
+        initialOffsetY = { (it * 0.12f).toInt() },
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow)
+    ) + fadeIn(
+        animationSpec = spring(dampingRatio = 1.0f, stiffness = Spring.StiffnessMediumLow)
+    ) + scaleIn(
+        initialScale = 0.96f,
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow)
+    )
+
+    val ScreenExit: ExitTransition = slideOutVertically(
+        targetOffsetY = { (it * 0.12f).toInt() },
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow)
+    ) + fadeOut(
+        animationSpec = spring(dampingRatio = 1.0f, stiffness = Spring.StiffnessMediumLow)
+    ) + scaleOut(
+        targetScale = 0.96f,
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow)
+    )
+
+    val ModalEnter: EnterTransition = slideInVertically(
+        initialOffsetY = { it },
+        animationSpec = spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)
+    ) + fadeIn()
+
+    val ModalExit: ExitTransition = slideOutVertically(
+        targetOffsetY = { it },
+        animationSpec = spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)
+    ) + fadeOut()
 }
 
 // ======================== BACKGROUNDS ========================
 
 /**
- * Global animated background with starfield, nebula layers, and occasional shooting stars.
- * Used across ALL HyperDrop screens for visual consistency.
+ * Luxury atmospheric background with breathing ambient luminescence.
+ * Replaces noisy cartoon stars with deep OLED obsidian stillness and subtle radial light.
  */
 @Composable
 fun HyperDropBackground(
@@ -222,14 +283,8 @@ fun HyperDropBackground(
             .fillMaxSize()
             .background(backgroundGradient)
     ) {
-        // Layer 1: Nebula glow blobs
-        NebulaLayer(intensity)
-
-        // Layer 2: Starfield particles
-        StarfieldEffect(intensity)
-
-        // Layer 3: Occasional shooting star
-        ShootingStarEffect(intensity)
+        // Ambient breathing radial light layer
+        AmbientLuminescenceLayer(intensity)
 
         // Content overlay
         content()
@@ -237,178 +292,95 @@ fun HyperDropBackground(
 }
 
 @Composable
-private fun NebulaLayer(intensity: Float) {
-    val infiniteTransition = rememberInfiniteTransition(label = "nebula")
-    val drift by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
+private fun AmbientLuminescenceLayer(intensity: Float) {
+    val infiniteTransition = rememberInfiniteTransition(label = "ambient_luma")
+    val breath by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1.0f,
         animationSpec = infiniteRepeatable(
-            animation = tween(20000, easing = LinearEasing),
+            animation = tween(3800, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
-        label = "nebula_drift"
+        label = "breath"
     )
 
     Canvas(modifier = Modifier.fillMaxSize()) {
-        // Top-right nebula blob
+        // Top-center gentle ambient glow (VisionOS-style top lighting)
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(
-                    HyperDropColors.GlowPurple.copy(alpha = 0.06f * intensity),
+                    Color.White.copy(alpha = 0.035f * breath * intensity),
                     Color.Transparent
                 ),
-                center = Offset(size.width * (0.8f + drift * 0.1f), size.height * 0.15f),
-                radius = size.width * 0.5f
+                center = Offset(size.width * 0.5f, -size.height * 0.05f),
+                radius = size.width * 0.85f
             )
         )
 
-        // Bottom-left nebula blob
+        // Bottom subtle secondary ambient bounce
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(
-                    HyperDropColors.PrimaryCyan.copy(alpha = 0.04f * intensity),
+                    Color.White.copy(alpha = 0.015f * breath * intensity),
                     Color.Transparent
                 ),
-                center = Offset(size.width * (0.2f - drift * 0.05f), size.height * 0.75f),
-                radius = size.width * 0.45f
+                center = Offset(size.width * 0.5f, size.height * 1.05f),
+                radius = size.width * 0.70f
             )
         )
     }
 }
-
-@Composable
-private fun StarfieldEffect(intensity: Float) {
-    val stars = remember {
-        List(60) {
-            Star(
-                x = Random.nextFloat(),
-                y = Random.nextFloat(),
-                size = Random.nextFloat() * 3f + 1f,
-                blinkSpeed = Random.nextFloat() * 2f + 0.5f,
-                alpha = Random.nextFloat() * 0.5f + 0.2f
-            )
-        }
-    }
-
-    val infiniteTransition = rememberInfiniteTransition(label = "starfield")
-    val time by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(5000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "time"
-    )
-
-    Canvas(modifier = Modifier.fillMaxSize()) {
-        stars.forEach { star ->
-            val pulse = sin(time * star.blinkSpeed * 6.28f + star.x * 10f) * 0.5f + 0.5f
-            val currentAlpha = (star.alpha * pulse * intensity).coerceIn(0f, 1f)
-
-            val driftY = (star.y - time * 0.05f) % 1f
-            val yPos = if (driftY < 0) driftY + 1f else driftY
-
-            drawCircle(
-                color = HyperDropColors.PrimaryCyan.copy(alpha = currentAlpha),
-                radius = star.size,
-                center = Offset(star.x * size.width, yPos * size.height)
-            )
-        }
-    }
-}
-
-@Composable
-private fun ShootingStarEffect(intensity: Float) {
-    val infiniteTransition = rememberInfiniteTransition(label = "shooting_star")
-    val progress by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(8000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "shoot"
-    )
-
-    // Only show the shooting star during a brief window of the animation cycle
-    Canvas(modifier = Modifier.fillMaxSize()) {
-        if (progress in 0.4f..0.55f && intensity > 0.5f) {
-            val t = ((progress - 0.4f) / 0.15f).coerceIn(0f, 1f)
-            val startX = size.width * 0.15f
-            val startY = size.height * 0.1f
-            val endX = size.width * 0.75f
-            val endY = size.height * 0.35f
-
-            val currentX = startX + (endX - startX) * t
-            val currentY = startY + (endY - startY) * t
-            val tailLength = 80f
-
-            // Trail gradient
-            val trailAlpha = (1f - t) * 0.6f * intensity
-            drawLine(
-                brush = Brush.linearGradient(
-                    colors = listOf(
-                        Color.Transparent,
-                        Color.White.copy(alpha = trailAlpha)
-                    ),
-                    start = Offset(currentX - tailLength, currentY - tailLength * 0.4f),
-                    end = Offset(currentX, currentY)
-                ),
-                start = Offset(currentX - tailLength, currentY - tailLength * 0.4f),
-                end = Offset(currentX, currentY),
-                strokeWidth = 2f
-            )
-            // Head glow
-            drawCircle(
-                color = Color.White.copy(alpha = trailAlpha),
-                radius = 3f,
-                center = Offset(currentX, currentY)
-            )
-        }
-    }
-}
-
-private data class Star(
-    val x: Float,
-    val y: Float,
-    val size: Float,
-    val blinkSpeed: Float,
-    val alpha: Float
-)
 
 // ======================== CARDS ========================
 
 /**
- * Premium glass card with animated shimmer border and glassmorphism blur.
+ * Premium glass card with tactile spring press, continuous squircle, and hairline border.
  */
 @Composable
 fun GlassCard(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
     shape: Shape = RoundedCornerShape(HyperDropSpacing.cardCorner),
-    backgroundColor: Color = HyperDropColors.CardSurface.copy(alpha = 0.4f),
-    borderColor: Color = HyperDropColors.BorderDefault,
+    backgroundColor: Color = HyperDropColors.CardSurface.copy(alpha = 0.85f),
+    borderColor: Color = HyperDropColors.BorderSubtle,
     showShimmerBorder: Boolean = false,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    val mod = if (onClick != null) modifier.clickable(onClick = onClick) else modifier
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed && onClick != null) 0.98f else 1.0f,
+        animationSpec = HyperDropMotion.TactileSpring,
+        label = "card_press_scale"
+    )
+
+    val mod = if (onClick != null) {
+        modifier
+            .scale(pressScale)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
+    } else {
+        modifier
+    }
 
     // Glassmorphism blur — API 31+
     val blurModifier = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        Modifier.blur(10.dp)
+        Modifier.blur(16.dp)
     } else {
         Modifier
     }
 
-    // Animated shimmer border
+    // Animated specular border
     val shimmerBorderMod = if (showShimmerBorder) {
-        val infiniteTransition = rememberInfiniteTransition(label = "shimmer_border")
+        val infiniteTransition = rememberInfiniteTransition(label = "specular_border")
         val shimmerAngle by infiniteTransition.animateFloat(
             initialValue = 0f,
             targetValue = 360f,
             animationSpec = infiniteRepeatable(
-                animation = tween(3000, easing = LinearEasing),
+                animation = tween(4000, easing = LinearEasing),
                 repeatMode = RepeatMode.Restart
             ),
             label = "shimmer_angle"
@@ -417,11 +389,11 @@ fun GlassCard(
             width = 1.dp,
             brush = Brush.sweepGradient(
                 colors = listOf(
-                    HyperDropColors.PrimaryCyan.copy(alpha = 0.5f),
+                    HyperDropColors.BorderSpecular,
                     Color.Transparent,
-                    HyperDropColors.GlowPurple.copy(alpha = 0.3f),
+                    HyperDropColors.BorderSubtle,
                     Color.Transparent,
-                    HyperDropColors.PrimaryCyan.copy(alpha = 0.5f)
+                    HyperDropColors.BorderSpecular
                 )
             ),
             shape = shape as RoundedCornerShape
@@ -458,7 +430,7 @@ fun GlassCard(
 // ======================== REUSABLE COMPONENTS ========================
 
 /**
- * Reusable icon-in-circle component used throughout HyperDrop.
+ * Reusable icon-in-circle component: obsidian glass circle with hairline border.
  */
 @Composable
 fun HyperDropIconCircle(
@@ -466,8 +438,8 @@ fun HyperDropIconCircle(
     modifier: Modifier = Modifier,
     size: Dp = HyperDropSpacing.iconCircleSize,
     iconSize: Dp = HyperDropSpacing.iconSize,
-    tint: Color = HyperDropColors.PrimaryCyan,
-    backgroundColor: Color = HyperDropColors.PrimaryCyan.copy(alpha = 0.12f),
+    tint: Color = HyperDropColors.TextPrimary,
+    backgroundColor: Color = HyperDropColors.CardSurfaceLight,
     showGlow: Boolean = false
 ) {
     Box(
@@ -475,20 +447,8 @@ fun HyperDropIconCircle(
         modifier = modifier
             .size(size)
             .clip(CircleShape)
-            .background(
-                if (showGlow) {
-                    Brush.radialGradient(
-                        colors = listOf(
-                            tint.copy(alpha = 0.25f),
-                            backgroundColor
-                        )
-                    )
-                } else {
-                    Brush.linearGradient(
-                        colors = listOf(backgroundColor, backgroundColor)
-                    )
-                }
-            )
+            .background(backgroundColor)
+            .border(1.dp, HyperDropColors.BorderSubtle, CircleShape)
     ) {
         Icon(
             imageVector = icon,
@@ -500,7 +460,8 @@ fun HyperDropIconCircle(
 }
 
 /**
- * Premium action button with glow effect and haptic feedback.
+ * World-class action button: solid optical white pill button with pitch-black text,
+ * Apple-grade tactile spring compression, and micro-haptic feedback.
  */
 @Composable
 fun PremiumButton(
@@ -508,46 +469,25 @@ fun PremiumButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     icon: ImageVector? = null,
-    color: Color = HyperDropColors.PrimaryCyan,
+    color: Color = Color.White,
     enabled: Boolean = true,
     isLoading: Boolean = false,
     hapticEnabled: Boolean = true
 ) {
     val haptic = LocalHapticFeedback.current
     val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
 
-    val infiniteTransition = rememberInfiniteTransition(label = "btn_glow")
-    val glowAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.4f,
-        targetValue = 0.8f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2000, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "glow"
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed && enabled && !isLoading) 0.97f else 1.0f,
+        animationSpec = HyperDropMotion.TactileSpring,
+        label = "btn_press_scale"
     )
 
     Box(
-        modifier = modifier,
+        modifier = modifier.scale(scale),
         contentAlignment = Alignment.Center
     ) {
-        // Glow behind button
-        if (enabled && !isLoading) {
-            Canvas(modifier = Modifier.matchParentSize()) {
-                drawRoundRect(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            color.copy(alpha = glowAlpha * 0.25f),
-                            Color.Transparent
-                        ),
-                        center = center,
-                        radius = size.maxDimension * 0.7f
-                    ),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(16.dp.toPx())
-                )
-            }
-        }
-
         Button(
             onClick = {
                 if (hapticEnabled) {
@@ -557,18 +497,18 @@ fun PremiumButton(
             },
             modifier = Modifier.fillMaxWidth(),
             enabled = enabled && !isLoading,
-            shape = RoundedCornerShape(16.dp),
+            shape = RoundedCornerShape(999.dp),
             colors = ButtonDefaults.buttonColors(
                 containerColor = color,
                 contentColor = Color.Black,
-                disabledContainerColor = color.copy(alpha = 0.3f),
-                disabledContentColor = Color.Black.copy(alpha = 0.5f)
+                disabledContainerColor = color.copy(alpha = 0.25f),
+                disabledContentColor = Color.Black.copy(alpha = 0.4f)
             ),
             elevation = ButtonDefaults.buttonElevation(
                 defaultElevation = 0.dp,
                 pressedElevation = 0.dp
             ),
-            contentPadding = PaddingValues(horizontal = 24.dp, vertical = 14.dp),
+            contentPadding = PaddingValues(horizontal = 24.dp, vertical = 15.dp),
             interactionSource = interactionSource
         ) {
             if (isLoading) {
@@ -582,13 +522,18 @@ fun PremiumButton(
                     Icon(
                         imageVector = icon,
                         contentDescription = null,
-                        modifier = Modifier.size(20.dp)
+                        tint = Color.Black,
+                        modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                 }
                 Text(
                     text = text,
-                    style = HyperDropTypography.LabelBold.copy(color = Color.Black)
+                    style = HyperDropTypography.LabelBold.copy(
+                        color = Color.Black,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.2.sp
+                    )
                 )
             }
         }

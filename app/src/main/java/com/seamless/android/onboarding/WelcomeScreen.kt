@@ -2,15 +2,22 @@ package com.seamless.android.onboarding
 
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -52,10 +59,22 @@ fun WelcomeScreen(
         isAnimating = true
     }
     
+    val haptic = LocalHapticFeedback.current
+    val buttonInteractionSource = remember { MutableInteractionSource() }
+    val isButtonPressed by buttonInteractionSource.collectIsPressedAsState()
+    val buttonScale by animateFloatAsState(
+        targetValue = if (isButtonPressed) 0.97f else 1f,
+        animationSpec = spring(
+            dampingRatio = 0.82f,
+            stiffness = Spring.StiffnessLow
+        ),
+        label = "btn_press_scale"
+    )
+
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+            .background(Color.Black)
     ) {
         // Animated mesh network background
         AnimatedMeshBackground(
@@ -77,28 +96,28 @@ fun WelcomeScreen(
             // App name and tagline
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.padding(vertical = 16.dp)
+                modifier = Modifier.padding(vertical = 12.dp)
             ) {
                 Text(
                     text = "Seamless",
                     style = MaterialTheme.typography.displayMedium.copy(
                         fontWeight = FontWeight.Bold,
-                        letterSpacing = 2.sp
+                        letterSpacing = (-0.5).sp
                     ),
-                    color = MaterialTheme.colorScheme.primary
+                    color = Color.White
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = "Chat without servers",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.8f)
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color(0xFFB0B0B8)
                 )
             }
             
             // Feature cards
             Column(
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-                modifier = Modifier.padding(vertical = 24.dp)
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.padding(vertical = 16.dp)
             ) {
                 FeatureCard(
                     icon = Icons.Outlined.BluetoothConnected,
@@ -112,48 +131,63 @@ fun WelcomeScreen(
                     title = "End-to-End Encrypted",
                     description = "Your conversations stay private",
                     isAnimating = isAnimating,
-                    delay = 100
+                    delay = 80
                 )
                 FeatureCard(
                     icon = Icons.Outlined.PersonOff,
                     title = "No Sign-Up Required",
                     description = "No phone number, email, or tracking",
                     isAnimating = isAnimating,
-                    delay = 200
+                    delay = 160
                 )
             }
             
-            // Call to action button
+            // Call to action button: Solid Optical White Pill CTA
             AnimatedVisibility(
                 visible = isAnimating,
-                enter = fadeIn(animationSpec = tween(800, delayMillis = 500)) +
+                enter = fadeIn(animationSpec = tween(700, delayMillis = 400)) +
                        slideInVertically(
-                           animationSpec = tween(800, delayMillis = 500),
-                           initialOffsetY = { it / 2 }
+                           animationSpec = spring(
+                               dampingRatio = 0.86f,
+                               stiffness = Spring.StiffnessMediumLow
+                           ),
+                           initialOffsetY = { it / 3 }
                        )
             ) {
                 Button(
-                    onClick = onGetStarted,
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onGetStarted()
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(dimensions.buttonHeight),
-                    shape = RoundedCornerShape(dimensions.cardCornerRadius),
+                        .height(dimensions.buttonHeight)
+                        .scale(buttonScale),
+                    shape = RoundedCornerShape(999.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary
-                    )
+                        containerColor = Color.White,
+                        contentColor = Color.Black
+                    ),
+                    elevation = ButtonDefaults.buttonElevation(
+                        defaultElevation = 0.dp,
+                        pressedElevation = 0.dp
+                    ),
+                    interactionSource = buttonInteractionSource
                 ) {
                     Text(
                         text = "Get Started",
                         style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.2.sp
                         ),
-                        color = MaterialTheme.colorScheme.onPrimary
+                        color = Color.Black
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Icon(
                         imageVector = Icons.AutoMirrored.Outlined.ArrowForward,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onPrimary
+                        tint = Color.Black,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             }
@@ -167,72 +201,96 @@ fun AnimatedLogo(
     modifier: Modifier = Modifier
 ) {
     val scale by animateFloatAsState(
-        targetValue = if (isAnimating) 1f else 0.8f,
+        targetValue = if (isAnimating) 1f else 0.82f,
         animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
+            dampingRatio = 0.82f,
             stiffness = Spring.StiffnessLow
         ),
         label = "logoScale"
     )
     
-    val rotation by animateFloatAsState(
-        targetValue = if (isAnimating) 0f else -180f,
-        animationSpec = tween(1000, easing = FastOutSlowInEasing),
-        label = "logoRotation"
+    val infiniteTransition = rememberInfiniteTransition(label = "logo_breath")
+    val breathPulse by infiniteTransition.animateFloat(
+        initialValue = 0.96f,
+        targetValue = 1.04f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(4000, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "breathPulse"
     )
-    
+    val haloAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.12f,
+        targetValue = 0.24f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(4000, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "haloAlpha"
+    )
+
     Box(
         modifier = modifier
-            .size(120.dp)
+            .size(130.dp)
             .scale(scale),
         contentAlignment = Alignment.Center
     ) {
-        Icon(
-            imageVector = Icons.Outlined.Hub,
-            contentDescription = null,
+        // Ambient Optical Light breathing glow halo
+        Box(
             modifier = Modifier
-                .size(120.dp)
-                .alpha(0.8f),
-            tint = MaterialTheme.colorScheme.primary
+                .size(130.dp)
+                .scale(breathPulse)
+                .alpha(haloAlpha)
+                .background(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            Color.White,
+                            Color.White.copy(alpha = 0.35f),
+                            Color.Transparent
+                        )
+                    ),
+                    shape = CircleShape
+                )
         )
-        
-        // Pulsing ring effect
-        if (isAnimating) {
-            val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-            val pulseScale by infiniteTransition.animateFloat(
-                initialValue = 0.8f,
-                targetValue = 1.2f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(2000, easing = FastOutSlowInEasing),
-                    repeatMode = RepeatMode.Reverse
+
+        // Specular outer hairline ring
+        Box(
+            modifier = Modifier
+                .size(100.dp)
+                .border(
+                    width = 1.dp,
+                    brush = Brush.linearGradient(
+                        colors = listOf(
+                            Color.White.copy(alpha = 0.25f),
+                            Color.White.copy(alpha = 0.05f)
+                        )
+                    ),
+                    shape = CircleShape
                 ),
-                label = "pulseScale"
-            )
-            val pulseAlpha by infiniteTransition.animateFloat(
-                initialValue = 0.5f,
-                targetValue = 0f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(2000, easing = FastOutSlowInEasing),
-                    repeatMode = RepeatMode.Reverse
-                ),
-                label = "pulseAlpha"
-            )
-            
-            Box(
-                modifier = Modifier
-                    .size(120.dp)
-                    .scale(pulseScale)
-                    .alpha(pulseAlpha)
-                    .background(
-                        brush = Brush.radialGradient(
-                            colors = listOf(
-                                MaterialTheme.colorScheme.primary.copy(alpha = 0.3f),
-                                Color.Transparent
-                            )
-                        ),
-                        shape = androidx.compose.foundation.shape.CircleShape
+            contentAlignment = Alignment.Center
+        ) {
+            // Obsidian & Titanium Emblem Medallion
+            Surface(
+                modifier = Modifier.size(80.dp),
+                shape = CircleShape,
+                color = Color(0xFF101014),
+                border = BorderStroke(
+                    1.dp,
+                    Color.White.copy(alpha = 0.16f)
+                )
+            ) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Hub,
+                        contentDescription = null,
+                        modifier = Modifier.size(38.dp),
+                        tint = Color.White
                     )
-            )
+                }
+            }
         }
     }
 }
@@ -248,13 +306,16 @@ fun FeatureCard(
 ) {
     val alpha by animateFloatAsState(
         targetValue = if (isAnimating) 1f else 0f,
-        animationSpec = tween(600, delayMillis = 300 + delay),
+        animationSpec = tween(500, delayMillis = 200 + delay),
         label = "featureAlpha"
     )
     
-    val offsetX by animateDpAsState(
-        targetValue = if (isAnimating) 0.dp else (-20).dp,
-        animationSpec = tween(600, delayMillis = 300 + delay),
+    val offsetY by animateDpAsState(
+        targetValue = if (isAnimating) 0.dp else 16.dp,
+        animationSpec = spring(
+            dampingRatio = 0.84f,
+            stiffness = Spring.StiffnessMediumLow
+        ),
         label = "featureOffset"
     )
     
@@ -262,22 +323,43 @@ fun FeatureCard(
         modifier = modifier
             .fillMaxWidth()
             .alpha(alpha)
-            .offset(x = offsetX),
+            .offset(y = offsetY)
+            .background(
+                color = Color(0xFF0F0F13).copy(alpha = 0.85f),
+                shape = RoundedCornerShape(18.dp)
+            )
+            .border(
+                width = 1.dp,
+                brush = Brush.linearGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = 0.12f),
+                        Color.White.copy(alpha = 0.03f)
+                    )
+                ),
+                shape = RoundedCornerShape(18.dp)
+            )
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
-            modifier = Modifier.size(48.dp)
+            shape = CircleShape,
+            color = Color(0xFF1A1A20),
+            border = BorderStroke(
+                1.dp,
+                Color.White.copy(alpha = 0.10f)
+            ),
+            modifier = Modifier.size(44.dp)
         ) {
             Box(
-                contentAlignment = Alignment.Center
+                contentAlignment = Alignment.Center,
+                modifier = Modifier.fillMaxSize()
             ) {
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
-                    modifier = Modifier.size(28.dp),
-                    tint = MaterialTheme.colorScheme.primary
+                    modifier = Modifier.size(22.dp),
+                    tint = Color.White
                 )
             }
         }
@@ -288,14 +370,19 @@ fun FeatureCard(
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleMedium.copy(
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = (-0.2).sp
                 ),
-                color = MaterialTheme.colorScheme.onBackground
+                color = Color.White
             )
+            Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = description,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                ),
+                color = Color(0xFF9898A2)
             )
         }
     }
@@ -312,7 +399,7 @@ fun AnimatedMeshBackground(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(20000, easing = LinearEasing),
+            animation = tween(36000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "meshOffset"
@@ -321,59 +408,73 @@ fun AnimatedMeshBackground(
     Canvas(
         modifier = modifier
             .fillMaxSize()
-            .background(com.seamless.android.ui.theme.SeamlessColors.DarkGradientBackgroundStart)
+            .background(Color.Black)
     ) {
         val width = size.width
         val height = size.height
         
-        // Premium gradient mesh background
-        val brush = Brush.linearGradient(
+        // Deep ambient radial illumination centered near top-third
+        val ambientBrush = Brush.radialGradient(
             colors = listOf(
-                com.seamless.android.ui.theme.SeamlessColors.BrandGradientStart.copy(alpha = 0.15f),
-                com.seamless.android.ui.theme.SeamlessColors.BrandGradientEnd.copy(alpha = 0.05f)
+                Color.White.copy(alpha = 0.05f),
+                Color(0xFF0F0F16).copy(alpha = 0.03f),
+                Color.Transparent
             ),
-            start = Offset(0f, 0f),
-            end = Offset(width, height)
+            center = Offset(width * 0.5f, height * 0.28f),
+            radius = width * 0.85f
         )
-        
-        drawRect(brush = brush)
+        drawRect(brush = ambientBrush)
 
         if (isAnimating) {
-            val nodeCount = 8
-            val nodeRadius = 4.dp.toPx()
+            val nodeCount = 9
+            val nodeRadius = 2.5.dp.toPx()
             
-            // Draw animated mesh connections
+            // Draw ethereal filaments connecting nodes
             for (i in 0 until nodeCount) {
                 for (j in i + 1 until nodeCount) {
-                    val x1 = (size.width * (0.2f + 0.6f * kotlin.math.cos(i * 0.8f + animatedOffset * 2 * kotlin.math.PI.toFloat()).toFloat()))
-                    val y1 = (size.height * (0.2f + 0.6f * kotlin.math.sin(i * 0.8f + animatedOffset * 2 * kotlin.math.PI.toFloat()).toFloat()))
-                    val x2 = (size.width * (0.2f + 0.6f * kotlin.math.cos(j * 0.8f + animatedOffset * 2 * kotlin.math.PI.toFloat()).toFloat()))
-                    val y2 = (size.height * (0.2f + 0.6f * kotlin.math.sin(j * 0.8f + animatedOffset * 2 * kotlin.math.PI.toFloat()).toFloat()))
+                    val angle1 = i * 0.72f + animatedOffset * 2 * kotlin.math.PI.toFloat()
+                    val angle2 = j * 0.72f + animatedOffset * 2 * kotlin.math.PI.toFloat()
+                    
+                    val x1 = (width * (0.15f + 0.70f * (0.5f + 0.5f * kotlin.math.cos(angle1).toFloat())))
+                    val y1 = (height * (0.10f + 0.75f * (0.5f + 0.5f * kotlin.math.sin(angle1 * 1.3f).toFloat())))
+                    val x2 = (width * (0.15f + 0.70f * (0.5f + 0.5f * kotlin.math.cos(angle2).toFloat())))
+                    val y2 = (height * (0.10f + 0.75f * (0.5f + 0.5f * kotlin.math.sin(angle2 * 1.3f).toFloat())))
                     
                     val distance = kotlin.math.sqrt(
                         (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)
                     )
                     
-                    if (distance < size.width * 0.4f) {
+                    val maxDistance = width * 0.45f
+                    if (distance < maxDistance) {
+                        val fade = (1f - distance / maxDistance)
                         drawLine(
-                            color = SeamlessCyan,
+                            color = Color.White,
                             start = Offset(x1, y1),
                             end = Offset(x2, y2),
                             strokeWidth = 1.dp.toPx(),
-                            alpha = (1f - distance / (size.width * 0.4f)) * 0.5f
+                            alpha = fade * 0.12f
                         )
                     }
                 }
                 
-                // Draw nodes
-                val x = (size.width * (0.2f + 0.6f * kotlin.math.cos(i * 0.8f + animatedOffset * 2 * kotlin.math.PI.toFloat()).toFloat()))
-                val y = (size.height * (0.2f + 0.6f * kotlin.math.sin(i * 0.8f + animatedOffset * 2 * kotlin.math.PI.toFloat()).toFloat()))
+                // Draw luxury celestial node
+                val angle = i * 0.72f + animatedOffset * 2 * kotlin.math.PI.toFloat()
+                val x = (width * (0.15f + 0.70f * (0.5f + 0.5f * kotlin.math.cos(angle).toFloat())))
+                val y = (height * (0.10f + 0.75f * (0.5f + 0.5f * kotlin.math.sin(angle * 1.3f).toFloat())))
                 
+                // Subtle node glow
                 drawCircle(
-                    color = SeamlessCyan,
+                    color = Color.White,
+                    radius = nodeRadius * 2.2f,
+                    center = Offset(x, y),
+                    alpha = 0.08f
+                )
+                // Crisp core
+                drawCircle(
+                    color = Color.White,
                     radius = nodeRadius,
                     center = Offset(x, y),
-                    alpha = 0.8f
+                    alpha = 0.65f
                 )
             }
         }

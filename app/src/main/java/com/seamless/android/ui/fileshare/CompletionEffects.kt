@@ -29,15 +29,13 @@ import kotlin.random.Random
  * - Particle explosion effect
  */
 
-// Color palette for confetti
+// Luxury Shimmer palette: Optical White, Lunar Silver, and Apple System Emerald
 private val confettiColors = listOf(
-    HyperDropColors.SuccessGreen, // Green
-    HyperDropColors.PrimaryCyan, // Cyan
-    Color(0xFFFFEB3B), // Yellow
-    Color(0xFFFF5722), // Orange
-    Color(0xFF9C27B0), // Purple
-    Color(0xFF2196F3), // Blue
-    Color(0xFFE91E63), // Pink
+    HyperDropColors.SuccessGreen,
+    Color.White,
+    Color(0xFFE5E5EA),
+    HyperDropColors.SuccessGreen.copy(alpha = 0.7f),
+    Color.White.copy(alpha = 0.8f),
 )
 
 /**
