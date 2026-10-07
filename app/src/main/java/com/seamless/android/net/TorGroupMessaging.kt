@@ -19,6 +19,7 @@ class TorGroupMessaging private constructor(context: Context) {
         private const val PREFIX = "SGRP1:"
         private const val VERSION = 1
         private const val MAX_MEMBERS = 32
+        private val HEX_PUBLIC_KEY = Regex("^[0-9a-fA-F]{64}$")
 
         @Volatile private var instance: TorGroupMessaging? = null
 
@@ -29,7 +30,17 @@ class TorGroupMessaging private constructor(context: Context) {
 
     enum class InboundResult { NOT_GROUP, HANDLED, REJECTED }
 
-    private data class WireMember(val onionAddress: String, val nickname: String)
+    /**
+     * A group uses pairwise encrypted Tor envelopes rather than a shared group
+     * key. Each roster entry therefore carries the public contact material
+     * required to encrypt to every member after a creator-authenticated invite.
+     */
+    private data class WireMember(
+        val onionAddress: String,
+        val nickname: String,
+        val publicKey: String = "",
+        val mailboxOnion: String? = null
+    )
 
     private data class WireEvent(
         val version: Int = VERSION,
@@ -68,9 +79,7 @@ class TorGroupMessaging private constructor(context: Context) {
             isCreatedByMe = true
         )
         groupDao.insertGroup(group)
-        val allMembers = listOf(WireMember(me.onionAddress, me.nickname)) + invitees.map {
-            WireMember(it.onionAddress, it.nickname)
-        }
+        val allMembers = listOf(me.toWireMember()) + invitees.map { it.toWireMember() }
         allMembers.forEach { member ->
             groupDao.insertMember(GroupMemberEntity(group.groupId, member.onionAddress, member.nickname))
         }
@@ -103,17 +112,26 @@ class TorGroupMessaging private constructor(context: Context) {
         }
         val current = groupDao.getMembersForGroupNow(groupId)
         val currentAddresses = current.mapTo(mutableSetOf()) { it.memberOnionAddress }
+        val currentWireMembers = current.mapNotNull { member ->
+            contacts.getContactByOnion(member.memberOnionAddress)?.toWireMember()
+                ?: contacts.getMyContactInfo()
+                    .takeIf { it.onionAddress == member.memberOnionAddress }
+                    ?.toWireMember()
+        }
+        require(currentWireMembers.size == current.size) {
+            "Every group member must have verified contact information before adding members"
+        }
         val newContacts = contactIds.mapNotNull { contacts.getContact(it) }
             .filter { it.onionAddress !in currentAddresses && !it.requiresRendezvous() }
             .filter { it.effectiveTrustState() != TorContactTrustState.BLOCKED && it.effectiveTrustState() != TorContactTrustState.KEY_CHANGED }
             .take((MAX_MEMBERS - current.size).coerceAtLeast(0))
 
         newContacts.forEach { contact ->
-            val member = WireMember(contact.onionAddress, contact.nickname)
+            val member = contact.toWireMember()
             groupDao.insertMember(GroupMemberEntity(groupId, member.onionAddress, member.nickname))
             currentAddresses += member.onionAddress
         }
-        val allMembers = groupDao.getMembersForGroupNow(groupId).map { WireMember(it.memberOnionAddress, it.memberNickname) }
+        val allMembers = currentWireMembers + newContacts.map { it.toWireMember() }
         newContacts.forEach { contact ->
             TorMessagingService.getInstance(appContext).sendMessageToOnion(
                 recipientOnion = contact.onionAddress,
@@ -135,7 +153,7 @@ class TorGroupMessaging private constructor(context: Context) {
                 groupId = groupId,
                 creatorOnion = me.onionAddress,
                 creatorNickname = me.nickname,
-                member = WireMember(contact.onionAddress, contact.nickname)
+                member = contact.toWireMember()
             ))
             existingRecipients.forEach { recipient ->
                 TorMessagingService.getInstance(appContext).sendMessageToOnion(
@@ -155,7 +173,7 @@ class TorGroupMessaging private constructor(context: Context) {
         require(groupDao.getMember(groupId, me.onionAddress) != null) { "You are not a member of this group" }
         val id = UUID.randomUUID().toString()
         val timestamp = System.currentTimeMillis()
-        groupDao.insertGroupMessage(GroupMessageEntity(
+        val localMessage = GroupMessageEntity(
             id = id,
             groupId = groupId,
             senderOnionAddress = me.onionAddress,
@@ -164,18 +182,32 @@ class TorGroupMessaging private constructor(context: Context) {
             timestamp = timestamp,
             isFromMe = true,
             deliveryState = "QUEUED"
-        ))
+        )
+        groupDao.insertGroupMessage(localMessage)
         val payload = encode(WireEvent(type = "message", groupId = groupId, messageText = cleanText))
-        groupDao.getMembersForGroupNow(groupId)
+        val expectedRecipients = groupDao.getMembersForGroupNow(groupId)
             .filter { it.memberOnionAddress != me.onionAddress }
-            .mapNotNull { member -> contacts.getContactByOnion(member.memberOnionAddress) }
-            .forEach { contact ->
-                TorMessagingService.getInstance(appContext).sendMessageToOnion(
+        val recipients = expectedRecipients.mapNotNull { member ->
+            contacts.getContactByOnion(member.memberOnionAddress)
+        }
+        if (recipients.size != expectedRecipients.size || recipients.any { !it.isEligibleForGroupMessaging() }) {
+            groupDao.insertGroupMessage(localMessage.copy(deliveryState = "FAILED"))
+            error("Verify every group member before sending")
+        }
+        val failedRecipients = recipients.filter { contact ->
+            TorMessagingService.getInstance(appContext).sendMessageToOnion(
                     recipientOnion = contact.onionAddress,
                     text = payload,
                     completesUiMessage = false
-                )
-            }
+                ).isFailure
+        }
+        if (failedRecipients.isNotEmpty()) {
+            groupDao.insertGroupMessage(localMessage.copy(deliveryState = "PARTIAL"))
+            error("Message queued for ${recipients.size - failedRecipients.size} of ${recipients.size} members")
+        }
+        if (recipients.isEmpty()) {
+            groupDao.insertGroupMessage(localMessage.copy(deliveryState = "SENT"))
+        }
         id
     }
 
@@ -200,9 +232,38 @@ class TorGroupMessaging private constructor(context: Context) {
         if (event.creatorOnion != sender.onionAddress || event.groupName.trim().length !in 1..80) {
             return InboundResult.REJECTED
         }
-        if (event.members.isEmpty() || event.members.size > MAX_MEMBERS ||
-            event.members.none { it.onionAddress == contacts.getMyContactInfo().onionAddress }
-        ) return InboundResult.REJECTED
+        val me = contacts.getMyContactInfo()
+        val normalizedMembers = event.members.map { member ->
+            WireMember(
+                onionAddress = member.onionAddress.trim().lowercase(),
+                nickname = member.nickname.trim(),
+                publicKey = member.publicKey.trim().lowercase(),
+                mailboxOnion = member.mailboxOnion
+                    ?.let(OnionContactManager.OnionContact::canonicalizeOnionEndpoint)
+                    ?.takeIf { it.isNotBlank() }
+            )
+        }
+        val validMembers = normalizedMembers.isNotEmpty() &&
+            normalizedMembers.size <= MAX_MEMBERS &&
+            normalizedMembers.distinctBy { it.onionAddress }.size == normalizedMembers.size &&
+            normalizedMembers.distinctBy { it.publicKey }.size == normalizedMembers.size &&
+            normalizedMembers.all { member ->
+                member.onionAddress.isNotBlank() &&
+                    member.onionAddress.contains(".onion", ignoreCase = true) &&
+                    member.nickname.length in 1..80 &&
+                    member.publicKey.matches(HEX_PUBLIC_KEY)
+            }
+        if (!validMembers || normalizedMembers.none { it.onionAddress == me.onionAddress.lowercase() }) {
+            return InboundResult.REJECTED
+        }
+        // The authenticated sender must be the creator and part of the
+        // membership list before the invite becomes durable local state.
+        val creatorMembership = normalizedMembers.firstOrNull {
+            it.onionAddress == sender.onionAddress.lowercase()
+        }
+        if (creatorMembership == null || !creatorMembership.publicKey.equals(sender.publicKey, ignoreCase = true)) {
+            return InboundResult.REJECTED
+        }
         val existing = groupDao.getGroup(event.groupId)
         if (existing != null && existing.creatorOnionAddress != sender.onionAddress) return InboundResult.REJECTED
         groupDao.insertGroup(PrivateGroupEntity(
@@ -213,10 +274,9 @@ class TorGroupMessaging private constructor(context: Context) {
             isCreatedByMe = false,
             createdAt = existing?.createdAt ?: System.currentTimeMillis()
         ))
-        event.members.distinctBy { it.onionAddress }.forEach { member ->
-            if (member.onionAddress.isNotBlank() && member.nickname.length <= 80) {
-                groupDao.insertMember(GroupMemberEntity(event.groupId, member.onionAddress, member.nickname))
-            }
+        normalizedMembers.forEach { member ->
+            groupDao.insertMember(GroupMemberEntity(event.groupId, member.onionAddress, member.nickname))
+            importGroupPeer(member, me.onionAddress)
         }
         return InboundResult.HANDLED
     }
@@ -224,13 +284,27 @@ class TorGroupMessaging private constructor(context: Context) {
     private suspend fun handleMemberAdded(sender: OnionContactManager.OnionContact, event: WireEvent): InboundResult {
         val group = groupDao.getGroup(event.groupId) ?: return InboundResult.REJECTED
         val member = event.member ?: return InboundResult.REJECTED
-        if (group.creatorOnionAddress != sender.onionAddress || member.onionAddress.isBlank() || member.nickname.length > 80) {
+        if (group.creatorOnionAddress != sender.onionAddress ||
+            member.onionAddress.isBlank() ||
+            member.nickname.trim().length !in 1..80 ||
+            !member.publicKey.trim().matches(HEX_PUBLIC_KEY)
+        ) {
             return InboundResult.REJECTED
         }
         if (groupDao.getMemberCount(event.groupId) >= MAX_MEMBERS &&
             groupDao.getMember(event.groupId, member.onionAddress) == null
         ) return InboundResult.REJECTED
-        groupDao.insertMember(GroupMemberEntity(event.groupId, member.onionAddress, member.nickname))
+        val normalized = member.copy(
+            onionAddress = member.onionAddress.trim().lowercase(),
+            nickname = member.nickname.trim(),
+            publicKey = member.publicKey.trim().lowercase(),
+            mailboxOnion = member.mailboxOnion
+                ?.let(OnionContactManager.OnionContact::canonicalizeOnionEndpoint)
+                ?.takeIf { it.isNotBlank() }
+        )
+        if (!normalized.onionAddress.contains(".onion", ignoreCase = true)) return InboundResult.REJECTED
+        groupDao.insertMember(GroupMemberEntity(event.groupId, normalized.onionAddress, normalized.nickname))
+        importGroupPeer(normalized, contacts.getMyContactInfo().onionAddress)
         return InboundResult.HANDLED
     }
 
@@ -240,7 +314,9 @@ class TorGroupMessaging private constructor(context: Context) {
         messageId: String,
         timestamp: Long
     ): InboundResult {
-        if (event.messageText.isBlank() || event.messageText.length > 8_000) return InboundResult.REJECTED
+        if (event.messageText.isBlank() || event.messageText.length > 8_000 || !sender.isEligibleForGroupMessaging()) {
+            return InboundResult.REJECTED
+        }
         if (groupDao.getGroup(event.groupId) == null || groupDao.getMember(event.groupId, sender.onionAddress) == null) {
             return InboundResult.REJECTED
         }
@@ -268,4 +344,29 @@ class TorGroupMessaging private constructor(context: Context) {
     }.getOrNull()
 
     private fun isUuid(value: String): Boolean = runCatching { UUID.fromString(value); true }.getOrDefault(false)
+
+    private fun OnionContactManager.OnionContact.toWireMember() = WireMember(
+        onionAddress = onionAddress,
+        nickname = nickname,
+        publicKey = publicKey,
+        mailboxOnion = mailboxOnion
+    )
+
+    private fun OnionContactManager.OnionContact.isEligibleForGroupMessaging(): Boolean =
+        !requiresRendezvous() &&
+            effectiveTrustState() != TorContactTrustState.BLOCKED &&
+            effectiveTrustState() != TorContactTrustState.KEY_CHANGED
+
+    private fun importGroupPeer(member: WireMember, myOnionAddress: String) {
+        if (member.onionAddress == myOnionAddress.lowercase()) return
+        contacts.addContact(
+            OnionContactManager.OnionContact(
+                id = UUID.randomUUID().toString(),
+                nickname = member.nickname,
+                onionAddress = member.onionAddress,
+                publicKey = member.publicKey,
+                mailboxOnion = member.mailboxOnion
+            )
+        )
+    }
 }

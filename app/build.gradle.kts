@@ -132,9 +132,11 @@ dependencies {
     // This bundles native Tor binaries and handles hidden service publishing
     // Required for other devices to connect TO us via our .onion address
     implementation("org.briarproject:onionwrapper-android:0.1.3")
-    implementation("org.briarproject:tor-android:0.4.8.22")
+    // Tor 0.4.8 is end-of-life. Keep the embedded client on the supported
+    // 0.4.9 series for current onion-service network compatibility and fixes.
+    implementation("org.briarproject:tor-android:0.4.9.12")
     implementation("org.briarproject:lyrebird-android:0.6.2")
-    torNativeBinaries("org.briarproject:tor-android:0.4.8.22")
+    torNativeBinaries("org.briarproject:tor-android:0.4.9.12")
     torNativeBinaries("org.briarproject:lyrebird-android:0.6.2")
 
     // Google Play Services Location

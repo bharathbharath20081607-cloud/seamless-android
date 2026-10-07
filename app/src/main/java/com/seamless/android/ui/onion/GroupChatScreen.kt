@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.GroupAdd
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AlertDialog
@@ -70,6 +71,7 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
     val listState = rememberLazyListState()
     var text by remember { mutableStateOf("") }
     var showAddMembers by remember { mutableStateOf(false) }
+    var showMembers by remember { mutableStateOf(false) }
     var selectedContacts by remember { mutableStateOf(emptySet<String>()) }
 
     LaunchedEffect(messages.size) {
@@ -92,6 +94,9 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = { showMembers = true }) {
+                        Icon(Icons.Default.Group, "View members", tint = OnionUi.TextSecondary)
+                    }
                     if (group.isCreatedByMe) {
                         IconButton(onClick = { showAddMembers = true }) {
                             Icon(Icons.Default.GroupAdd, "Add members", tint = OnionUi.Accent)
@@ -184,6 +189,30 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
             dismissButton = { TextButton(onClick = { showAddMembers = false }) { Text("Cancel") } }
         )
     }
+
+    if (showMembers) {
+        AlertDialog(
+            onDismissRequest = { showMembers = false },
+            title = { Text("Group members") },
+            text = {
+                LazyColumn {
+                    items(members, key = { it.memberOnionAddress }) { member ->
+                        Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                            Text(member.memberNickname, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                member.memberOnionAddress.take(22) + "…",
+                                color = OnionUi.TextSecondary,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showMembers = false }) { Text("Done") }
+            }
+        )
+    }
 }
 
 @Composable
@@ -204,6 +233,18 @@ private fun GroupMessageBubble(message: GroupMessageEntity) {
                 color = Color.White.copy(alpha = 0.58f),
                 fontSize = 10.sp
             )
+            if (outgoing) {
+                Text(
+                    when (message.deliveryState) {
+                        "QUEUED" -> "Queued over Tor"
+                        "PARTIAL" -> "Some recipients need attention"
+                        "FAILED" -> "Not queued"
+                        else -> message.deliveryState.lowercase().replaceFirstChar { it.uppercase() }
+                    },
+                    color = Color.White.copy(alpha = 0.58f),
+                    fontSize = 10.sp
+                )
+            }
         }
     }
 }
