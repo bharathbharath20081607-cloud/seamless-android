@@ -253,7 +253,12 @@ class TorGroupMessaging private constructor(context: Context) {
 
     suspend fun sendGroupMessage(groupId: String, text: String): Result<String> = runCatching {
         val cleanText = text.trim()
-        require(cleanText.isNotEmpty() && cleanText.length <= 8_000) { "Message is empty or too long" }
+        // Group events are JSON then Base64-encoded before the pairwise sealed
+        // envelope is applied. This limit guarantees the final encrypted event
+        // fits in the fixed-size Tor transport frame.
+        require(cleanText.isNotEmpty() && cleanText.toByteArray(Charsets.UTF_8).size <= 2_400) {
+            "Message is empty or too long for secure group delivery"
+        }
         requireNotNull(groupDao.getGroup(groupId)) { "Group not found" }
         val me = contacts.getMyContactInfo()
         require(groupDao.getMember(groupId, me.onionAddress) != null) { "You are not a member of this group" }
@@ -400,7 +405,7 @@ class TorGroupMessaging private constructor(context: Context) {
             normalizedMembers.distinctBy { it.publicKey }.size == normalizedMembers.size &&
             normalizedMembers.all { member ->
                 member.onionAddress.isNotBlank() &&
-                    member.onionAddress.contains(".onion", ignoreCase = true) &&
+                OnionContactManager.OnionContact.isValidOnionEndpoint(member.onionAddress) &&
                     member.nickname.length in 1..80 &&
                     member.publicKey.matches(HEX_PUBLIC_KEY)
             }
@@ -466,7 +471,9 @@ class TorGroupMessaging private constructor(context: Context) {
                 ?.let(OnionContactManager.OnionContact::canonicalizeOnionEndpoint)
                 ?.takeIf { it.isNotBlank() }
         )
-        if (!normalized.onionAddress.contains(".onion", ignoreCase = true)) return InboundResult.REJECTED
+        if (!OnionContactManager.OnionContact.isValidOnionEndpoint(normalized.onionAddress)) {
+            return InboundResult.REJECTED
+        }
         groupDao.insertMember(GroupMemberEntity(event.groupId, normalized.onionAddress, normalized.nickname))
         importGroupPeer(normalized, contacts.getMyContactInfo().onionAddress)
         return InboundResult.HANDLED
@@ -513,7 +520,10 @@ class TorGroupMessaging private constructor(context: Context) {
         messageId: String,
         timestamp: Long
     ): InboundResult {
-        if (event.messageText.isBlank() || event.messageText.length > 8_000 || !sender.isEligibleForGroupMessaging()) {
+        if (event.messageText.isBlank() ||
+            event.messageText.toByteArray(Charsets.UTF_8).size > 2_400 ||
+            !sender.isEligibleForGroupMessaging()
+        ) {
             return InboundResult.REJECTED
         }
         val group = groupDao.getGroup(event.groupId) ?: return InboundResult.REJECTED

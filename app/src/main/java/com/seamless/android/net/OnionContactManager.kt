@@ -69,7 +69,7 @@ class OnionContactManager private constructor(private val context: Context) {
             return needsRendezvous ||
                 canonicalOnion.isBlank() ||
                 canonicalOnion.equals(UNRESOLVED_ONION, ignoreCase = true) ||
-                !canonicalOnion.contains(".onion", ignoreCase = true)
+                !isValidOnionEndpoint(canonicalOnion)
         }
 
         fun toShareableLink(): String {
@@ -130,6 +130,21 @@ class OnionContactManager private constructor(private val context: Context) {
         }
 
         companion object {
+            private val V3_ONION_HOST = Regex("^[a-z2-7]{56}\\.onion$")
+
+            /**
+             * Tor P2P endpoints are v3 onion hosts, optionally followed by a
+             * valid TCP port. Keeping this check at the contact boundary avoids
+             * queuing traffic to look-alike or malformed destinations.
+             */
+            fun isValidOnionEndpoint(raw: String): Boolean {
+                val endpoint = raw.trim().lowercase()
+                val host = endpoint.substringBefore(":")
+                val portText = endpoint.substringAfter(":", "")
+                if (!V3_ONION_HOST.matches(host)) return false
+                return portText.isEmpty() || (portText.toIntOrNull() in 1..65_535)
+            }
+
             fun canonicalizeOnionEndpoint(raw: String): String {
                 val clean = raw.trim()
                     .removePrefix("http://")
@@ -156,10 +171,12 @@ class OnionContactManager private constructor(private val context: Context) {
                     if (publicKey.isBlank() || nickname.isBlank()) return null
 
                     val onionAddress = canonicalizeOnionEndpoint(parsed.getQueryParameter("o")?.trim().orEmpty())
-                    val mailboxOnion = parsed.getQueryParameter("m")?.trim()
+                    val mailboxOnion = canonicalizeOnionEndpoint(parsed.getQueryParameter("m")?.trim().orEmpty())
+                        .takeIf(::isValidOnionEndpoint)
                     val rendezvousId = parsed.getQueryParameter("r")?.trim()
                     val unresolved = onionAddress.isBlank() ||
-                        onionAddress.equals(UNRESOLVED_ONION, ignoreCase = true)
+                        onionAddress.equals(UNRESOLVED_ONION, ignoreCase = true) ||
+                        !isValidOnionEndpoint(onionAddress)
 
                     OnionContact(
                         id = UUID.randomUUID().toString(),
@@ -188,11 +205,13 @@ class OnionContactManager private constructor(private val context: Context) {
                     val publicKey = parts[1].trim()
                     val nickname = URLDecoder.decode(parts[2], "UTF-8").trim()
                     val mailbox = parts.getOrNull(3)?.let {
-                        URLDecoder.decode(it, "UTF-8").trim()
-                    }?.takeIf { it.isNotBlank() }
+                        canonicalizeOnionEndpoint(URLDecoder.decode(it, "UTF-8").trim())
+                    }?.takeIf(::isValidOnionEndpoint)
 
                     if (publicKey.isBlank() || nickname.isBlank()) return null
-                    val unresolved = onion.isBlank() || onion.equals(UNRESOLVED_ONION, ignoreCase = true)
+                    val unresolved = onion.isBlank() ||
+                        onion.equals(UNRESOLVED_ONION, ignoreCase = true) ||
+                        !isValidOnionEndpoint(onion)
 
                     OnionContact(
                         id = UUID.randomUUID().toString(),

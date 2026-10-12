@@ -63,6 +63,9 @@ class TorMessagingService private constructor(private val context: Context) {
         // A mailbox-capable contact should not wait through the entire Tor
         // socket timeout before its durable offline route is attempted.
         private const val INITIAL_DIRECT_DIAL_BUDGET_MS = 12_000L
+        // Leave room for the encrypted envelope and fixed Tor frame metadata.
+        // Enforce this at queue time so an accepted message is always sendable.
+        private const val MAX_DIRECT_TEXT_BYTES = 3_700
         private val DIRECT_SEALED_MAGIC = byteArrayOf(0x53, 0x54, 0x44, 0x50) // STDP
         
         @Volatile
@@ -507,12 +510,23 @@ class TorMessagingService private constructor(private val context: Context) {
         completesUiMessage: Boolean = true
     ): Result<String> = mutex.withLock {
         try {
-            Log.d(TAG, "📤 Sending message to ${redactEndpoint(recipientOnion)}")
+            val canonicalRecipient = OnionContactManager.OnionContact
+                .canonicalizeOnionEndpoint(recipientOnion)
+            require(OnionContactManager.OnionContact.isValidOnionEndpoint(canonicalRecipient)) {
+                "Invalid Tor v3 onion endpoint"
+            }
+            require(text.toByteArray(Charsets.UTF_8).size <= MAX_DIRECT_TEXT_BYTES) {
+                "Message is too large for a single Tor frame"
+            }
+            require(replyToId == null || replyToId.toByteArray(Charsets.UTF_8).size <= 128) {
+                "Reply reference is too large"
+            }
+            Log.d(TAG, "📤 Sending message to ${redactEndpoint(canonicalRecipient)}")
             
-            val contact = contactManager.getContactByOnion(recipientOnion)
+            val contact = contactManager.getContactByOnion(canonicalRecipient)
 
             // Get or create sequence manager
-            val seqManager = sequenceManagers.getOrPut(recipientOnion) {
+            val seqManager = sequenceManagers.getOrPut(canonicalRecipient) {
                 OnionMessageProtocol.SequenceManager()
             }
 
@@ -525,7 +539,7 @@ class TorMessagingService private constructor(private val context: Context) {
                 recipientKey = contact?.publicKey.orEmpty(),
                 timestamp = timestamp,
                 sequence = sequence,
-                previousHash = getChainHead(recipientOnion),
+                previousHash = getChainHead(canonicalRecipient),
                 payloadType = TorEnvelopePayloadType.MESSAGE,
                 ciphertext = chatPayload
             )
@@ -540,16 +554,16 @@ class TorMessagingService private constructor(private val context: Context) {
             
             // Enqueue for delivery
             val queuedMessageId = messageQueue.enqueue(
-                recipientOnion = recipientOnion,
+                recipientOnion = canonicalRecipient,
                 frame = frame,
                 uiMessageId = messageId.toString(),
                 completesUiMessage = completesUiMessage
             )
             deliveryRoutes[queuedMessageId] = TorDeliveryRoute.QUEUED
-            updateChainHead(recipientOnion, envelope.chainHash())
+            updateChainHead(canonicalRecipient, envelope.chainHash())
             queueWakeSignal.tryEmit(Unit)
             
-            Log.i(TAG, "📨 Message $messageId queued for ${redactEndpoint(recipientOnion)}")
+            Log.i(TAG, "📨 Message $messageId queued for ${redactEndpoint(canonicalRecipient)}")
             Result.success(queuedMessageId)
             
         } catch (e: Exception) {
@@ -1486,10 +1500,20 @@ class TorMessagingService private constructor(private val context: Context) {
             Log.w(TAG, "Failed to parse contact exchange from ${redactEndpoint(senderOnion)}")
             return
         }
+        val canonicalExchangeOnion = OnionContactManager.OnionContact
+            .canonicalizeOnionEndpoint(exchange.onionAddress)
+        val validExchange = OnionContactManager.OnionContact
+            .isValidOnionEndpoint(canonicalExchangeOnion) &&
+            exchange.nickname.trim().length in 1..80 &&
+            exchange.publicKey.matches(Regex("^[0-9a-fA-F]{64}$"))
+        if (!validExchange) {
+            Log.w(TAG, "Rejected malformed contact exchange from ${redactEndpoint(senderOnion)}")
+            return
+        }
         
         Log.i(TAG, "📩 Received contact exchange from ${exchange.nickname} (${exchange.onionAddress.take(16)}...)")
         
-        val existingByOnion = contactManager.getContactByOnion(exchange.onionAddress)
+        val existingByOnion = contactManager.getContactByOnion(canonicalExchangeOnion)
         val existingByKey = contactManager.getContactByPublicKey(exchange.publicKey)
         val keyChangedForOnion = existingByOnion != null &&
             !existingByOnion.publicKey.equals(exchange.publicKey, ignoreCase = true)
@@ -1502,14 +1526,14 @@ class TorMessagingService private constructor(private val context: Context) {
             val exchangedContact = OnionContactManager.OnionContact(
                 id = java.util.UUID.randomUUID().toString(),
                 nickname = exchange.nickname,
-                onionAddress = exchange.onionAddress,
+                onionAddress = canonicalExchangeOnion,
                 publicKey = exchange.publicKey,
                 addedAt = System.currentTimeMillis()
             )
             
             contactManager.addContact(exchangedContact)
             val currentContact = contactManager.getContactByPublicKey(exchange.publicKey)
-                ?: contactManager.getContactByOnion(exchange.onionAddress)
+                ?: contactManager.getContactByOnion(canonicalExchangeOnion)
                 ?: exchangedContact
             contactManager.updateLastSeen(currentContact.id)
             Log.i(TAG, "✅ Auto-paired with ${exchange.nickname}!")
@@ -1523,7 +1547,7 @@ class TorMessagingService private constructor(private val context: Context) {
             if (shouldRespond) {
                 scope.launch {
                     delay(1000) // Short delay to let connection stabilize
-                    sendContactExchange(exchange.onionAddress)
+                    sendContactExchange(canonicalExchangeOnion)
                     Log.i(TAG, "Sent CONTACT_EXCHANGE response back to ${exchange.nickname}")
                 }
             }
@@ -1532,7 +1556,7 @@ class TorMessagingService private constructor(private val context: Context) {
             // After successful pairing, share our mailbox so they can reach us offline
             scope.launch {
                 delay(3000) // Wait for encryption session to establish
-                sendMailboxExchange(exchange.onionAddress)
+                sendMailboxExchange(canonicalExchangeOnion)
             }
             
         } catch (e: Exception) {

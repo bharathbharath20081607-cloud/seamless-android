@@ -481,6 +481,9 @@ object OnionMessageProtocol {
             val onionBytes = onionAddress.toByteArray(Charsets.UTF_8)
             val nickBytes = nickname.toByteArray(Charsets.UTF_8)
             val keyBytes = publicKey.toByteArray(Charsets.UTF_8)
+            require(onionBytes.size in 1..96) { "Invalid onion endpoint length" }
+            require(nickBytes.size in 1..160) { "Invalid nickname length" }
+            require(keyBytes.size == 64) { "Invalid public key length" }
             
             val buffer = ByteBuffer.allocate(
                 2 + onionBytes.size +
@@ -504,16 +507,20 @@ object OnionMessageProtocol {
                     val buffer = ByteBuffer.wrap(data)
                     
                     val onionLen = buffer.getShort().toInt() and 0xFFFF
+                    if (onionLen !in 1..96 || onionLen > buffer.remaining()) return null
                     val onionBytes = ByteArray(onionLen)
                     buffer.get(onionBytes)
                     
                     val nickLen = buffer.getShort().toInt() and 0xFFFF
+                    if (nickLen !in 1..160 || nickLen > buffer.remaining()) return null
                     val nickBytes = ByteArray(nickLen)
                     buffer.get(nickBytes)
                     
                     val keyLen = buffer.getShort().toInt() and 0xFFFF
+                    if (keyLen != 64 || keyLen > buffer.remaining()) return null
                     val keyBytes = ByteArray(keyLen)
                     buffer.get(keyBytes)
+                    if (buffer.hasRemaining()) return null
                     
                     ContactExchange(
                         onionAddress = String(onionBytes, Charsets.UTF_8),
