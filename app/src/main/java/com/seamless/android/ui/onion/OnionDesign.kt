@@ -1,6 +1,7 @@
 package com.seamless.android.ui.onion
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -26,18 +27,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 internal object OnionUi {
-    val Canvas = Color(0xFF0B1018)
-    val CanvasRaised = Color(0xFF101925)
-    val Surface = Color(0xFF151F2D)
-    val SurfacePressed = Color(0xFF1B2838)
-    val Outline = Color(0xFF2A3A4D)
-    val Accent = Color(0xFF16C9A6)
-    val AccentStrong = Color(0xFF18A9E8)
-    val Online = Color(0xFF36D67A)
-    val Warning = Color(0xFFF6BF4F)
-    val Danger = Color(0xFFF36B72)
-    val TextSecondary = Color(0xFF9CAFC3)
-    val Corner = RoundedCornerShape(8.dp)
+    val Canvas = Color(0xFF000000)
+    val CanvasRaised = Color(0xFF09090C)
+    val Surface = Color(0xFF111116)
+    val SurfacePressed = Color(0xFF181820)
+    val Outline = Color(0xFF26262E)
+    val Accent = Color(0xFFFFFFFF)
+    val AccentStrong = Color(0xFF2B2B35)
+    val Online = Color(0xFF30D158)
+    val Warning = Color(0xFFFF9F0A)
+    val Danger = Color(0xFFFF453A)
+    val TextSecondary = Color(0xFFA8A8B2)
+    val TextMuted = Color(0xFF6E6E78)
+    val Corner = RoundedCornerShape(16.dp)
+    val Hairline = Color.White.copy(alpha = 0.08f)
 }
 
 @Composable
@@ -45,7 +48,7 @@ internal fun OnionPage(content: @Composable () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(OnionUi.Canvas, OnionUi.CanvasRaised)))
+            .background(Brush.verticalGradient(listOf(OnionUi.Canvas, Color(0xFF060609), OnionUi.Canvas)))
     ) { content() }
 }
 
@@ -83,7 +86,8 @@ internal fun OnionAvatar(
             modifier = Modifier
                 .size(52.dp)
                 .clip(CircleShape)
-                .background(Brush.linearGradient(listOf(OnionUi.AccentStrong, OnionUi.Accent))),
+                .background(Brush.linearGradient(listOf(Color(0xFF2E2E38), Color(0xFF1A1A21))))
+                .border(1.dp, Color.White.copy(alpha = 0.14f), CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Text(

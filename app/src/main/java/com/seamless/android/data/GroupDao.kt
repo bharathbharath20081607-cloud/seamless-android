@@ -42,10 +42,37 @@ interface GroupDao {
     @Query("DELETE FROM group_members WHERE groupId = :groupId AND memberOnionAddress = :onionAddress")
     suspend fun removeMember(groupId: String, onionAddress: String)
 
+    @Query("DELETE FROM group_members WHERE groupId = :groupId")
+    suspend fun deleteMembersForGroup(groupId: String)
+
+    @Query("DELETE FROM private_groups WHERE groupId = :groupId")
+    suspend fun deleteGroupById(groupId: String)
+
+    @Query("UPDATE private_groups SET name = :name WHERE groupId = :groupId")
+    suspend fun renameGroup(groupId: String, name: String)
+
     // ── Group Messages ──
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertGroupMessage(message: GroupMessageEntity)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertGroupMessageIfAbsent(message: GroupMessageEntity): Long
+
+    @Query("SELECT * FROM group_messages WHERE id = :id LIMIT 1")
+    suspend fun getGroupMessage(id: String): GroupMessageEntity?
+
+    @Query("UPDATE group_messages SET deliveryState = :state WHERE id = :id")
+    suspend fun updateGroupMessageState(id: String, state: String)
+
+    @Query("DELETE FROM group_messages WHERE groupId = :groupId")
+    suspend fun deleteMessagesForGroup(groupId: String)
+
+    @Query("SELECT COUNT(*) FROM group_messages WHERE groupId = :groupId AND isFromMe = 0 AND timestamp > :since")
+    fun getUnreadCount(groupId: String, since: Long): Flow<Int>
+
+    @Query("SELECT * FROM group_messages WHERE groupId = :groupId ORDER BY timestamp DESC LIMIT 1")
+    fun getLastMessage(groupId: String): Flow<GroupMessageEntity?>
 
     @Query("SELECT * FROM group_messages WHERE groupId = :groupId ORDER BY timestamp ASC")
     fun getGroupMessages(groupId: String): Flow<List<GroupMessageEntity>>

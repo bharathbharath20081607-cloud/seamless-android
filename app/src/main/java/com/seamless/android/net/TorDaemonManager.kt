@@ -40,6 +40,7 @@ class TorDaemonManager private constructor(private val application: Application)
         // Tor ports - must not conflict with Arti
         const val HIDDEN_SERVICE_SOCKS_PORT = 19050  // Different from Arti's 9150
         const val CONTROL_PORT = 19051
+        private const val SOCKS_READY_TIMEOUT_MS = 30_000L
         
         // Architecture mappings for Tor binaries
         private val ARCH_MAP = mapOf(
@@ -228,6 +229,8 @@ class TorDaemonManager private constructor(private val application: Application)
         } catch (e: Exception) {
             val errorMessage = "${e::class.java.simpleName}: ${e.message ?: "unknown error"}"
             Log.e(TAG, "Failed to start Tor daemon: $errorMessage", e)
+            isRunning.set(false)
+            torWrapper = null
             _status.value = DaemonStatus(
                 state = DaemonState.ERROR,
                 error = errorMessage
@@ -250,6 +253,13 @@ class TorDaemonManager private constructor(private val application: Application)
         }
         
         try {
+            if (!waitForDaemonSocks()) {
+                val message = "Tor SOCKS listener was not ready for hidden-service publishing"
+                Log.w(TAG, message)
+                _status.value = _status.value.copy(error = message)
+                return@withContext null
+            }
+
             Log.i(TAG, "📡 Publishing hidden service on port $localPort")
             
             // Publish the hidden service
@@ -356,6 +366,10 @@ class TorDaemonManager private constructor(private val application: Application)
                 }
 
                 try {
+                    if (!waitForDaemonSocks()) {
+                        Log.w(TAG, "Cannot publish mailbox hidden service - Tor SOCKS listener is not ready")
+                        return@withContext null
+                    }
                     val props = publishMailboxWithKeyRecovery(wrapper, localPort, localPort)
                     mailboxServiceProps = props
                     if (mailboxServicePrivateKey == null) {
@@ -440,6 +454,24 @@ class TorDaemonManager private constructor(private val application: Application)
             }
             wrapper.publishHiddenService(localPort, virtualPort, null)
         }
+    }
+
+    private suspend fun waitForDaemonSocks(timeoutMs: Long = SOCKS_READY_TIMEOUT_MS): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                java.net.Socket().use { socket ->
+                    socket.connect(
+                        java.net.InetSocketAddress("127.0.0.1", HIDDEN_SERVICE_SOCKS_PORT),
+                        500
+                    )
+                }
+                return true
+            } catch (_: Exception) {
+                delay(500)
+            }
+        }
+        return false
     }
     
     /**

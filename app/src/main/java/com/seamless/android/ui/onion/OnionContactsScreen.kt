@@ -131,8 +131,6 @@ fun OnionContactsScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var showQrInput by remember { mutableStateOf(false) }
     var showCreateGroup by remember { mutableStateOf(false) }
-    var newGroupName by remember { mutableStateOf("") }
-    var selectedGroupInvitees by remember { mutableStateOf(emptySet<String>()) }
 
     LaunchedEffect(Unit) {
         if (serviceState == TorMessagingService.ServiceState.STOPPED) {
@@ -289,93 +287,25 @@ fun OnionContactsScreen(
     }
 
     if (showCreateGroup) {
-        AlertDialog(
-            onDismissRequest = { showCreateGroup = false },
-            title = { Text("Create private group") },
-            text = {
-                Column {
-                    OutlinedTextField(
-                        value = newGroupName,
-                        onValueChange = { if (it.length <= 80) newGroupName = it },
-                        label = { Text("Group name") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    Text("Invite contacts", fontWeight = FontWeight.SemiBold)
-                    LazyColumn(modifier = Modifier.height(220.dp)) {
-                        items(contacts.filter { !it.requiresRendezvous() }, key = { it.id }) { contact ->
-                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                Checkbox(
-                                    checked = contact.id in selectedGroupInvitees,
-                                    onCheckedChange = { checked ->
-                                        selectedGroupInvitees = if (checked) selectedGroupInvitees + contact.id else selectedGroupInvitees - contact.id
-                                    }
-                                )
-                                Text(contact.nickname, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
+        CreateGroupSheet(
+            contacts = contacts,
+            onDismiss = { showCreateGroup = false },
+            onCreate = { name, invitees ->
+                if (name.isBlank()) return@CreateGroupSheet
+                showCreateGroup = false
+                scope.launch {
+                    TorGroupMessaging.getInstance(context).createGroup(name, invitees)
+                        .onSuccess { onGroupClick(it) }
+                        .onFailure {
+                            Toast.makeText(
+                                context,
+                                it.message ?: "Unable to create group",
+                                Toast.LENGTH_SHORT
+                            ).show()
                         }
-                    }
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val name = newGroupName
-                    val invitees = selectedGroupInvitees
-                    if (name.isBlank()) return@TextButton
-                    showCreateGroup = false
-                    newGroupName = ""
-                    selectedGroupInvitees = emptySet()
-                    scope.launch {
-                        TorGroupMessaging.getInstance(context).createGroup(name, invitees)
-                            .onSuccess { onGroupClick(it) }
-                            .onFailure { Toast.makeText(context, it.message ?: "Unable to create group", Toast.LENGTH_SHORT).show() }
-                    }
-                }) { Text("Create") }
-            },
-            dismissButton = { TextButton(onClick = { showCreateGroup = false }) { Text("Cancel") } }
+            }
         )
-    }
-}
-
-@Composable
-private fun PrivateGroupsTab(onGroupClick: (PrivateGroupEntity) -> Unit) {
-    val context = LocalContext.current
-    val groups by remember { AppDatabase.getDatabase(context).groupDao().getAllGroups() }
-        .collectAsState(initial = emptyList())
-    if (groups.isEmpty()) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
-                Icon(Icons.Default.Groups, null, tint = OnionUi.Accent, modifier = Modifier.size(64.dp))
-                Spacer(Modifier.height(14.dp))
-                Text("No private groups", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(6.dp))
-                Text("Create a group to send end-to-end encrypted messages over Tor.", color = Color(0xFF9FA8C8), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-            }
-        }
-    } else {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            items(groups, key = { it.groupId }) { group ->
-                Card(
-                    modifier = Modifier.fillMaxWidth().clickable { onGroupClick(group) },
-                    shape = OnionUi.Corner,
-                    colors = CardDefaults.cardColors(containerColor = OnionUi.Surface)
-                ) {
-                    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Groups, null, tint = OnionUi.Accent, modifier = Modifier.size(34.dp))
-                        Spacer(Modifier.width(14.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(group.name, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                            Text(if (group.isCreatedByMe) "You created this group" else "Private Tor group", color = Color(0xFF9FA8C8), fontSize = 13.sp)
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 

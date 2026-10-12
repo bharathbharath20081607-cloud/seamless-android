@@ -1767,6 +1767,11 @@ class TorMessagingService private constructor(private val context: Context) {
     private suspend fun handleAck(frame: OnionMessageProtocol.OnionFrame) {
         val ackedId = OnionMessageProtocol.getAckedMessageId(frame) ?: return
         Log.d(TAG, "✅ ACK received for message $ackedId")
+        try {
+            groupMessaging.onTransportAck(ackedId.toString())
+        } catch (e: Exception) {
+            Log.w(TAG, "Group delivery tracking failed: ${e.message}")
+        }
 
         // Preserve the queue record long enough to map the transport ACK back to
         // its visible chat item. Photo metadata and intermediate chunks must not

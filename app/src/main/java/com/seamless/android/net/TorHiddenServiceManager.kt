@@ -7,6 +7,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import java.io.File
 import java.net.ServerSocket
+import java.net.SocketException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -257,7 +258,14 @@ class TorHiddenServiceManager private constructor(private val context: Context) 
      * Start the local server to handle incoming connections
      */
     private fun startServer() {
-        serverSocket = ServerSocket(HIDDEN_SERVICE_PORT)
+        try {
+            serverSocket?.close()
+        } catch (_: Exception) {
+        }
+        serverSocket = ServerSocket().apply {
+            reuseAddress = true
+            bind(java.net.InetSocketAddress("127.0.0.1", HIDDEN_SERVICE_PORT))
+        }
         
         serverJob = scope.launch {
             Log.i(TAG, "🔌 Hidden service server listening on port $HIDDEN_SERVICE_PORT")
@@ -275,7 +283,7 @@ class TorHiddenServiceManager private constructor(private val context: Context) 
                         connectionListener?.onIncomingConnection(socket)
                     }
                     
-                } catch (e: java.net.SocketException) {
+                } catch (e: SocketException) {
                     if (isRunning.get()) {
                         Log.e(TAG, "Server socket error: ${e.message}")
                     }
