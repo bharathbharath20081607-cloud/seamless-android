@@ -389,6 +389,7 @@ class TorMessagingService private constructor(private val context: Context) {
                 myOnionAddress = myInfo.onionAddress,
                 myNickname = myInfo.nickname,
                 myPublicKey = myInfo.publicKey,
+                myAvatarId = myInfo.avatarId,
                 sequence = seqManager.nextOutbound()
             )
             
@@ -1528,6 +1529,7 @@ class TorMessagingService private constructor(private val context: Context) {
                 nickname = exchange.nickname,
                 onionAddress = canonicalExchangeOnion,
                 publicKey = exchange.publicKey,
+                avatarId = OnionContactManager.OnionContact.canonicalAvatarId(exchange.avatarId),
                 addedAt = System.currentTimeMillis()
             )
             

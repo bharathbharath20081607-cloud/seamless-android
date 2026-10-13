@@ -475,20 +475,24 @@ object OnionMessageProtocol {
     data class ContactExchange(
         val onionAddress: String,
         val nickname: String,
-        val publicKey: String
+        val publicKey: String,
+        val avatarId: String = "aurora"
     ) {
         fun toBytes(): ByteArray {
             val onionBytes = onionAddress.toByteArray(Charsets.UTF_8)
             val nickBytes = nickname.toByteArray(Charsets.UTF_8)
             val keyBytes = publicKey.toByteArray(Charsets.UTF_8)
+            val avatarBytes = avatarId.toByteArray(Charsets.UTF_8)
             require(onionBytes.size in 1..96) { "Invalid onion endpoint length" }
             require(nickBytes.size in 1..160) { "Invalid nickname length" }
             require(keyBytes.size == 64) { "Invalid public key length" }
+            require(avatarBytes.size in 1..16) { "Invalid avatar identifier length" }
             
             val buffer = ByteBuffer.allocate(
                 2 + onionBytes.size +
                 2 + nickBytes.size +
-                2 + keyBytes.size
+                2 + keyBytes.size +
+                1 + avatarBytes.size
             )
             
             buffer.putShort(onionBytes.size.toShort())
@@ -497,6 +501,8 @@ object OnionMessageProtocol {
             buffer.put(nickBytes)
             buffer.putShort(keyBytes.size.toShort())
             buffer.put(keyBytes)
+            buffer.put(avatarBytes.size.toByte())
+            buffer.put(avatarBytes)
             
             return buffer.array()
         }
@@ -520,12 +526,20 @@ object OnionMessageProtocol {
                     if (keyLen != 64 || keyLen > buffer.remaining()) return null
                     val keyBytes = ByteArray(keyLen)
                     buffer.get(keyBytes)
+                    val avatarId = if (buffer.hasRemaining()) {
+                        val avatarLength = buffer.get().toInt() and 0xFF
+                        if (avatarLength !in 1..16 || avatarLength > buffer.remaining()) return null
+                        String(ByteArray(avatarLength).also { buffer.get(it) }, Charsets.UTF_8)
+                    } else {
+                        "aurora"
+                    }
                     if (buffer.hasRemaining()) return null
                     
                     ContactExchange(
                         onionAddress = String(onionBytes, Charsets.UTF_8),
                         nickname = String(nickBytes, Charsets.UTF_8),
-                        publicKey = String(keyBytes, Charsets.UTF_8)
+                        publicKey = String(keyBytes, Charsets.UTF_8),
+                        avatarId = avatarId
                     )
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to parse contact exchange: ${e.message}")
@@ -542,12 +556,14 @@ object OnionMessageProtocol {
         myOnionAddress: String,
         myNickname: String,
         myPublicKey: String,
+        myAvatarId: String = "aurora",
         sequence: Long
     ): OnionFrame {
         val exchange = ContactExchange(
             onionAddress = myOnionAddress,
             nickname = myNickname,
-            publicKey = myPublicKey
+            publicKey = myPublicKey,
+            avatarId = myAvatarId
         )
         return OnionFrame(
             messageId = UUID.randomUUID(),

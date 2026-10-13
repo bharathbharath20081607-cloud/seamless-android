@@ -11,6 +11,8 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -29,6 +31,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -94,6 +97,8 @@ fun OnionChatScreen(
     // UI state
     var messageText by remember { mutableStateOf("") }
     var isSending by remember { mutableStateOf(false) }
+    var emojiEffectText by remember { mutableStateOf("") }
+    var emojiEffectToken by remember { mutableIntStateOf(0) }
     var trustState by remember(contact.id) { mutableStateOf(contact.effectiveTrustState()) }
     var showTrustMenu by remember { mutableStateOf(false) }
     var startupRecoveryAttempted by remember(contact.id) { mutableStateOf(false) }
@@ -510,6 +515,8 @@ fun OnionChatScreen(
                             } else if (messageText.isNotBlank() && !isSending) {
                                 val text = messageText
                                 messageText = ""
+                                emojiEffectText = text
+                                emojiEffectToken++
                                 messagingService.setTyping(contact.id, false)
                                 isSending = true
                                 
@@ -622,6 +629,7 @@ fun OnionChatScreen(
                     }
                 }
             }
+            TorEmojiBurst(emojiEffectToken, emojiEffectText)
         }
     }
 }
@@ -763,6 +771,10 @@ private fun TorMessageBubble(
         bottomEnd = if (message.isFromMe) 6.dp else 20.dp
     )
     val bubbleColor = if (message.isFromMe) OnionUi.AccentStrong else OnionUi.Surface
+    var appeared by remember(message.id) { mutableStateOf(false) }
+    LaunchedEffect(message.id) { appeared = true }
+    val bubbleAlpha by animateFloatAsState(if (appeared) 1f else 0f, tween(180), label = "bubble_alpha")
+    val bubbleOffset by animateFloatAsState(if (appeared) 0f else 18f, tween(220), label = "bubble_offset")
 
     Column(
         modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
@@ -771,6 +783,10 @@ private fun TorMessageBubble(
         Box(
             modifier = Modifier
                 .widthIn(max = 320.dp)
+                .graphicsLayer {
+                    alpha = bubbleAlpha
+                    translationY = bubbleOffset
+                }
                 .shadow(
                     elevation = if (message.isFromMe) 3.dp else 1.dp,
                     shape = shape,
@@ -804,6 +820,27 @@ private fun TorMessageBubble(
                         text = message.text,
                         color = Color.White,
                         fontSize = 15.sp
+                    )
+                }
+
+                if (message.attachmentPath != null && message.isFromMe &&
+                    deliveryState !in setOf(
+                        OnionMessageProtocol.DeliveryState.DELIVERED,
+                        OnionMessageProtocol.DeliveryState.READ,
+                        OnionMessageProtocol.DeliveryState.FAILED
+                    )
+                ) {
+                    Spacer(Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth().height(3.dp).clip(CircleShape),
+                        color = OnionUi.Accent,
+                        trackColor = Color.White.copy(alpha = 0.16f)
+                    )
+                    Text(
+                        "Securing photo for Tor delivery",
+                        color = Color.White.copy(alpha = 0.62f),
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(top = 5.dp)
                     )
                 }
                 

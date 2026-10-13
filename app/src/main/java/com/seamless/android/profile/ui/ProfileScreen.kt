@@ -17,6 +17,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -82,6 +83,7 @@ fun ProfileScreen(
     var displayName by remember { mutableStateOf("") }
     var bio by remember { mutableStateOf("") }
     var avatarUri by remember { mutableStateOf<Uri?>(null) }
+    var avatarStyle by remember { mutableStateOf("aurora") }
     var isSaving by remember { mutableStateOf(false) }
 
     // ── Staggered Entrance Visibility Flags ──────────────────────────────
@@ -94,6 +96,7 @@ fun ProfileScreen(
         if (profile != null) {
             displayName = profile.displayName
             bio = profile.bio
+            avatarStyle = profile.avatarStyle
             profile.avatarUri?.let { avatarUri = Uri.parse(it) }
         }
         // Staggered entrance cascade
@@ -454,6 +457,8 @@ fun ProfileScreen(
                             onDisplayNameChange = { if (it.length <= 30) displayName = it },
                             bio = bio,
                             onBioChange = { if (it.length <= 100) bio = it },
+                            avatarStyle = avatarStyle,
+                            onAvatarStyleChange = { avatarStyle = it },
                             isSaving = isSaving,
                             isInitialSetup = isInitialSetup,
                             shimmerX = shimmerX,
@@ -467,7 +472,7 @@ fun ProfileScreen(
                                             val savedUri = profileManager.saveAvatarImage(avatarUri!!)
                                             if (savedUri != null) finalUri = savedUri
                                         }
-                                        profileManager.saveProfile(displayName, finalUri, bio)
+                                        profileManager.saveProfile(displayName, finalUri, bio, avatarStyle)
                                         isSaving = false
                                         isEditing = false
                                         if (isInitialSetup) onSetupComplete()
@@ -501,6 +506,8 @@ private fun EditModeContent(
     onDisplayNameChange: (String) -> Unit,
     bio: String,
     onBioChange: (String) -> Unit,
+    avatarStyle: String,
+    onAvatarStyleChange: (String) -> Unit,
     isSaving: Boolean,
     isInitialSetup: Boolean,
     shimmerX: Float,
@@ -564,6 +571,36 @@ private fun EditModeContent(
                 singleLine = false,
                 maxLines = 3
             )
+        }
+
+        AnimatedVisibility(
+            visible = showField2,
+            enter = fadeIn(tween(400)) + slideInVertically(initialOffsetY = { 40 })
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Contact avatar",
+                    color = MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.labelLarge
+                )
+                Text(
+                    "Shared with new Tor contacts without sending your profile photo.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf("aurora", "ember", "tide", "orchid", "mint", "copper").forEach { style ->
+                        FilterChip(
+                            selected = avatarStyle == style,
+                            onClick = { onAvatarStyleChange(style) },
+                            label = { Text(style.replaceFirstChar { it.uppercase() }) }
+                        )
+                    }
+                }
+            }
         }
 
         Spacer(Modifier.height(8.dp))

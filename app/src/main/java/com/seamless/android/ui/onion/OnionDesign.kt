@@ -79,19 +79,28 @@ internal fun OnionStatusChip(
 internal fun OnionAvatar(
     label: String,
     online: Boolean,
+    avatarId: String = "aurora",
     modifier: Modifier = Modifier
 ) {
+    val (start, end, mark) = when (avatarId) {
+        "ember" -> Triple(Color(0xFFFF7A59), Color(0xFF8D2D37), "✦")
+        "tide" -> Triple(Color(0xFF35B7FF), Color(0xFF1F4E8C), "◌")
+        "orchid" -> Triple(Color(0xFFCC7BFF), Color(0xFF643B88), "✧")
+        "mint" -> Triple(Color(0xFF3DDC97), Color(0xFF176B55), "◇")
+        "copper" -> Triple(Color(0xFFE6A15A), Color(0xFF7E4630), "●")
+        else -> Triple(Color(0xFF7D8CFF), Color(0xFF3C467D), "✦")
+    }
     Box(modifier = modifier, contentAlignment = Alignment.BottomEnd) {
         Box(
             modifier = Modifier
                 .size(52.dp)
                 .clip(CircleShape)
-                .background(Brush.linearGradient(listOf(Color(0xFF2E2E38), Color(0xFF1A1A21))))
+                .background(Brush.linearGradient(listOf(start, end)))
                 .border(1.dp, Color.White.copy(alpha = 0.14f), CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Text(
-                label.firstOrNull()?.uppercase() ?: "?",
+                mark,
                 color = Color.White,
                 fontWeight = FontWeight.Bold,
                 fontSize = 21.sp

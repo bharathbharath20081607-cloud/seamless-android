@@ -17,6 +17,7 @@ import java.util.UUID
 data class UserProfile(
     val displayName: String,
     val avatarUri: String?, // String URI or path to internal storage
+    val avatarStyle: String = "aurora",
     val bio: String = "",
     val updatedAt: Long = System.currentTimeMillis()
 )
@@ -33,6 +34,7 @@ class ProfileManager private constructor(private val context: Context) {
         private const val FALLBACK_PREFS_NAME = "bitchat_profile_fallback"
         private const val KEY_DISPLAY_NAME = "display_name"
         private const val KEY_AVATAR_URI = "avatar_uri"
+        private const val KEY_AVATAR_STYLE = "avatar_style"
         private const val KEY_BIO = "bio"
         private const val KEY_UPDATED_AT = "updated_at"
 
@@ -78,10 +80,11 @@ class ProfileManager private constructor(private val context: Context) {
         val name = prefs.getString(KEY_DISPLAY_NAME, null)
         if (name != null) {
             val avatar = prefs.getString(KEY_AVATAR_URI, null)
+            val avatarStyle = prefs.getString(KEY_AVATAR_STYLE, "aurora") ?: "aurora"
             val bio = prefs.getString(KEY_BIO, "") ?: ""
             val updated = prefs.getLong(KEY_UPDATED_AT, 0L)
             
-            _currentUserProfile.value = UserProfile(name, avatar, bio, updated)
+            _currentUserProfile.value = UserProfile(name, avatar, avatarStyle, bio, updated)
             Log.d(TAG, "Loaded profile: $name")
         } else {
             _currentUserProfile.value = null
@@ -92,7 +95,12 @@ class ProfileManager private constructor(private val context: Context) {
     /**
      * Save or update the user profile.
      */
-    fun saveProfile(displayName: String, avatarUri: Uri?, bio: String = "") {
+    fun saveProfile(
+        displayName: String,
+        avatarUri: Uri?,
+        bio: String = "",
+        avatarStyle: String = "aurora"
+    ) {
         val uriString = avatarUri?.toString()
         val now = System.currentTimeMillis()
 
@@ -103,12 +111,13 @@ class ProfileManager private constructor(private val context: Context) {
             } else {
                 remove(KEY_AVATAR_URI)
             }
+            putString(KEY_AVATAR_STYLE, avatarStyle)
             putString(KEY_BIO, bio)
             putLong(KEY_UPDATED_AT, now)
             apply()
         }
 
-        _currentUserProfile.value = UserProfile(displayName, uriString, bio, now)
+        _currentUserProfile.value = UserProfile(displayName, uriString, avatarStyle, bio, now)
         Log.d(TAG, "Saved profile: $displayName")
     }
 

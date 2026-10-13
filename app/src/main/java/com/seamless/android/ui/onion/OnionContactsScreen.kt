@@ -4,9 +4,17 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.Manifest
 import android.graphics.Bitmap
 import android.widget.Toast
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
 import androidx.camera.core.ImageProxy
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -60,6 +68,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.ui.window.Dialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -75,6 +84,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -99,6 +109,7 @@ import com.seamless.android.net.TorGroupMessaging
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.Executors
 
 /**
  * OnionContactsScreen - Displays P2P contacts for zero-server messaging.
@@ -373,7 +384,7 @@ private fun ContactCard(
                 .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            OnionAvatar(contact.nickname, isOnline)
+            OnionAvatar(contact.nickname, isOnline, contact.avatarId)
 
             Spacer(Modifier.width(16.dp))
 
@@ -599,50 +610,129 @@ private fun QrScannerScreen(
     onScanResult: (String) -> Unit,
     onCancel: () -> Unit
 ) {
-    var value by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onCancel,
-        title = { Text("Add Tor Contact") },
-        text = {
-            Column {
-                Text("Paste the QR text or Seamless contact link.")
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var hasCameraPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted -> hasCameraPermission = granted }
+    var previewView by remember { mutableStateOf<PreviewView?>(null) }
+    var manualEntry by remember { mutableStateOf(false) }
+    var manualValue by remember { mutableStateOf("") }
+    var consumed by remember { mutableStateOf(false) }
+    val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
+
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { analyzerExecutor.shutdown() }
+    }
+
+    LaunchedEffect(hasCameraPermission) {
+        if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
+    }
+
+    LaunchedEffect(previewView, hasCameraPermission) {
+        val view = previewView ?: return@LaunchedEffect
+        if (!hasCameraPermission) return@LaunchedEffect
+        val provider = ProcessCameraProvider.getInstance(context).get()
+        val preview = Preview.Builder().build().also { it.setSurfaceProvider(view.surfaceProvider) }
+        val analysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+            .also { useCase ->
+                useCase.setAnalyzer(analyzerExecutor) { image ->
+                    processQRCode(image) { value ->
+                        if (!consumed) {
+                            consumed = true
+                            ContextCompat.getMainExecutor(context).execute { onScanResult(value) }
+                        }
+                    }
+                }
+            }
+        try {
+            provider.unbindAll()
+            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+        } catch (_: Exception) {
+            // The manual field remains available if another camera client owns the lens.
+        }
+    }
+
+    Dialog(onDismissRequest = onCancel) {
+        Surface(shape = OnionUi.Corner, color = OnionUi.Surface) {
+            Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("Scan Tor Contact", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
                 Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = value,
-                    onValueChange = { value = it },
-                    label = { Text("Contact QR/link") },
-                    minLines = 3,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { if (value.isNotBlank()) onScanResult(value.trim()) }) {
-                Text("Add")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onCancel) {
-                Text("Cancel")
+                if (hasCameraPermission && !manualEntry) {
+                    Box(Modifier.size(280.dp).clip(OnionUi.Corner).background(Color.Black)) {
+                        AndroidView(
+                            factory = { PreviewView(it).also { preview -> previewView = preview } },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        Text(
+                            "Point the camera at a Seamless contact QR",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp)
+                        )
+                    }
+                } else {
+                    Text(
+                        if (hasCameraPermission) "Paste a contact link instead." else "Camera permission is needed to scan. You can still paste a contact link.",
+                        color = OnionUi.TextSecondary,
+                        fontSize = 14.sp
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = manualValue,
+                        onValueChange = { manualValue = it },
+                        label = { Text("Contact QR/link") },
+                        minLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    TextButton(onClick = { manualEntry = !manualEntry }) {
+                        Text(if (manualEntry) "Use camera" else "Paste link")
+                    }
+                    TextButton(onClick = onCancel) { Text("Cancel") }
+                    if (manualEntry) {
+                        Button(onClick = { if (manualValue.isNotBlank()) onScanResult(manualValue.trim()) }) {
+                            Text("Add")
+                        }
+                    }
+                }
             }
         }
-    )
+    }
 }
 
 private fun processQRCode(imageProxy: ImageProxy, onResult: (String) -> Unit) {
     try {
-        val buffer = imageProxy.planes.firstOrNull()?.buffer ?: return
-        val bytes = ByteArray(buffer.remaining())
-        buffer.get(bytes)
+        val plane = imageProxy.planes.firstOrNull() ?: return
+        val buffer = plane.buffer
+        val bytes = ByteArray(imageProxy.width * imageProxy.height)
+        val rowData = ByteArray(plane.rowStride)
+        for (row in 0 until imageProxy.height) {
+            buffer.position(row * plane.rowStride)
+            buffer.get(rowData, 0, minOf(plane.rowStride, buffer.remaining()))
+            for (column in 0 until imageProxy.width) {
+                bytes[row * imageProxy.width + column] = rowData[column * plane.pixelStride]
+            }
+        }
         val width = imageProxy.width
         val height = imageProxy.height
-        val pixels = IntArray(width * height) { index ->
-            val luminance = bytes.getOrNull(index)?.toInt()?.and(0xFF) ?: 0
-            android.graphics.Color.rgb(luminance, luminance, luminance)
-        }
-        val source = RGBLuminanceSource(width, height, pixels)
+        val source = com.google.zxing.PlanarYUVLuminanceSource(
+            bytes, width, height, 0, 0, width, height, false
+        )
         val bitmap = BinaryBitmap(HybridBinarizer(source))
-        val result = MultiFormatReader().decode(bitmap)
+        val result = MultiFormatReader().apply {
+            setHints(mapOf(com.google.zxing.DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)))
+        }.decode(bitmap)
         onResult(result.text)
     } catch (_: Exception) {
     } finally {
@@ -673,7 +763,7 @@ private fun AddContactDialog(
                 TextButton(onClick = onPasteQr) {
                     Icon(Icons.Default.QrCode, null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Paste QR text")
+                    Text("Scan QR code")
                 }
             }
         },

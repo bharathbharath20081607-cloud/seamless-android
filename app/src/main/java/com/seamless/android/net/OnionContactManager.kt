@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
 import android.util.Log
+import com.seamless.android.profile.ProfileManager
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.seamless.android.crypto.EncryptionService
@@ -54,6 +55,7 @@ class OnionContactManager private constructor(private val context: Context) {
         val nickname: String,
         val onionAddress: String,
         val publicKey: String,
+        val avatarId: String = "aurora",
         val addedAt: Long = System.currentTimeMillis(),
         val isFavorite: Boolean = false,
         val notes: String? = null,
@@ -78,6 +80,7 @@ class OnionContactManager private constructor(private val context: Context) {
                 .authority("add")
                 .appendQueryParameter("k", publicKey)
                 .appendQueryParameter("n", nickname)
+                .appendQueryParameter("a", canonicalAvatarId(avatarId))
 
             if (!requiresRendezvous()) {
                 builder.appendQueryParameter("o", canonicalOnion)
@@ -105,13 +108,17 @@ class OnionContactManager private constructor(private val context: Context) {
         fun toQrData(): String {
             val name = URLEncoder.encode(nickname, "UTF-8")
             val canonicalOnion = canonicalizeOnionEndpoint(onionAddress)
+            // Keep mailbox and avatar in fixed slots. This retains compatibility
+            // with old three/four-field QR payloads and prevents an avatar ID
+            // from ever being interpreted as a mailbox endpoint.
             val mailbox = mailboxOnion?.takeIf { it.isNotBlank() }?.let {
-                "|${URLEncoder.encode(it, "UTF-8")}"
-            } ?: ""
+                URLEncoder.encode(it, "UTF-8")
+            }.orEmpty()
+            val avatar = canonicalAvatarId(avatarId)
             return if (requiresRendezvous()) {
-                "|$publicKey|$name$mailbox"
+                "|$publicKey|$name|$mailbox|$avatar"
             } else {
-                "${URLEncoder.encode(canonicalOnion, "UTF-8")}|$publicKey|$name$mailbox"
+                "${URLEncoder.encode(canonicalOnion, "UTF-8")}|$publicKey|$name|$mailbox|$avatar"
             }
         }
 
@@ -131,6 +138,13 @@ class OnionContactManager private constructor(private val context: Context) {
 
         companion object {
             private val V3_ONION_HOST = Regex("^[a-z2-7]{56}\\.onion$")
+            private val AVATAR_IDS = setOf("aurora", "ember", "tide", "orchid", "mint", "copper")
+
+            fun canonicalAvatarId(raw: String?): String = raw
+                ?.trim()
+                ?.lowercase()
+                ?.takeIf { it in AVATAR_IDS }
+                ?: "aurora"
 
             /**
              * Tor P2P endpoints are v3 onion hosts, optionally followed by a
@@ -173,6 +187,7 @@ class OnionContactManager private constructor(private val context: Context) {
                     val onionAddress = canonicalizeOnionEndpoint(parsed.getQueryParameter("o")?.trim().orEmpty())
                     val mailboxOnion = canonicalizeOnionEndpoint(parsed.getQueryParameter("m")?.trim().orEmpty())
                         .takeIf(::isValidOnionEndpoint)
+                    val avatarId = canonicalAvatarId(parsed.getQueryParameter("a"))
                     val rendezvousId = parsed.getQueryParameter("r")?.trim()
                     val unresolved = onionAddress.isBlank() ||
                         onionAddress.equals(UNRESOLVED_ONION, ignoreCase = true) ||
@@ -183,6 +198,7 @@ class OnionContactManager private constructor(private val context: Context) {
                         nickname = nickname,
                         onionAddress = if (unresolved) "" else onionAddress,
                         publicKey = publicKey,
+                        avatarId = avatarId,
                         needsRendezvous = unresolved,
                         mailboxOnion = mailboxOnion,
                         ephemeralRendezvousId = rendezvousId,
@@ -207,6 +223,7 @@ class OnionContactManager private constructor(private val context: Context) {
                     val mailbox = parts.getOrNull(3)?.let {
                         canonicalizeOnionEndpoint(URLDecoder.decode(it, "UTF-8").trim())
                     }?.takeIf(::isValidOnionEndpoint)
+                    val avatarId = canonicalAvatarId(parts.getOrNull(4))
 
                     if (publicKey.isBlank() || nickname.isBlank()) return null
                     val unresolved = onion.isBlank() ||
@@ -218,6 +235,7 @@ class OnionContactManager private constructor(private val context: Context) {
                         nickname = nickname,
                         onionAddress = if (unresolved) "" else onion,
                         publicKey = publicKey,
+                        avatarId = avatarId,
                         needsRendezvous = unresolved,
                         mailboxOnion = mailbox,
                         trustState = TorContactTrustState.UNVERIFIED
@@ -237,6 +255,7 @@ class OnionContactManager private constructor(private val context: Context) {
             .takeIf { it.isNotBlank() && !it.equals(UNRESOLVED_ONION, ignoreCase = true) }
             .orEmpty()
         val publicKey = getMyPublicKeyHex()
+        val avatarId = ProfileManager.getInstance(context).currentUserProfile.value?.avatarStyle ?: "aurora"
         val nickname = context.getSharedPreferences("bitchat_prefs", Context.MODE_PRIVATE)
             .getString("nickname", null)
             ?.takeIf { it.isNotBlank() }
@@ -247,6 +266,7 @@ class OnionContactManager private constructor(private val context: Context) {
             nickname = nickname,
             onionAddress = onion,
             publicKey = publicKey,
+            avatarId = OnionContact.canonicalAvatarId(avatarId),
             needsRendezvous = onion.isBlank(),
             trustState = TorContactTrustState.VERIFIED,
             verifiedAt = System.currentTimeMillis()
@@ -267,13 +287,15 @@ class OnionContactManager private constructor(private val context: Context) {
         if (samePublicKey != null) {
             if (!normalized.requiresRendezvous() &&
                 (samePublicKey.requiresRendezvous() ||
-                    normalizeOnion(samePublicKey.onionAddress) != normalizeOnion(normalized.onionAddress))
+                    normalizeOnion(samePublicKey.onionAddress) != normalizeOnion(normalized.onionAddress) ||
+                    samePublicKey.avatarId != normalized.avatarId)
             ) {
                 contacts[samePublicKey.id] = samePublicKey.copy(
                     nickname = normalized.nickname,
                     onionAddress = normalized.onionAddress,
                     needsRendezvous = false,
                     mailboxOnion = normalized.mailboxOnion ?: samePublicKey.mailboxOnion,
+                    avatarId = normalized.avatarId,
                     ephemeralRendezvousId = normalized.ephemeralRendezvousId ?: samePublicKey.ephemeralRendezvousId,
                     lastSeenOnline = System.currentTimeMillis()
                 )
@@ -298,6 +320,7 @@ class OnionContactManager private constructor(private val context: Context) {
                 publicKey = normalized.publicKey,
                 needsRendezvous = false,
                 mailboxOnion = normalized.mailboxOnion ?: sameUnresolvedNickname.mailboxOnion,
+                avatarId = normalized.avatarId,
                 ephemeralRendezvousId = normalized.ephemeralRendezvousId ?: sameUnresolvedNickname.ephemeralRendezvousId,
                 trustState = TorContactTrustState.UNVERIFIED,
                 verifiedAt = 0L
@@ -315,6 +338,7 @@ class OnionContactManager private constructor(private val context: Context) {
                     nickname = normalized.nickname.ifBlank { sameOnion.nickname },
                     publicKey = normalized.publicKey,
                     mailboxOnion = normalized.mailboxOnion ?: sameOnion.mailboxOnion,
+                    avatarId = normalized.avatarId,
                     lastSeenOnline = System.currentTimeMillis(),
                     trustState = TorContactTrustState.KEY_CHANGED,
                     verifiedAt = 0L
@@ -492,6 +516,7 @@ class OnionContactManager private constructor(private val context: Context) {
         return contact.copy(
             onionAddress = if (unresolved) "" else canonicalOnion,
             publicKey = contact.publicKey.trim(),
+            avatarId = OnionContact.canonicalAvatarId(contact.avatarId),
             nickname = contact.nickname.trim().ifBlank { "Unknown" },
             needsRendezvous = unresolved,
             trustState = contact.trustState ?: TorContactTrustState.UNVERIFIED
