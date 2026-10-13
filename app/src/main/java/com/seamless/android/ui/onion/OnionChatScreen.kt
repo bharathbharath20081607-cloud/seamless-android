@@ -765,12 +765,21 @@ private fun TorMessageBubble(
     }
     
     val shape = RoundedCornerShape(
-        topStart = 20.dp,
-        topEnd = 20.dp,
-        bottomStart = if (message.isFromMe) 20.dp else 6.dp,
-        bottomEnd = if (message.isFromMe) 6.dp else 20.dp
+        topStart = 22.dp,
+        topEnd = 22.dp,
+        bottomStart = if (message.isFromMe) 22.dp else 5.dp,
+        bottomEnd = if (message.isFromMe) 5.dp else 22.dp
     )
-    val bubbleColor = if (message.isFromMe) OnionUi.AccentStrong else OnionUi.Surface
+    val bubbleBrush = if (message.isFromMe) {
+        Brush.linearGradient(listOf(Color(0xFF3C3B49), Color(0xFF252530)))
+    } else {
+        Brush.linearGradient(listOf(Color(0xFF1C1C23), Color(0xFF121217)))
+    }
+    val bubbleOutline = if (message.isFromMe) {
+        Color.White.copy(alpha = 0.17f)
+    } else {
+        Color.White.copy(alpha = 0.10f)
+    }
     var appeared by remember(message.id) { mutableStateOf(false) }
     LaunchedEffect(message.id) { appeared = true }
     val bubbleAlpha by animateFloatAsState(if (appeared) 1f else 0f, tween(180), label = "bubble_alpha")
@@ -782,20 +791,21 @@ private fun TorMessageBubble(
     ) {
         Box(
             modifier = Modifier
-                .widthIn(max = 320.dp)
+                .widthIn(max = 336.dp)
                 .graphicsLayer {
                     alpha = bubbleAlpha
                     translationY = bubbleOffset
                 }
                 .shadow(
-                    elevation = if (message.isFromMe) 3.dp else 1.dp,
+                    elevation = if (message.isFromMe) 6.dp else 2.dp,
                     shape = shape,
-                    spotColor = Color.Black.copy(alpha = 0.22f)
+                    spotColor = Color.Black.copy(alpha = 0.34f)
                 )
                 .background(
-                    color = bubbleColor,
+                    brush = bubbleBrush,
                     shape = shape
                 )
+                .border(1.dp, bubbleOutline, shape)
         ) {
             Column(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
@@ -819,7 +829,8 @@ private fun TorMessageBubble(
                     Text(
                         text = message.text,
                         color = Color.White,
-                        fontSize = 15.sp
+                        fontSize = if (isExpressiveEmoji(message.text)) 30.sp else 15.sp,
+                        lineHeight = if (isExpressiveEmoji(message.text)) 36.sp else 21.sp
                     )
                 }
 
@@ -844,7 +855,7 @@ private fun TorMessageBubble(
                     )
                 }
                 
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(if (isExpressiveEmoji(message.text)) 1.dp else 5.dp))
                 
                 Row(
                     horizontalArrangement = Arrangement.End,
@@ -861,7 +872,7 @@ private fun TorMessageBubble(
                     
                     Text(
                         text = timeFormat.format(Date(message.timestamp)),
-                        color = Color.White.copy(alpha = 0.5f),
+                        color = Color.White.copy(alpha = 0.56f),
                         fontSize = 11.sp
                     )
                     

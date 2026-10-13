@@ -6,6 +6,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -70,6 +72,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -271,35 +275,56 @@ private fun Composer(text: String, onTextChange: (String) -> Unit, onSend: () ->
 private fun GroupMessageBubble(message: GroupMessageEntity, showName: Boolean) {
     val outgoing = message.isFromMe
     val shape = RoundedCornerShape(
-        topStart = 18.dp, topEnd = 18.dp,
-        bottomStart = if (outgoing) 18.dp else 5.dp,
-        bottomEnd = if (outgoing) 5.dp else 18.dp
+        topStart = 22.dp, topEnd = 22.dp,
+        bottomStart = if (outgoing) 22.dp else 5.dp,
+        bottomEnd = if (outgoing) 5.dp else 22.dp
     )
+    val bubbleBrush = if (outgoing) {
+        Brush.linearGradient(listOf(Color(0xFF3C3B49), Color(0xFF252530)))
+    } else {
+        Brush.linearGradient(listOf(Color(0xFF1C1C23), Color(0xFF121217)))
+    }
+    var appeared by remember(message.id) { mutableStateOf(false) }
+    LaunchedEffect(message.id) { appeared = true }
+    val alpha by animateFloatAsState(if (appeared) 1f else 0f, tween(180), label = "group_bubble_alpha")
+    val translateY by animateFloatAsState(if (appeared) 0f else 16f, tween(220), label = "group_bubble_offset")
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 1.dp),
         horizontalArrangement = if (outgoing) Arrangement.End else Arrangement.Start
     ) {
         Column(
             modifier = Modifier
-                .widthIn(max = 300.dp)
+                .widthIn(max = 320.dp)
+                .graphicsLayer { this.alpha = alpha; this.translationY = translateY }
                 .clip(shape)
-                .background(if (outgoing) OnionUi.AccentStrong else OnionUi.Surface)
-                .border(1.dp, OnionUi.Hairline, shape)
-                .padding(horizontal = 13.dp, vertical = 8.dp)
+                .background(bubbleBrush, shape)
+                .border(1.dp, if (outgoing) Color.White.copy(alpha = 0.17f) else OnionUi.Hairline, shape)
+                .padding(horizontal = 14.dp, vertical = 10.dp)
         ) {
             if (showName) {
-                Text(
-                    message.senderNickname,
-                    color = senderColor(message.senderOnionAddress),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.height(2.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier.size(7.dp).clip(CircleShape).background(senderColor(message.senderOnionAddress))
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        message.senderNickname,
+                        color = senderColor(message.senderOnionAddress),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(Modifier.height(5.dp))
             }
-            Text(message.text, color = Color.White, fontSize = 15.sp)
-            Spacer(Modifier.height(3.dp))
+            Text(
+                message.text,
+                color = Color.White,
+                fontSize = if (isExpressiveEmoji(message.text)) 30.sp else 15.sp,
+                lineHeight = if (isExpressiveEmoji(message.text)) 36.sp else 21.sp
+            )
+            Spacer(Modifier.height(if (isExpressiveEmoji(message.text)) 1.dp else 5.dp))
             Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
-                Text(formatChatTime(message.timestamp), color = Color.White.copy(alpha = 0.5f), fontSize = 10.sp)
+                Text(formatChatTime(message.timestamp), color = Color.White.copy(alpha = 0.56f), fontSize = 10.sp)
                 if (outgoing) {
                     Spacer(Modifier.width(4.dp))
                     DeliveryMark(message.deliveryState)

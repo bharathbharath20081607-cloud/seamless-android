@@ -117,3 +117,10 @@ internal fun OnionAvatar(
         )
     }
 }
+
+/** Enlarges only compact emoji reactions, keeping ordinary messages readable. */
+internal fun isExpressiveEmoji(text: String): Boolean {
+    val compact = text.trim()
+    if (compact.isEmpty() || compact.length > 8) return false
+    return compact.any { it.code in 0x2600..0x27BF || it.code in 0x1F300..0x1FAFF }
+}
