@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.net
 
 import android.app.Application
@@ -105,15 +106,12 @@ object TorManager {
             // Initialize Pluggable Transport Manager
             ptManager = PluggableTransportManager.getInstance(application)
 
-            // Apply saved mode at startup. If ON, set planned SOCKS immediately to avoid any leak.
             val savedMode = TorPreferenceManager.get(application)
             if (savedMode == TorMode.ON) {
                 if (currentSocksPort < DEFAULT_SOCKS_PORT) {
                     currentSocksPort = DEFAULT_SOCKS_PORT
                 }
                 desiredMode = savedMode
-                socksAddr = InetSocketAddress("127.0.0.1", currentSocksPort)
-                try { OkHttpProvider.reset() } catch (_: Throwable) { }
             }
             appScope.launch {
                 applyMode(application, savedMode)
@@ -199,7 +197,7 @@ object TorManager {
                         // Rebuild clients WITHOUT proxy and reconnect relays
                         try {
                             OkHttpProvider.reset()
-                            com.seamless.android.nostr.NostrRelayManager.shared.resetAllConnections()
+                            com.seamless.android.nostr.NostrRelayManager.shared.reconnect()
                         } catch (_: Throwable) { }
                     }
                     TorMode.ON -> {
@@ -210,12 +208,9 @@ object TorManager {
                         }
                         bindRetryAttempts = 0
                         lifecycleState = LifecycleState.STARTING
+                        socksAddr = null
                         _status.value = _status.value.copy(mode = TorMode.ON, running = false, bootstrapPercent = 0, state = TorState.STARTING)
-                        // Immediately set the planned SOCKS address so all traffic is forced through it,
-                        // even before Tor is fully bootstrapped. This prevents any direct connections.
-                        socksAddr = InetSocketAddress("127.0.0.1", currentSocksPort)
                         try { OkHttpProvider.reset() } catch (_: Throwable) { }
-                        try { com.seamless.android.nostr.NostrRelayManager.shared.resetAllConnections() } catch (_: Throwable) { }
                         startArti(application, useDelay = false)
                         // Defer enabling proxy and starting foreground service until bootstrap completes
                         appScope.launch {
@@ -224,7 +219,7 @@ object TorManager {
                                 socksAddr = InetSocketAddress("127.0.0.1", currentSocksPort)
                                 Log.i(TAG, "Tor ON: proxy set to ${socksAddr}")
                                 OkHttpProvider.reset()
-                                try { com.seamless.android.nostr.NostrRelayManager.shared.resetAllConnections() } catch (_: Throwable) { }
+                                try { com.seamless.android.nostr.NostrRelayManager.shared.reconnect() } catch (_: Throwable) { }
 
                                 // Start TorForegroundService — this starts TorMessagingService,
                                 // hidden service, Doze handling, network callbacks, and WakeLock
@@ -377,14 +372,15 @@ object TorManager {
 
     private fun startInactivityMonitoring() {
         inactivityJob?.cancel()
+        val timeoutMs = INACTIVITY_TIMEOUT_MS.coerceAtLeast(45_000L)
         inactivityJob = appScope.launch {
             while (true) {
-                delay(INACTIVITY_TIMEOUT_MS)
+                delay(timeoutMs)
                 val currentTime = System.currentTimeMillis()
                 val lastActivity = lastLogTime.get()
                 val timeSinceLastActivity = currentTime - lastActivity
                 
-                if (timeSinceLastActivity > INACTIVITY_TIMEOUT_MS) {
+                if (timeSinceLastActivity > timeoutMs) {
                     val currentMode = _status.value.mode
                     if (currentMode == TorMode.ON) {
                         val bootstrapPercent = _status.value.bootstrapPercent

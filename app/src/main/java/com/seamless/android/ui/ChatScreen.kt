@@ -164,6 +164,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
     val REACT_PREFIX = "__REACT__:"
     // Stores reactions per message: messageId -> (emoji -> count)
     val messageReactions = remember { mutableStateMapOf<String, MutableMap<String, Int>>() }
+    val processedReactionMsgIds = remember { mutableSetOf<String>() }
     val reactionAnimationState = com.seamless.android.ui.effects.rememberReactionAnimationState()
 
     // Show password dialog when needed
@@ -192,22 +193,29 @@ fun ChatScreen(viewModel: ChatViewModel) {
         }
     }
 
-    // Parse incoming reaction messages and add to reactions map
-    LaunchedEffect(rawMessages.size) {
+    // Parse incoming reaction messages, update reactions map with new reference for Compose recomposition,
+    // and trigger the contextual reaction animation on receiving devices!
+    LaunchedEffect(rawMessages.size, selectedPrivatePeer, currentChannel, selectedLocationChannel) {
+        val myPeerId = viewModel.meshServiceInstance?.myPeerID
+        val now = System.currentTimeMillis()
         rawMessages.forEach { msg ->
-            if (msg.content.startsWith(REACT_PREFIX)) {
+            if (msg.content.startsWith(REACT_PREFIX) && processedReactionMsgIds.add(msg.id)) {
                 val parts = msg.content.removePrefix(REACT_PREFIX).split(":")
                 if (parts.size >= 2) {
                     val targetMsgId = parts[0]
                     val emoji = parts[1]
-                    val existing = messageReactions.getOrPut(targetMsgId) { mutableMapOf() }
-                    // Use sender+emoji as a dedup key to avoid counting same reaction twice
-                    val dedupKey = "${msg.sender}:${emoji}"
-                    val currentCount = existing[emoji] ?: 0
-                    // Simple dedup: only count if we haven't already
-                    if (currentCount == 0 || !msg.content.contains(dedupKey)) {
-                        existing[emoji] = currentCount + 1
-                        messageReactions[targetMsgId] = existing
+                    val isFromMe = (myPeerId != null && msg.senderPeerID.equals(myPeerId, ignoreCase = true)) ||
+                        msg.sender.equals(nickname, ignoreCase = true)
+                    // Only count remote reactions here because local reactions are already added in onReactionSelected
+                    if (!isFromMe) {
+                        val updated = LinkedHashMap<String, Int>()
+                        messageReactions[targetMsgId]?.let { updated.putAll(it) }
+                        updated[emoji] = (updated[emoji] ?: 0) + 1
+                        messageReactions[targetMsgId] = updated
+                        // Trigger the full-screen reaction animation for fresh incoming reactions
+                        if (now - msg.timestamp.time < 20_000L) {
+                            reactionAnimationState.trigger(emoji)
+                        }
                     }
                 }
             }
@@ -392,10 +400,11 @@ fun ChatScreen(viewModel: ChatViewModel) {
                     showFullScreenImageViewer = true
                 },
                 onReactionSelected = { message, emoji ->
-                    // Add reaction to local state
-                    val existing = messageReactions.getOrPut(message.id) { mutableMapOf() }
-                    existing[emoji] = (existing[emoji] ?: 0) + 1
-                    messageReactions[message.id] = existing
+                    // Add reaction to local state with a fresh map instance so Compose recomposes immediately
+                    val updated = LinkedHashMap<String, Int>()
+                    messageReactions[message.id]?.let { updated.putAll(it) }
+                    updated[emoji] = (updated[emoji] ?: 0) + 1
+                    messageReactions[message.id] = updated
                     // Trigger contextual animation
                     reactionAnimationState.trigger(emoji)
                     // Send reaction over mesh so other users see it

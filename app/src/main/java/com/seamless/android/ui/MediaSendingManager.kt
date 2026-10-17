@@ -200,7 +200,7 @@ class MediaSendingManager(
         Log.d(TAG, "📤 FILE_TRANSFER send (private): name='${filePacket.fileName}', size=${filePacket.fileSize}, mime='${filePacket.mimeType}', sha256=$contentHash, to=${toPeerID.take(8)} transferId=${canonicalTransferId.take(16)}…")
 
         val msg = BitchatMessage(
-            id = java.util.UUID.randomUUID().toString().uppercase(), // Generate unique ID for each message
+            id = canonicalTransferId.uppercase(),
             sender = state.getNicknameValue() ?: "me",
             content = filePath,
             type = messageType,
@@ -274,7 +274,7 @@ class MediaSendingManager(
 
         val myPeerID = meshService?.myPeerID ?: ""
         val message = BitchatMessage(
-            id = java.util.UUID.randomUUID().toString().uppercase(), // Generate unique ID for each message
+            id = canonicalTransferId.uppercase(),
             sender = state.getNicknameValue() ?: myPeerID,
             content = filePath,
             type = messageType,

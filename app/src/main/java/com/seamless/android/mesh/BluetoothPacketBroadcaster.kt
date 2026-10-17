@@ -98,7 +98,8 @@ class BluetoothPacketBroadcaster(
         val routed: RoutedPacket,
         val gattServer: BluetoothGattServer?,
         val characteristic: BluetoothGattCharacteristic?,
-        val targetPeerID: String? = null
+        val targetPeerID: String? = null,
+        val completion: kotlinx.coroutines.CompletableDeferred<Unit>? = null
     )
     
     // Actor scope for the broadcaster
@@ -114,12 +115,16 @@ class BluetoothPacketBroadcaster(
         Log.d(TAG, "🎭 Created packet broadcaster actor")
         try {
             for (request in channel) {
-                broadcastSinglePacketInternal(
-                    request.routed,
-                    request.gattServer,
-                    request.characteristic,
-                    request.targetPeerID
-                )
+                try {
+                    broadcastSinglePacketInternal(
+                        request.routed,
+                        request.gattServer,
+                        request.characteristic,
+                        request.targetPeerID
+                    )
+                } finally {
+                    request.completion?.complete(Unit)
+                }
             }
         } finally {
             Log.d(TAG, "🎭 Packet broadcaster actor terminated")
@@ -165,9 +170,9 @@ class BluetoothPacketBroadcaster(
                             if (!isActive) return@launch
                             // If cancelled, stop sending remaining fragments
                             if (transferId != null && transferJobs[transferId]?.isCancelled == true) return@launch
-                            broadcastSinglePacket(RoutedPacket(fragment, transferId = transferId), gattServer, characteristic)
-                            // Per-device GATT callback latches now pace hardware writes; 40ms keeps actor channel smooth
-                            delay(40)
+                            broadcastSinglePacketAwait(RoutedPacket(fragment, transferId = transferId), gattServer, characteristic)
+                            // Hardware write/notify latch already completed; brief 6ms inter-fragment breathing room
+                            delay(6)
                             if (transferId != null) {
                                 sent += 1
                                 TransferProgressManager.progress(transferId, sent, fragments.size)
@@ -255,13 +260,13 @@ class BluetoothPacketBroadcaster(
                         fragments.forEach { fragment ->
                             if (!isActive) return@launch
                             if (transferId != null && transferJobs[transferId]?.isCancelled == true) return@launch
-                            broadcastSinglePacket(
+                            broadcastSinglePacketAwait(
                                 RoutedPacket(fragment, transferId = transferId),
                                 gattServer,
                                 characteristic,
                                 normalizedTargetPeerID
                             )
-                            delay(40)
+                            delay(6)
                             if (transferId != null) {
                                 sent += 1
                                 TransferProgressManager.progress(transferId, sent, fragments.size)
@@ -297,6 +302,21 @@ class BluetoothPacketBroadcaster(
         md.digest().joinToString("") { "%02x".format(it) }
     } catch (_: Exception) { bytes.size.toString(16) }
 
+    private suspend fun broadcastSinglePacketAwait(
+        routed: RoutedPacket,
+        gattServer: BluetoothGattServer?,
+        characteristic: BluetoothGattCharacteristic?,
+        targetPeerID: String? = null
+    ) {
+        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
+        try {
+            broadcasterActor.send(BroadcastRequest(routed, gattServer, characteristic, targetPeerID, done))
+            kotlinx.coroutines.withTimeoutOrNull(2500L) { done.await() }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send broadcast request to actor: ${e.message}")
+            broadcastSinglePacketInternal(routed, gattServer, characteristic, targetPeerID)
+        }
+    }
     
     /**
      * Public entry point for broadcasting - submits request to actor for serialization
@@ -345,6 +365,22 @@ class BluetoothPacketBroadcaster(
             }
 
         if (!directRecipientID.isNullOrEmpty()) {
+            // Prefer client GATT connection first (guaranteed negotiated MTU 517), then server notification
+            val targetDeviceConn = connectionTracker.getConnectedDevices().values
+                .firstOrNull {
+                    connectionTracker.addressPeerMap[it.device.address] == directRecipientID &&
+                        it.isClient && it.gatt != null && it.characteristic != null
+                }
+
+            if (targetDeviceConn != null) {
+                Log.d(TAG, "Send packet type ${packet.type} directly to target client connection for recipient $directRecipientID: ${targetDeviceConn.device.address}")
+                if (writeToDeviceConn(targetDeviceConn, data)) {
+                    val toPeer = connectionTracker.addressPeerMap[targetDeviceConn.device.address]
+                    logPacketRelay(typeName, senderPeerID, senderNick, incomingPeer, incomingAddr, toPeer, targetDeviceConn.device.address, packet.ttl)
+                    return  // Sent, no need to continue
+                }
+            }
+
             // Try to find the recipient in server connections (subscribedDevices)
             val targetDevice = connectionTracker.getSubscribedDevices()
                 .firstOrNull { connectionTracker.addressPeerMap[it.address] == directRecipientID }
@@ -359,70 +395,72 @@ class BluetoothPacketBroadcaster(
                 }
             }
 
-            // Try to find the recipient in client connections (connectedDevices) - MUST filter for active client GATT connections
-            val targetDeviceConn = connectionTracker.getConnectedDevices().values
-                .firstOrNull {
-                    connectionTracker.addressPeerMap[it.device.address] == directRecipientID &&
-                        it.isClient && it.gatt != null && it.characteristic != null
-                }
-            
-            // If found, send directly
-            if (targetDeviceConn != null) {
-                Log.d(TAG, "Send packet type ${packet.type} directly to target client connection for recipient $directRecipientID: ${targetDeviceConn.device.address}")
-                if (writeToDeviceConn(targetDeviceConn, data)) {
-                    val toPeer = connectionTracker.addressPeerMap[targetDeviceConn.device.address]
-                    logPacketRelay(typeName, senderPeerID, senderNick, incomingPeer, incomingAddr, toPeer, targetDeviceConn.device.address, packet.ttl)
-                    return  // Sent, no need to continue
-                }
-            }
-
             // If caller explicitly requested direct-only delivery, do not fall through to broadcast
             if (explicitTargetPeerID != null) {
                 return
             }
         }
 
-        // Else, continue with broadcasting to all devices
+        // Else, continue with broadcasting to all devices (deduplicating peers connected as both client and server)
         val subscribedDevices = connectionTracker.getSubscribedDevices()
         val connectedDevices = connectionTracker.getConnectedDevices()
         
         Log.i(TAG, "Broadcasting packet type ${packet.type} to ${subscribedDevices.size} server + ${connectedDevices.size} client connections")
 
         val senderID = packet.senderID.toHexString().lowercase()
-        
-        // Send to server connections (devices connected to our GATT server)
-        for (device in subscribedDevices) {
-            if (device.address == routed.relayAddress) {
-                Log.d(TAG, "Skipping broadcast to client back to relayer: ${device.address}")
-                continue
-            }
-            if (connectionTracker.addressPeerMap[device.address] == senderID) {
-                Log.d(TAG, "Skipping broadcast to client back to sender: ${device.address}")
-                continue
-            }
-            val sent = notifyDevice(device, data, gattServer, characteristic)
-            if (sent) {
-                val toPeer = connectionTracker.addressPeerMap[device.address]
-                logPacketRelay(typeName, senderPeerID, senderNick, incomingPeer, incomingAddr, toPeer, device.address, packet.ttl)
-            }
-        }
-        
-        // Send to client connections (GATT servers we are connected to)
+        val deliveredPeers = mutableSetOf<String>()
+        val deliveredAddresses = mutableSetOf<String>()
+
+        // 1. Send to client connections first (GATT servers we are connected to, which have negotiated 517 MTU)
         for (deviceConn in connectedDevices.values) {
             if (deviceConn.isClient && deviceConn.gatt != null && deviceConn.characteristic != null) {
-                if (deviceConn.device.address == routed.relayAddress) {
-                    Log.d(TAG, "Skipping broadcast to server back to relayer: ${deviceConn.device.address}")
+                val addr = deviceConn.device.address
+                if (addr == routed.relayAddress) {
+                    Log.d(TAG, "Skipping broadcast to server back to relayer: $addr")
                     continue
                 }
-                if (connectionTracker.addressPeerMap[deviceConn.device.address] == senderID) {
-                    Log.d(TAG, "Skipping broadcast to server back to sender: ${deviceConn.device.address}")
+                val toPeer = connectionTracker.addressPeerMap[addr]
+                if (toPeer != null && toPeer == senderID) {
+                    Log.d(TAG, "Skipping broadcast to server back to sender: $addr")
+                    continue
+                }
+                if (toPeer != null && !deliveredPeers.add(toPeer)) {
                     continue
                 }
                 val sent = writeToDeviceConn(deviceConn, data)
                 if (sent) {
-                    val toPeer = connectionTracker.addressPeerMap[deviceConn.device.address]
-                    logPacketRelay(typeName, senderPeerID, senderNick, incomingPeer, incomingAddr, toPeer, deviceConn.device.address, packet.ttl)
+                    deliveredAddresses.add(addr)
+                    logPacketRelay(typeName, senderPeerID, senderNick, incomingPeer, incomingAddr, toPeer, addr, packet.ttl)
+                } else if (toPeer != null) {
+                    deliveredPeers.remove(toPeer)
                 }
+            }
+        }
+
+        // 2. Send to server connections (devices connected to our GATT server) not already reached via client connection
+        for (device in subscribedDevices) {
+            val addr = device.address
+            if (addr == routed.relayAddress) {
+                Log.d(TAG, "Skipping broadcast to client back to relayer: $addr")
+                continue
+            }
+            if (deliveredAddresses.contains(addr)) {
+                continue
+            }
+            val toPeer = connectionTracker.addressPeerMap[addr]
+            if (toPeer != null && toPeer == senderID) {
+                Log.d(TAG, "Skipping broadcast to client back to sender: $addr")
+                continue
+            }
+            if (toPeer != null && !deliveredPeers.add(toPeer)) {
+                continue
+            }
+            val sent = notifyDevice(device, data, gattServer, characteristic)
+            if (sent) {
+                deliveredAddresses.add(addr)
+                logPacketRelay(typeName, senderPeerID, senderNick, incomingPeer, incomingAddr, toPeer, addr, packet.ttl)
+            } else if (toPeer != null) {
+                deliveredPeers.remove(toPeer)
             }
         }
     }

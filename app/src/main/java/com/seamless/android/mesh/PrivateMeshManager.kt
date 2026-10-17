@@ -105,8 +105,8 @@ class PrivateMeshManager private constructor(private val context: Context) {
         val updated = _messages.value + message
         _messages.value = if (updated.size > 500) updated.takeLast(500) else updated
         
-        // Send via delegate to broadcast to mesh
-        delegate?.sendMeshMessage(_currentMeshId.value ?: "", content)
+        // Send via delegate to broadcast to mesh (include message.id so reactions match across devices)
+        delegate?.sendMeshMessage(_currentMeshId.value ?: "", content, message.id)
     }
     
     /**
@@ -132,7 +132,7 @@ class PrivateMeshManager private constructor(private val context: Context) {
         _messages.value = if (updated2.size > 500) updated2.takeLast(500) else updated2
         
         // Send via delegate
-        delegate?.sendMeshVoiceNote(_currentMeshId.value ?: "", filePath)
+        delegate?.sendMeshVoiceNote(_currentMeshId.value ?: "", filePath, message.id)
     }
     
     /**
@@ -158,13 +158,13 @@ class PrivateMeshManager private constructor(private val context: Context) {
         _messages.value = if (updated3.size > 500) updated3.takeLast(500) else updated3
         
         // Send via delegate
-        delegate?.sendMeshImage(_currentMeshId.value ?: "", filePath)
+        delegate?.sendMeshImage(_currentMeshId.value ?: "", filePath, message.id)
     }
     
     /**
      * Called when a message is received from the mesh
      */
-    fun onMessageReceived(senderPeerID: String, senderNickname: String, content: String) {
+    fun onMessageReceived(senderPeerID: String, senderNickname: String, content: String, messageId: String? = null) {
         if (_state.value != PrivateMeshState.HOSTING && _state.value != PrivateMeshState.CONNECTED) {
             return
         }
@@ -176,7 +176,7 @@ class PrivateMeshManager private constructor(private val context: Context) {
         
         // Deduplicate identical messages received within 3 seconds
         val now = System.currentTimeMillis()
-        val dedupKey = "${senderPeerID.lowercase()}:$content"
+        val dedupKey = "${senderPeerID.lowercase()}:${messageId ?: content}"
         val prevTimestamp = recentMessageFingerprints.put(dedupKey, now)
         if (prevTimestamp != null && (now - prevTimestamp) < 3_000L) {
             return
@@ -193,6 +193,7 @@ class PrivateMeshManager private constructor(private val context: Context) {
         }
         
         val message = PrivateMeshMessage(
+            id = messageId ?: UUID.randomUUID().toString(),
             senderPeerID = senderPeerID,
             senderNickname = resolvedNickname,
             content = content,
@@ -206,7 +207,7 @@ class PrivateMeshManager private constructor(private val context: Context) {
     /**
      * Called when media (audio/image) is received from the mesh
      */
-    fun onMediaReceived(senderPeerID: String, senderNickname: String, filePath: String, type: PrivateMeshMessageType) {
+    fun onMediaReceived(senderPeerID: String, senderNickname: String, filePath: String, type: PrivateMeshMessageType, messageId: String? = null) {
         if (_state.value != PrivateMeshState.HOSTING && _state.value != PrivateMeshState.CONNECTED) {
             return
         }
@@ -225,6 +226,7 @@ class PrivateMeshManager private constructor(private val context: Context) {
         Log.i(TAG, "📥 Received mesh media from $resolvedNickname: $type")
         
         val message = PrivateMeshMessage(
+            id = messageId ?: UUID.randomUUID().toString(),
             senderPeerID = senderPeerID,
             senderNickname = resolvedNickname,
             content = filePath,
@@ -714,9 +716,9 @@ interface PrivateMeshDelegate {
     fun onMemberKicked(peerID: String)
     fun onLeavingMesh(meshId: String)
     fun broadcastMeshAnnounce(meshId: String, name: String, memberCount: Int)
-    fun sendMeshMessage(meshId: String, content: String)
-    fun sendMeshVoiceNote(meshId: String, filePath: String)
-    fun sendMeshImage(meshId: String, filePath: String)
+    fun sendMeshMessage(meshId: String, content: String, messageId: String = "")
+    fun sendMeshVoiceNote(meshId: String, filePath: String, messageId: String = "")
+    fun sendMeshImage(meshId: String, filePath: String, messageId: String = "")
     fun sendVoiceStream(chunk: ByteArray)  // Real-time walkie-talkie
     fun sendHeartbeat(meshId: String)       // Periodic heartbeat ping
 }

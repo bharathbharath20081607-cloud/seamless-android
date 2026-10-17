@@ -185,9 +185,13 @@ class BluetoothGattServerManager(
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
                         Log.i(TAG, "Server: Device disconnected ${device.address}")
-                        connectionTracker.cleanupDeviceConnection(device.address)
-                        // Notify delegate about device disconnection so higher layers can update direct flags
-                        delegate?.onDeviceDisconnected(device)
+                        connectionTracker.removeSubscribedDevice(device)
+                        val existing = connectionTracker.getDeviceConnection(device.address)
+                        if (existing == null || !existing.isClient || existing.gatt == null) {
+                            connectionTracker.cleanupDeviceConnection(device.address)
+                            // Notify delegate about device disconnection so higher layers can update direct flags
+                            delegate?.onDeviceDisconnected(device)
+                        }
                     }
                 }
             }
@@ -204,6 +208,17 @@ class BluetoothGattServerManager(
                 } else {
                     Log.e(TAG, "Server: Failed to add service: ${service.uuid}, status: $status")
                 }
+            }
+
+            override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+                Log.d(TAG, "Server: MTU changed for ${device.address} to $mtu")
+            }
+
+            override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
+                if (!isActive) return
+                try {
+                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                } catch (_: Exception) { }
             }
             
             override fun onCharacteristicWriteRequest(

@@ -1005,7 +1005,42 @@ private fun HostingContent(
     
     var messageText by remember { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue("")) }
     var showMembers by remember { mutableStateOf(false) }
-    
+    val reactPrefix = "__REACT__:"
+    val messageReactions = remember { mutableStateMapOf<String, MutableMap<String, Int>>() }
+    val processedReactionMsgIds = remember { mutableSetOf<String>() }
+    val reactionAnimationState = com.seamless.android.ui.effects.rememberReactionAnimationState()
+
+    LaunchedEffect(messages.size) {
+        val now = System.currentTimeMillis()
+        messages.forEach { msg ->
+            if (msg.content.startsWith(reactPrefix) && processedReactionMsgIds.add(msg.id)) {
+                val parts = msg.content.removePrefix(reactPrefix).split(":")
+                if (parts.size >= 2 && !msg.isFromMe) {
+                    val targetMsgId = parts[0]
+                    val emoji = parts[1]
+                    val updated = LinkedHashMap<String, Int>()
+                    messageReactions[targetMsgId]?.let { updated.putAll(it) }
+                    updated[emoji] = (updated[emoji] ?: 0) + 1
+                    messageReactions[targetMsgId] = updated
+                    if (now - msg.timestamp < 20_000L) {
+                        reactionAnimationState.trigger(emoji)
+                    }
+                }
+            }
+        }
+    }
+    val displayMessages = remember(messages) {
+        messages.filter { !it.content.startsWith(reactPrefix) }.map { it.toBitchatMessage() }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        val activeReaction = reactionAnimationState.activeReaction.value
+        if (activeReaction != null) {
+            com.seamless.android.ui.effects.ReactionAnimationOverlay(
+                effect = activeReaction,
+                onComplete = { reactionAnimationState.clear() }
+            )
+        }
     Column(
         modifier = Modifier.fillMaxSize()
     ) {
@@ -1126,7 +1161,7 @@ private fun HostingContent(
         
         if (meshService != null) {
             MessagesList(
-                messages = messages.map { it.toBitchatMessage() },
+                messages = displayMessages,
                 currentUserNickname = myNickname,
                 meshService = meshService,
                 modifier = Modifier.weight(1f),
@@ -1140,7 +1175,16 @@ private fun HostingContent(
                         text = newText,
                         selection = androidx.compose.ui.text.TextRange(newText.length)
                     )
-                }
+                },
+                onReactionSelected = { message, emoji ->
+                    processedReactionMsgIds.add("local:${message.id}:$emoji")
+                    val existing = LinkedHashMap(messageReactions[message.id] ?: emptyMap())
+                    existing[emoji] = (existing[emoji] ?: 0) + 1
+                    messageReactions[message.id] = existing
+                    reactionAnimationState.trigger(emoji)
+                    meshManager.sendMessage("$reactPrefix${message.id}:$emoji")
+                },
+                messageReactions = messageReactions
             )
         } else {
             Box(Modifier.weight(1f))
@@ -1168,6 +1212,7 @@ private fun HostingContent(
             nickname = myNickname,
             showMediaButtons = true
         )
+    }
     }
 }
 
@@ -1599,10 +1644,45 @@ private fun ConnectedContent(
     val myNickname = members.firstOrNull { !it.isHost }?.nickname ?: "Me"
     var messageText by remember { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue("")) }
     var showMembers by remember { mutableStateOf(false) }
-    
-    Column(
-        modifier = Modifier.fillMaxSize()
-    ) {
+    val reactPrefix = "__REACT__:"
+    val messageReactions = remember { mutableStateMapOf<String, MutableMap<String, Int>>() }
+    val processedReactionMsgIds = remember { mutableSetOf<String>() }
+    val reactionAnimationState = com.seamless.android.ui.effects.rememberReactionAnimationState()
+
+    LaunchedEffect(messages.size) {
+        val now = System.currentTimeMillis()
+        messages.forEach { msg ->
+            if (msg.content.startsWith(reactPrefix) && processedReactionMsgIds.add(msg.id)) {
+                val parts = msg.content.removePrefix(reactPrefix).split(":")
+                if (parts.size >= 2 && !msg.isFromMe) {
+                    val targetMsgId = parts[0]
+                    val emoji = parts[1]
+                    val updated = LinkedHashMap<String, Int>()
+                    messageReactions[targetMsgId]?.let { updated.putAll(it) }
+                    updated[emoji] = (updated[emoji] ?: 0) + 1
+                    messageReactions[targetMsgId] = updated
+                    if (now - msg.timestamp < 20_000L) {
+                        reactionAnimationState.trigger(emoji)
+                    }
+                }
+            }
+        }
+    }
+    val displayMessages = remember(messages) {
+        messages.filter { !it.content.startsWith(reactPrefix) }.map { it.toBitchatMessage() }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        val activeReaction = reactionAnimationState.activeReaction.value
+        if (activeReaction != null) {
+            com.seamless.android.ui.effects.ReactionAnimationOverlay(
+                effect = activeReaction,
+                onComplete = { reactionAnimationState.clear() }
+            )
+        }
+        Column(
+            modifier = Modifier.fillMaxSize()
+        ) {
         // Compact collapsible header - shows mesh info, expands to show members
         Surface(
             modifier = Modifier
@@ -1718,7 +1798,7 @@ private fun ConnectedContent(
         
         if (meshService != null) {
             MessagesList(
-                messages = messages.map { it.toBitchatMessage() },
+                messages = displayMessages,
                 currentUserNickname = myNickname,
                 meshService = meshService,
                 modifier = Modifier.weight(1f),
@@ -1732,7 +1812,16 @@ private fun ConnectedContent(
                         text = newText,
                         selection = androidx.compose.ui.text.TextRange(newText.length)
                     )
-                }
+                },
+                onReactionSelected = { message, emoji ->
+                    processedReactionMsgIds.add("local:${message.id}:$emoji")
+                    val existing = LinkedHashMap(messageReactions[message.id] ?: emptyMap())
+                    existing[emoji] = (existing[emoji] ?: 0) + 1
+                    messageReactions[message.id] = existing
+                    reactionAnimationState.trigger(emoji)
+                    meshManager.sendMessage("$reactPrefix${message.id}:$emoji")
+                },
+                messageReactions = messageReactions
             )
         } else {
             Box(Modifier.weight(1f))
@@ -1760,6 +1849,7 @@ private fun ConnectedContent(
             nickname = myNickname,
             showMediaButtons = true
         )
+    }
     }
 }
 

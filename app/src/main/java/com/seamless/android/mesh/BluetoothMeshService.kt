@@ -95,6 +95,7 @@ class BluetoothMeshService(private val context: Context) {
         val meshId: String,
         val content: String,
         val recipientPeerID: String,
+        val messageId: String = "",
         val timestamp: Long = System.currentTimeMillis()
     )
     private val pendingMeshMessagesQueue = mutableMapOf<String, MutableList<PendingMeshMessage>>()
@@ -104,6 +105,7 @@ class BluetoothMeshService(private val context: Context) {
         val filePath: String,
         val isVoiceNote: Boolean,
         val recipientPeerID: String,
+        val messageId: String = "",
         val timestamp: Long = System.currentTimeMillis()
     )
     private val pendingMeshMediaQueue = mutableMapOf<String, MutableList<PendingMeshMedia>>()
@@ -1001,7 +1003,7 @@ class BluetoothMeshService(private val context: Context) {
                     }
                 }
                 
-                override fun sendMeshMessage(meshId: String, content: String) {
+                override fun sendMeshMessage(meshId: String, content: String, messageId: String) {
                     // Broadcast message to all mesh members using NOISE_ENCRYPTED for privacy
                     val meshManager = PrivateMeshManager.getInstance(context)
                     val members = meshManager.members.value
@@ -1012,11 +1014,13 @@ class BluetoothMeshService(private val context: Context) {
                             if (member.peerID == myPeerID) continue
                             
                             try {
-                                // Create message payload with sender info - get fresh nickname from outer delegate
+                                // Create message payload with sender info and messageId - get fresh nickname from outer delegate
                                 val senderNickname = this@BluetoothMeshService.delegate?.getNickname() ?: myNickname
                                 val payload = buildString {
                                     append(senderNickname)
-                                    append("\u0000") // null separator
+                                    append("\u0000")
+                                    append(messageId)
+                                    append("\u0000")
                                     append(content)
                                 }.toByteArray()
                                 
@@ -1049,7 +1053,8 @@ class BluetoothMeshService(private val context: Context) {
                                     val pending = PendingMeshMessage(
                                         meshId = meshId,
                                         content = content,
-                                        recipientPeerID = member.peerID
+                                        recipientPeerID = member.peerID,
+                                        messageId = messageId
                                     )
                                     synchronized(pendingMeshMessagesQueue) {
                                         val queue = pendingMeshMessagesQueue.getOrPut(member.peerID) { mutableListOf() }
@@ -1082,7 +1087,7 @@ class BluetoothMeshService(private val context: Context) {
                     }
                 }
                 
-                override fun sendMeshVoiceNote(meshId: String, filePath: String) {
+                override fun sendMeshVoiceNote(meshId: String, filePath: String, messageId: String) {
                     val meshManager = PrivateMeshManager.getInstance(context)
                     val members = meshManager.members.value
                     
@@ -1095,13 +1100,14 @@ class BluetoothMeshService(private val context: Context) {
                                 filePath = filePath,
                                 isVoiceNote = true,
                                 memberPeerID = member.peerID,
-                                memberNickname = member.nickname
+                                memberNickname = member.nickname,
+                                messageId = messageId
                             )
                         }
                     }
                 }
                 
-                override fun sendMeshImage(meshId: String, filePath: String) {
+                override fun sendMeshImage(meshId: String, filePath: String, messageId: String) {
                     val meshManager = PrivateMeshManager.getInstance(context)
                     val members = meshManager.members.value
                     
@@ -1114,7 +1120,8 @@ class BluetoothMeshService(private val context: Context) {
                                 filePath = filePath,
                                 isVoiceNote = false,
                                 memberPeerID = member.peerID,
-                                memberNickname = member.nickname
+                                memberNickname = member.nickname,
+                                messageId = messageId
                             )
                         }
                     }
@@ -1322,7 +1329,7 @@ class BluetoothMeshService(private val context: Context) {
         }
     }
     
-    fun sendMessage(content: String, mentions: List<String> = emptyList(), channel: String? = null) {
+    fun sendMessage(content: String, mentions: List<String> = emptyList(), channel: String? = null, messageId: String? = null) {
         if (content.isEmpty()) return
         
         serviceScope.launch {
@@ -1330,8 +1337,9 @@ class BluetoothMeshService(private val context: Context) {
             gossipSyncManager.incrementLocalClock()
             val currentClock = gossipSyncManager.getLocalVectorClock()
 
-            // Create BitchatMessage model
+            // Create BitchatMessage model preserving caller's messageId so reactions match across devices
             val message = BitchatMessage(
+                id = messageId ?: UUID.randomUUID().toString().uppercase(),
                 sender = delegate?.getNickname() ?: "Me",
                 content = content,
                 senderPeerID = myPeerID,
@@ -1384,7 +1392,9 @@ class BluetoothMeshService(private val context: Context) {
             
             serviceScope.launch {
                 try {
-                    TransferProgressManager.start(canonicalTransferId, totalChunks)
+                    if (totalChunks > 1) {
+                        TransferProgressManager.start(canonicalTransferId, totalChunks)
+                    }
                     for (chunkIndex in 0 until totalChunks) {
                         val start = chunkIndex * CHUNK_SIZE
                         val end = minOf(start + CHUNK_SIZE, fileContent.size)
@@ -1419,14 +1429,18 @@ class BluetoothMeshService(private val context: Context) {
                         val signed = signPacketBeforeBroadcast(packet)
                         val wireTransferId = if (totalChunks == 1) canonicalTransferId else sha256Hex(payload)
                         connectionManager.broadcastPacket(RoutedPacket(signed, transferId = wireTransferId))
-                        TransferProgressManager.progress(canonicalTransferId, chunkIndex + 1, totalChunks)
+                        if (totalChunks > 1) {
+                            TransferProgressManager.progress(canonicalTransferId, chunkIndex + 1, totalChunks)
+                        }
                         
                         if (totalChunks > 1 && chunkIndex < totalChunks - 1) {
-                            val fragCount = ((payload.size + 468) / 469).coerceAtLeast(1)
-                            delay(fragCount * 42L + 120L)
+                            val fragCount = ((payload.size + 439) / 440).coerceAtLeast(1)
+                            delay(fragCount * 22L + 80L)
                         }
                     }
-                    TransferProgressManager.complete(canonicalTransferId, totalChunks)
+                    if (totalChunks > 1) {
+                        TransferProgressManager.complete(canonicalTransferId, totalChunks)
+                    }
                     try { gossipSyncManager.onPublicPacketSeen(BitchatPacket(1u, MessageType.FILE_TRANSFER.value, hexStringToByteArray(myPeerID), SpecialRecipients.BROADCAST, System.currentTimeMillis().toULong(), ByteArray(0), null, MAX_TTL)) } catch (_: Exception) { }
                     Log.d(TAG, "✅ sendFileBroadcast completed successfully (${totalChunks} chunks)")
                 } catch (e: Exception) {
@@ -1460,7 +1474,9 @@ class BluetoothMeshService(private val context: Context) {
                 // Check if we have an established Noise session
                 if (encryptionService.hasEstablishedSession(recipientPeerID)) {
                     try {
-                        TransferProgressManager.start(canonicalTransferId, totalChunks)
+                        if (totalChunks > 1) {
+                            TransferProgressManager.start(canonicalTransferId, totalChunks)
+                        }
                         for (chunkIndex in 0 until totalChunks) {
                             val start = chunkIndex * CHUNK_SIZE
                             val end = minOf(start + CHUNK_SIZE, fileContent.size)
@@ -1496,9 +1512,9 @@ class BluetoothMeshService(private val context: Context) {
                                 continue
                             }
                             
-                            // Create NOISE_ENCRYPTED packet
+                            // Create NOISE_ENCRYPTED packet (use version 2u for 4-byte payload length safety)
                             val packet = BitchatPacket(
-                                version = 1u,
+                                version = 2u,
                                 type = MessageType.NOISE_ENCRYPTED.value,
                                 senderID = hexStringToByteArray(myPeerID),
                                 recipientID = hexStringToByteArray(recipientPeerID),
@@ -1512,14 +1528,18 @@ class BluetoothMeshService(private val context: Context) {
                             val signed = signPacketBeforeBroadcast(packet)
                             val wireTransferId = if (totalChunks == 1) canonicalTransferId else sha256Hex(filePayload)
                             connectionManager.broadcastPacket(RoutedPacket(signed, transferId = wireTransferId))
-                            TransferProgressManager.progress(canonicalTransferId, chunkIndex + 1, totalChunks)
+                            if (totalChunks > 1) {
+                                TransferProgressManager.progress(canonicalTransferId, chunkIndex + 1, totalChunks)
+                            }
                             
                             if (totalChunks > 1 && chunkIndex < totalChunks - 1) {
-                                val fragCount = ((encrypted.size + 468) / 469).coerceAtLeast(1)
-                                delay(fragCount * 42L + 120L)
+                                val fragCount = ((encrypted.size + 439) / 440).coerceAtLeast(1)
+                                delay(fragCount * 22L + 80L)
                             }
                         }
-                        TransferProgressManager.complete(canonicalTransferId, totalChunks)
+                        if (totalChunks > 1) {
+                            TransferProgressManager.complete(canonicalTransferId, totalChunks)
+                        }
                         Log.d(TAG, "✅ Sent encrypted file to $recipientPeerID ($totalChunks chunks)")
                         
                     } catch (e: Exception) {
@@ -1576,7 +1596,8 @@ class BluetoothMeshService(private val context: Context) {
         filePath: String,
         isVoiceNote: Boolean,
         memberPeerID: String,
-        memberNickname: String
+        memberNickname: String,
+        messageId: String = ""
     ) {
         try {
             val file = java.io.File(filePath)
@@ -1591,7 +1612,8 @@ class BluetoothMeshService(private val context: Context) {
                             meshId = meshId,
                             filePath = filePath,
                             isVoiceNote = isVoiceNote,
-                            recipientPeerID = memberPeerID
+                            recipientPeerID = memberPeerID,
+                            messageId = messageId
                         )
                     )
                 }
@@ -1626,9 +1648,9 @@ class BluetoothMeshService(private val context: Context) {
                 com.seamless.android.model.NoisePayloadType.MESH_IMAGE
             }
 
-            val CHUNK_SIZE = 24 * 1024 // 24KB chunks (~52 BLE fragments per chunk)
+            val CHUNK_SIZE = 24 * 1024 // 24KB chunks
             val totalChunks = if (fileData.size <= CHUNK_SIZE) 1 else (fileData.size + CHUNK_SIZE - 1) / CHUNK_SIZE
-            val transferId = java.util.UUID.randomUUID().toString()
+            val transferId = messageId.ifBlank { java.util.UUID.randomUUID().toString() }
 
             for (chunkIndex in 0 until totalChunks) {
                 val start = chunkIndex * CHUNK_SIZE
@@ -1651,7 +1673,7 @@ class BluetoothMeshService(private val context: Context) {
                 )
                 val encrypted = encryptionService.encrypt(noisePayload.encode(), memberPeerID) ?: continue
                 val packet = BitchatPacket(
-                    version = 1u,
+                    version = 2u,
                     type = MessageType.NOISE_ENCRYPTED.value,
                     senderID = hexStringToByteArray(myPeerID),
                     recipientID = hexStringToByteArray(memberPeerID),
@@ -1661,8 +1683,8 @@ class BluetoothMeshService(private val context: Context) {
                 )
                 connectionManager.broadcastPacket(RoutedPacket(signPacketBeforeBroadcast(packet)))
                 if (totalChunks > 1 && chunkIndex < totalChunks - 1) {
-                    val fragCount = ((encrypted.size + 468) / 469).coerceAtLeast(1)
-                    delay(fragCount * 42L + 120L)
+                    val fragCount = ((encrypted.size + 439) / 440).coerceAtLeast(1)
+                    delay(fragCount * 22L + 80L)
                 }
             }
         } catch (e: Exception) {
@@ -1687,7 +1709,8 @@ class BluetoothMeshService(private val context: Context) {
                         filePath = pending.filePath,
                         isVoiceNote = pending.isVoiceNote,
                         memberPeerID = pending.recipientPeerID,
-                        memberNickname = nickname
+                        memberNickname = nickname,
+                        messageId = pending.messageId
                     )
                 }
             }
@@ -1918,11 +1941,13 @@ class BluetoothMeshService(private val context: Context) {
         if (encryptionService.hasEstablishedSession(peerID)) {
             for (pending in messagesToSend) {
                 try {
-                    // Create message payload with sender info
+                    // Create message payload with sender info and messageId
                     val myNickname = delegate?.getNickname() ?: myPeerID
                     val payload = buildString {
                         append(myNickname)
-                        append("\u0000") // null separator
+                        append("\u0000")
+                        append(pending.messageId)
+                        append("\u0000")
                         append(pending.content)
                     }.toByteArray()
                     

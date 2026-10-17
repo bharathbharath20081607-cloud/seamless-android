@@ -123,7 +123,12 @@ class BluetoothConnectionTracker(
      * Add a device connection
      */
     fun addDeviceConnection(deviceAddress: String, deviceConn: DeviceConnection) {
-        Log.d(TAG, "Tracker: Adding device connection for $deviceAddress (isClient: ${deviceConn.isClient}")
+        val existing = connectedDevices[deviceAddress]
+        if (existing != null && existing.isClient && existing.gatt != null && !deviceConn.isClient) {
+            Log.d(TAG, "Tracker: Keeping active client connection for $deviceAddress while server connection also registered")
+            return
+        }
+        Log.d(TAG, "Tracker: Adding device connection for $deviceAddress (isClient: ${deviceConn.isClient})")
         connectedDevices[deviceAddress] = deviceConn
         pendingConnections.remove(deviceAddress)
         // Mark as awaiting first ANNOUNCE on this connection
@@ -269,10 +274,11 @@ class BluetoothConnectionTracker(
     }
     
     /**
-     * Check if device is already connected
+     * Check if device is already connected as an active GATT client
      */
     fun isDeviceConnected(deviceAddress: String): Boolean {
-        return connectedDevices.containsKey(deviceAddress)
+        val conn = connectedDevices[deviceAddress] ?: return false
+        return conn.isClient && conn.gatt != null
     }
     
     /**

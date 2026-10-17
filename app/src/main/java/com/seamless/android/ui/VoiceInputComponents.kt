@@ -105,27 +105,29 @@ fun VoiceRecordButton(
                         try {
                             awaitRelease()
                         } finally {
-                            if (isRecording) {
-                                // Extend recording for 350ms after release to avoid clipping
-                                delay(350)
-                            }
-                            if (isRecording) {
-                                val file = recorder?.stop()
-                                isRecording = false
-                                recorder = null
-                                val path = (file?.absolutePath ?: recordedFilePath)
-                                recordedFilePath = null
-                                val validFile = path?.let { java.io.File(it) }
-                                if (validFile != null && validFile.exists() && validFile.length() > 256 && !path.isNullOrBlank()) {
-                                    // Haptic "knock" when recording stops
-                                    try { haptic.performHapticFeedback(HapticFeedbackType.LongPress) } catch (_: Exception) {}
-                                    latestOnFinish.value(path)
-                                } else {
-                                    try { validFile?.delete() } catch (_: Exception) {}
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                                if (isRecording) {
+                                    // Extend recording briefly after release to avoid clipping
+                                    delay(180)
                                 }
+                                if (isRecording) {
+                                    val file = recorder?.stop()
+                                    isRecording = false
+                                    recorder = null
+                                    val path = (file?.absolutePath ?: recordedFilePath)
+                                    recordedFilePath = null
+                                    val validFile = path?.let { java.io.File(it) }
+                                    if (validFile != null && validFile.exists() && validFile.length() > 128 && !path.isNullOrBlank()) {
+                                        // Haptic "knock" when recording stops
+                                        try { haptic.performHapticFeedback(HapticFeedbackType.LongPress) } catch (_: Exception) {}
+                                        latestOnFinish.value(path)
+                                    } else {
+                                        try { validFile?.delete() } catch (_: Exception) {}
+                                    }
+                                }
+                                ampJob?.cancel()
+                                ampJob = null
                             }
-                            ampJob?.cancel()
-                            ampJob = null
                         }
                     }
                 )

@@ -142,7 +142,7 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
                         val savedPath = transferAssembler.handleChunk(file)
                         
                         if (savedPath != null) {
-                            val uniqueMsgId = java.util.UUID.randomUUID().toString().uppercase()
+                            val uniqueMsgId = file.transferId.ifBlank { java.util.UUID.randomUUID().toString() }.uppercase()
                             Log.d(TAG, "📄 Saved complete incoming file to $savedPath (msgId=$uniqueMsgId)")
                             
                             val message = BitchatMessage(
@@ -159,7 +159,7 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
 
                             delegate?.onMessageReceived(message)
 
-                            // Send delivery ACK with generated message ID
+                            // Send delivery ACK with deterministic message ID
                             sendDeliveryAck(uniqueMsgId, peerID)
                         }
                         // If savedPath is null, we're waiting for more chunks - no message yet
@@ -198,11 +198,19 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
                 
                 com.seamless.android.model.NoisePayloadType.MESH_MESSAGE -> {
                     // Handle Private Mesh message - route to PrivateMeshManager
-                    // Payload format: [senderNickname]\0[content]
+                    // Payload format: [senderNickname]\0[content] OR [senderNickname]\0[messageId]\0[content]
                     val payloadStr = String(noisePayload.data, Charsets.UTF_8)
-                    val parts = payloadStr.split("\u0000", limit = 2)
-                    val senderNickname = if (parts.size >= 1) parts[0] else delegate?.getPeerNickname(peerID) ?: "Unknown"
-                    val content = if (parts.size >= 2) parts[1] else payloadStr
+                    val parts = payloadStr.split("\u0000", limit = 3)
+                    val senderNickname = if (parts.isNotEmpty()) parts[0] else delegate?.getPeerNickname(peerID) ?: "Unknown"
+                    val msgId: String?
+                    val content: String
+                    if (parts.size == 3) {
+                        msgId = parts[1].ifBlank { null }
+                        content = parts[2]
+                    } else {
+                        msgId = null
+                        content = if (parts.size >= 2) parts[1] else payloadStr
+                    }
                     
                     Log.d(TAG, "🏠 Mesh message from $senderNickname: ${content.take(30)}...")
                     
@@ -210,7 +218,8 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
                     PrivateMeshManager.getInstance(appContext).onMessageReceived(
                         senderPeerID = peerID,
                         senderNickname = senderNickname,
-                        content = content
+                        content = content,
+                        messageId = msgId
                     )
                 }
                 
@@ -235,7 +244,8 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
                                 senderPeerID = peerID,
                                 senderNickname = senderNickname,
                                 filePath = savedPath,
-                                type = PrivateMeshMessageType.AUDIO
+                                type = PrivateMeshMessageType.AUDIO,
+                                messageId = file.transferId.ifBlank { null }
                             )
                         }
                     }
@@ -262,7 +272,8 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
                                 senderPeerID = peerID,
                                 senderNickname = senderNickname,
                                 filePath = savedPath,
-                                type = PrivateMeshMessageType.IMAGE
+                                type = PrivateMeshMessageType.IMAGE,
+                                messageId = file.transferId.ifBlank { null }
                             )
                         }
                     }
@@ -521,7 +532,7 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
                 val savedPath = transferAssembler.handleChunk(file)
                 if (savedPath != null) {
                     val message = BitchatMessage(
-                        id = java.util.UUID.randomUUID().toString().uppercase(),
+                        id = file.transferId.ifBlank { java.util.UUID.randomUUID().toString() }.uppercase(),
                         sender = delegate?.getPeerNickname(peerID) ?: "unknown",
                         content = savedPath,
                         type = com.seamless.android.features.file.FileUtils.messageTypeForMime(file.mimeType),
@@ -597,7 +608,7 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
                 val savedPath = transferAssembler.handleChunk(file)
                 if (savedPath != null) {
                     val message = BitchatMessage(
-                        id = java.util.UUID.randomUUID().toString().uppercase(),
+                        id = file.transferId.ifBlank { java.util.UUID.randomUUID().toString() }.uppercase(),
                         sender = delegate?.getPeerNickname(peerID) ?: "unknown",
                         content = savedPath,
                         type = com.seamless.android.features.file.FileUtils.messageTypeForMime(file.mimeType),
