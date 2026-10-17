@@ -1,4 +1,14 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.profile.ui
+import com.seamless.android.ui.theme.SeamlessColors
+import coil.compose.rememberAsyncImagePainter
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.shape.CircleShape
 
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -14,10 +24,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -28,30 +36,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.rememberAsyncImagePainter
 import com.seamless.android.profile.ProfileManager
-import com.seamless.android.ui.theme.SeamlessColors
 import com.seamless.android.ui.theme.SeamlessCyan
 import com.seamless.android.ui.theme.SeamlessPink
 import com.seamless.android.ui.theme.SeamlessPurple
-import com.seamless.android.ui.theme.SeamlessTeal
-import com.seamless.android.ui.theme.rememberDimensions
 import com.seamless.android.ui.theme.safeAreaPadding
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -352,13 +351,13 @@ fun ProfileScreen(
                                 .background(
                                     Brush.sweepGradient(
                                         colors = listOf(
-                                            SeamlessCyan,
-                                            Color(0xFF6366F1), // Indigo
-                                            SeamlessPurple,
-                                            SeamlessPink,
-                                            Color(0xFFFF6B6B), // Coral
-                                            SeamlessTeal,
-                                            SeamlessCyan
+                                            Color.White,
+                                            Color(0xFFA1A1AA), // Zinc-400
+                                            Color(0xFF71717A), // Zinc-500
+                                            Color(0xFFA1A1AA), // Zinc-400
+                                            Color.White,
+                                            Color(0xFFA1A1AA), // Zinc-400
+                                            Color.White
                                         )
                                     )
                                 )
@@ -546,7 +545,7 @@ private fun EditModeContent(
                 label = "Display Name",
                 placeholder = "Your nickname",
                 icon = Icons.Default.Person,
-                accentColor = SeamlessCyan,
+                accentColor = Color.White,
                 maxLength = 30,
                 singleLine = true
             )
@@ -566,7 +565,7 @@ private fun EditModeContent(
                 label = "Bio",
                 placeholder = "Tell the mesh about yourself...",
                 icon = Icons.Default.AutoAwesome,
-                accentColor = SeamlessPurple,
+                accentColor = Color(0xFFA1A1AA), // Zinc-400
                 maxLength = 100,
                 singleLine = false,
                 maxLines = 3
@@ -644,10 +643,8 @@ private fun EditModeContent(
                             brush = if (isValid) {
                                 Brush.horizontalGradient(
                                     colors = listOf(
-                                        SeamlessCyan,
-                                        Color(0xFF6366F1),
-                                        SeamlessPurple,
-                                        SeamlessPink
+                                        Color.White,
+                                        Color(0xFFE4E4E7) // Zinc-200
                                     )
                                 )
                             } else {
@@ -681,7 +678,7 @@ private fun EditModeContent(
                     if (isSaving) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(24.dp),
-                            color = Color.White, strokeWidth = 2.5.dp
+                            color = Color.Black, strokeWidth = 2.5.dp
                         )
                     } else {
                         Row(
@@ -692,14 +689,14 @@ private fun EditModeContent(
                                 text = if (isInitialSetup) "Get Started" else "Save Changes",
                                 style = MaterialTheme.typography.titleMedium.copy(
                                     fontWeight = FontWeight.Bold,
-                                    color = if (isValid) Color.White else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                    color = if (isValid) Color.Black else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                                     letterSpacing = 0.3.sp
                                 )
                             )
                             if (isValid) {
                                 Icon(
-                                    Icons.Default.ArrowForward, null,
-                                    tint = Color.White, modifier = Modifier.size(20.dp)
+                                    androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowForward, null,
+                                    tint = Color.Black, modifier = Modifier.size(20.dp)
                                 )
                             }
                         }

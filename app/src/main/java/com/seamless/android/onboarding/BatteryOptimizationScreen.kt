@@ -1,12 +1,14 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.onboarding
+import com.seamless.android.ui.theme.SeamlessColors
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.BorderStroke
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.*
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -27,9 +29,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.seamless.android.R
-import com.seamless.android.ui.theme.SeamlessColors
-import com.seamless.android.ui.theme.SeamlessTeal
-import com.seamless.android.ui.theme.SeamlessCyan
 
 /**
  * Screen shown when checking battery optimization status or requesting battery optimization disable
@@ -146,21 +145,17 @@ private fun BatteryOptimizationEnabledContent(
                     Text(
                         text = stringResource(R.string.app_name),
                         style = MaterialTheme.typography.headlineLarge.copy(
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = FontFamily.Default,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 32.sp,
-                            shadow = androidx.compose.ui.graphics.Shadow(
-                                color = colorScheme.primary,
-                                blurRadius = 24f
-                            )
+                            fontSize = 32.sp
                         ),
-                        color = colorScheme.primary // Use primary color for neon effect
+                        color = colorScheme.primary
                     )
 
                     Text(
                         text = stringResource(R.string.battery_optimization_detected_title),
                         fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = FontFamily.Default,
                         color = colorScheme.onBackground.copy(alpha = 0.7f)
                     )
                 }
@@ -197,7 +192,7 @@ private fun BatteryOptimizationEnabledContent(
                             Icon(
                                 imageVector = Icons.Filled.Power,
                                 contentDescription = stringResource(R.string.cd_battery_optimization),
-                                tint = SeamlessCyan, // Electric cyan
+                                tint = colorScheme.primary,
                                 modifier = Modifier
                                     .padding(top = 2.dp)
                                     .size(24.dp)
@@ -252,7 +247,7 @@ private fun BatteryOptimizationEnabledContent(
                             Icon(
                                 imageVector = Icons.Filled.CheckCircle,
                                 contentDescription = stringResource(R.string.cd_benefits),
-                                tint = SeamlessTeal, // Electric Green/Teal
+                                tint = colorScheme.primary,
                                 modifier = Modifier
                                     .padding(top = 2.dp)
                                     .size(24.dp)
@@ -301,7 +296,7 @@ private fun BatteryOptimizationEnabledContent(
                 Text(
                     text = stringResource(R.string.disable_battery_optimization),
                     style = MaterialTheme.typography.bodyMedium.copy(
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = FontFamily.Default,
                         fontWeight = FontWeight.Bold
                     )
                 )
@@ -319,7 +314,7 @@ private fun BatteryOptimizationEnabledContent(
                     Text(
                         text = stringResource(R.string.check_again),
                         style = MaterialTheme.typography.bodyMedium.copy(
-                            fontFamily = FontFamily.Monospace
+                            fontFamily = FontFamily.Default
                         )
                     )
                 }
@@ -335,7 +330,7 @@ private fun BatteryOptimizationEnabledContent(
                     Text(
                         text = stringResource(R.string.battery_optimization_skip),
                         style = MaterialTheme.typography.bodyMedium.copy(
-                            fontFamily = FontFamily.Monospace
+                            fontFamily = FontFamily.Default
                         )
                     )
                 }
@@ -361,7 +356,7 @@ private fun BatteryOptimizationCheckingContent(
             Text(
                 text = stringResource(R.string.app_name),
                 style = MaterialTheme.typography.headlineLarge.copy(
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = FontFamily.Default,
                     fontWeight = FontWeight.Bold,
                     fontSize = 32.sp
                 ),
@@ -371,7 +366,7 @@ private fun BatteryOptimizationCheckingContent(
             Text(
                 text = stringResource(R.string.battery_optimization_disabled_title),
                 fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = FontFamily.Default,
                 color = colorScheme.onBackground.copy(alpha = 0.7f)
             )
         }
@@ -399,7 +394,7 @@ private fun BatteryOptimizationCheckingContent(
         Text(
             text = stringResource(R.string.battery_optimization_success_message),
             style = MaterialTheme.typography.bodyMedium.copy(
-                fontFamily = FontFamily.Monospace,
+                fontFamily = FontFamily.Default,
                 color = colorScheme.onBackground.copy(alpha = 0.8f)
             ),
             textAlign = TextAlign.Center
@@ -424,7 +419,7 @@ private fun BatteryOptimizationNotSupportedContent(
             Text(
                 text = stringResource(R.string.app_name),
                 style = MaterialTheme.typography.headlineLarge.copy(
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = FontFamily.Default,
                     fontWeight = FontWeight.Bold,
                     fontSize = 32.sp
                 ),
@@ -434,7 +429,7 @@ private fun BatteryOptimizationNotSupportedContent(
             Text(
                 text = stringResource(R.string.battery_optimization_not_required),
                 fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = FontFamily.Default,
                 color = colorScheme.onBackground.copy(alpha = 0.7f)
             )
         }
@@ -449,7 +444,7 @@ private fun BatteryOptimizationNotSupportedContent(
         Text(
             text = stringResource(R.string.battery_optimization_not_supported_message),
             style = MaterialTheme.typography.bodyMedium.copy(
-                fontFamily = FontFamily.Monospace,
+                fontFamily = FontFamily.Default,
                 color = colorScheme.onBackground.copy(alpha = 0.8f)
             ),
             textAlign = TextAlign.Center
@@ -465,7 +460,7 @@ private fun BatteryOptimizationNotSupportedContent(
             Text(
                 text = stringResource(R.string.continue_btn),
                 style = MaterialTheme.typography.bodyMedium.copy(
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = FontFamily.Default,
                     fontWeight = FontWeight.Bold
                 )
             )

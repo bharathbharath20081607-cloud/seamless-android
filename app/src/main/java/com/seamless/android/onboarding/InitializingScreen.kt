@@ -1,25 +1,26 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.onboarding
+import com.seamless.android.ui.theme.SeamlessColors
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.BorderStroke
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.*
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.scaleIn
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.draw.scale
 import androidx.compose.foundation.background
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -27,7 +28,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.seamless.android.R
-import com.seamless.android.ui.theme.SeamlessColors
 
 /**
  * Loading screen shown during app initialization after permissions are granted
@@ -98,13 +98,9 @@ fun InitializingScreen(modifier: Modifier) {
                 Text(
                     text = stringResource(R.string.app_name),
                     style = MaterialTheme.typography.displayMedium.copy(
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = FontFamily.Default,
                         fontWeight = FontWeight.Bold,
-                        color = colorScheme.primary,
-                        shadow = androidx.compose.ui.graphics.Shadow(
-                            color = colorScheme.primary,
-                            blurRadius = 32f
-                        )
+                        color = colorScheme.primary
                     ),
                     textAlign = TextAlign.Center
                 )
@@ -130,7 +126,7 @@ fun InitializingScreen(modifier: Modifier) {
                         Text(
                             text = stringResource(R.string.initializing_mesh_network),
                             style = MaterialTheme.typography.bodyLarge.copy(
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = FontFamily.Default,
                                 color = colorScheme.onSurface.copy(alpha = 0.9f),
                                 fontWeight = FontWeight.Medium
                             )
@@ -140,7 +136,7 @@ fun InitializingScreen(modifier: Modifier) {
                             Text(
                                 text = ".",
                                 style = MaterialTheme.typography.bodyLarge.copy(
-                                    fontFamily = FontFamily.Monospace,
+                                    fontFamily = FontFamily.Default,
                                     color = colorScheme.primary.copy(alpha = alpha),
                                     fontWeight = FontWeight.Bold
                                 )
@@ -172,7 +168,7 @@ fun InitializingScreen(modifier: Modifier) {
                             Text(
                                 text = stringResource(R.string.setting_up_bluetooth),
                                 style = MaterialTheme.typography.bodyMedium.copy(
-                                    fontFamily = FontFamily.Monospace,
+                                    fontFamily = FontFamily.Default,
                                     color = colorScheme.onSurface.copy(alpha = 0.9f),
                                     fontWeight = FontWeight.SemiBold
                                 ),
@@ -182,7 +178,7 @@ fun InitializingScreen(modifier: Modifier) {
                             Text(
                                 text = stringResource(R.string.should_take_seconds),
                                 style = MaterialTheme.typography.bodySmall.copy(
-                                    fontFamily = FontFamily.Monospace,
+                                    fontFamily = FontFamily.Default,
                                     color = colorScheme.onSurface.copy(alpha = 0.6f)
                                 ),
                                 textAlign = TextAlign.Center
@@ -335,7 +331,7 @@ fun InitializationErrorScreen(
             Text(
                 text = stringResource(R.string.setup_not_complete),
                 style = MaterialTheme.typography.headlineSmall.copy(
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = FontFamily.Default,
                     fontWeight = FontWeight.Bold,
                     color = colorScheme.error
                 ),
@@ -352,7 +348,7 @@ fun InitializationErrorScreen(
                 Text(
                     text = errorMessage,
                     style = MaterialTheme.typography.bodyMedium.copy(
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = FontFamily.Default,
                         color = colorScheme.onSurface
                     ),
                     modifier = Modifier.padding(16.dp),
@@ -371,7 +367,7 @@ fun InitializationErrorScreen(
                     Text(
                         text = stringResource(R.string.try_again),
                         style = MaterialTheme.typography.bodyMedium.copy(
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = FontFamily.Default,
                             fontWeight = FontWeight.Bold
                         ),
                         modifier = Modifier.padding(vertical = 4.dp)
@@ -385,7 +381,7 @@ fun InitializationErrorScreen(
                     Text(
                         text = stringResource(R.string.open_settings),
                         style = MaterialTheme.typography.bodyMedium.copy(
-                            fontFamily = FontFamily.Monospace
+                            fontFamily = FontFamily.Default
                         ),
                         modifier = Modifier.padding(vertical = 4.dp)
                     )

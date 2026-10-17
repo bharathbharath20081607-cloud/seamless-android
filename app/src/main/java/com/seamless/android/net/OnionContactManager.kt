@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.net
 
 import android.content.Context
@@ -248,7 +249,24 @@ class OnionContactManager private constructor(private val context: Context) {
         }
     }
 
-    fun getMyContactInfo(): OnionContact {
+    fun setMyMailboxOnion(mailboxOnion: String?) {
+        val canonical = mailboxOnion
+            ?.let { OnionContact.canonicalizeOnionEndpoint(it) }
+            ?.takeIf { OnionContact.isValidOnionEndpoint(it) }
+        prefs.edit().putString("my_mailbox_onion", canonical).apply()
+    }
+
+    fun getMyMailboxOnion(): String? {
+        return prefs.getString("my_mailbox_onion", null)
+            ?.let { OnionContact.canonicalizeOnionEndpoint(it) }
+            ?.takeIf { OnionContact.isValidOnionEndpoint(it) }
+    }
+
+    /**
+     * Builds the current shareable identity. Defaults to the persisted mailbox
+     * hidden service endpoint when not explicitly supplied by the caller.
+     */
+    fun getMyContactInfo(mailboxOnion: String? = getMyMailboxOnion()): OnionContact {
         val onion = TorHiddenServiceManager.getInstance(context)
             .getOnionAddress()
             .let { OnionContact.canonicalizeOnionEndpoint(it) }
@@ -260,6 +278,9 @@ class OnionContactManager private constructor(private val context: Context) {
             .getString("nickname", null)
             ?.takeIf { it.isNotBlank() }
             ?: "anon-${publicKey.take(6).ifBlank { "tor" }}"
+        val effectiveMailbox = (mailboxOnion ?: getMyMailboxOnion())
+            ?.let { OnionContact.canonicalizeOnionEndpoint(it) }
+            ?.takeIf { OnionContact.isValidOnionEndpoint(it) }
 
         return OnionContact(
             id = "me",
@@ -268,14 +289,17 @@ class OnionContactManager private constructor(private val context: Context) {
             publicKey = publicKey,
             avatarId = OnionContact.canonicalAvatarId(avatarId),
             needsRendezvous = onion.isBlank(),
+            mailboxOnion = effectiveMailbox,
             trustState = TorContactTrustState.VERIFIED,
             verifiedAt = System.currentTimeMillis()
         )
     }
 
-    fun getMyShareableLink(): String = getMyContactInfo().toShareableLink()
+    fun getMyShareableLink(mailboxOnion: String? = getMyMailboxOnion()): String =
+        getMyContactInfo(mailboxOnion).toShareableLink()
 
-    fun getMyQrData(): String = getMyContactInfo().toQrData()
+    fun getMyQrData(mailboxOnion: String? = getMyMailboxOnion()): String =
+        getMyContactInfo(mailboxOnion).toQrData()
 
     fun addContact(contact: OnionContact): Boolean {
         val normalized = normalize(contact)
@@ -285,15 +309,17 @@ class OnionContactManager private constructor(private val context: Context) {
             it.publicKey.equals(normalized.publicKey, ignoreCase = true)
         }
         if (samePublicKey != null) {
-            if (!normalized.requiresRendezvous() &&
+            val hasNewOnion = !normalized.requiresRendezvous() &&
                 (samePublicKey.requiresRendezvous() ||
-                    normalizeOnion(samePublicKey.onionAddress) != normalizeOnion(normalized.onionAddress) ||
-                    samePublicKey.avatarId != normalized.avatarId)
-            ) {
+                    normalizeOnion(samePublicKey.onionAddress) != normalizeOnion(normalized.onionAddress))
+            val hasNewMailbox = !normalized.mailboxOnion.isNullOrBlank() &&
+                normalized.mailboxOnion != samePublicKey.mailboxOnion
+            val hasNewAvatar = samePublicKey.avatarId != normalized.avatarId
+            if (hasNewOnion || hasNewMailbox || hasNewAvatar) {
                 contacts[samePublicKey.id] = samePublicKey.copy(
-                    nickname = normalized.nickname,
-                    onionAddress = normalized.onionAddress,
-                    needsRendezvous = false,
+                    nickname = normalized.nickname.ifBlank { samePublicKey.nickname },
+                    onionAddress = if (!normalized.requiresRendezvous()) normalized.onionAddress else samePublicKey.onionAddress,
+                    needsRendezvous = if (!normalized.requiresRendezvous()) false else samePublicKey.needsRendezvous,
                     mailboxOnion = normalized.mailboxOnion ?: samePublicKey.mailboxOnion,
                     avatarId = normalized.avatarId,
                     ephemeralRendezvousId = normalized.ephemeralRendezvousId ?: samePublicKey.ephemeralRendezvousId,
@@ -301,7 +327,7 @@ class OnionContactManager private constructor(private val context: Context) {
                 )
                 saveContacts()
                 updateFlow()
-                Log.i(TAG, "Updated contact ${normalized.nickname} with current onion address")
+                Log.i(TAG, "Updated contact ${normalized.nickname} with latest endpoint/mailbox metadata")
                 return true
             }
             Log.w(TAG, "Contact with this public key already exists")

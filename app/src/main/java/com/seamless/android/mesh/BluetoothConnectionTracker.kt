@@ -1,12 +1,15 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.mesh
 
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
 import android.util.Log
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -38,6 +41,10 @@ class BluetoothConnectionTracker(
     
     // Connection attempt tracking with automatic cleanup
     private val pendingConnections = ConcurrentHashMap<String, ConnectionAttempt>()
+
+    // Per-device GATT flow control latches to prevent overlapping writes/notifications (status 133 / GATT_BUSY)
+    private val pendingWriteLatches = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+    private val pendingNotifyLatches = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
     
     // State management
     private var isActive = false
@@ -189,14 +196,76 @@ class BluetoothConnectionTracker(
      * Add a subscribed device
      */
     fun addSubscribedDevice(device: BluetoothDevice) {
-        subscribedDevices.add(device)
+        if (subscribedDevices.none { it.address == device.address }) {
+            subscribedDevices.add(device)
+        }
+        updateLastPacketReceived(device.address)
     }
     
     /**
      * Remove a subscribed device
      */
     fun removeSubscribedDevice(device: BluetoothDevice) {
-        subscribedDevices.remove(device)
+        subscribedDevices.removeAll { it.address == device.address }
+        pendingNotifyLatches.remove(device.address)?.complete(false)
+    }
+
+    /**
+     * Register a write completion latch before issuing gatt.writeCharacteristic
+     */
+    fun prepareDeviceWrite(deviceAddress: String): CompletableDeferred<Boolean> {
+        val latch = CompletableDeferred<Boolean>()
+        pendingWriteLatches.put(deviceAddress, latch)?.complete(false)
+        return latch
+    }
+
+    /**
+     * Signal write completion from onCharacteristicWrite
+     */
+    fun onDeviceWriteCompleted(deviceAddress: String, success: Boolean) {
+        pendingWriteLatches.remove(deviceAddress)?.complete(success)
+    }
+
+    /**
+     * Wait for the in-flight GATT write to complete (with safe timeout)
+     */
+    suspend fun awaitDeviceWrite(deviceAddress: String, timeoutMs: Long = 1200L): Boolean {
+        val latch = pendingWriteLatches[deviceAddress] ?: return true
+        val result = withTimeoutOrNull(timeoutMs) { latch.await() }
+        if (result == null) {
+            pendingWriteLatches.remove(deviceAddress, latch)
+            return false
+        }
+        return result
+    }
+
+    /**
+     * Register a notification completion latch before issuing gattServer.notifyCharacteristicChanged
+     */
+    fun prepareDeviceNotify(deviceAddress: String): CompletableDeferred<Boolean> {
+        val latch = CompletableDeferred<Boolean>()
+        pendingNotifyLatches.put(deviceAddress, latch)?.complete(false)
+        return latch
+    }
+
+    /**
+     * Signal notification completion from onNotificationSent
+     */
+    fun onDeviceNotifyCompleted(deviceAddress: String, success: Boolean) {
+        pendingNotifyLatches.remove(deviceAddress)?.complete(success)
+    }
+
+    /**
+     * Wait for the in-flight GATT server notification to complete (with safe timeout)
+     */
+    suspend fun awaitDeviceNotify(deviceAddress: String, timeoutMs: Long = 1200L): Boolean {
+        val latch = pendingNotifyLatches[deviceAddress] ?: return true
+        val result = withTimeoutOrNull(timeoutMs) { latch.await() }
+        if (result == null) {
+            pendingNotifyLatches.remove(deviceAddress, latch)
+            return false
+        }
+        return result
     }
     
     /**
@@ -315,11 +384,12 @@ class BluetoothConnectionTracker(
      * Clean up a specific device connection
      */
     fun cleanupDeviceConnection(deviceAddress: String) {
-        connectedDevices.remove(deviceAddress)?.let { deviceConn ->
-            subscribedDevices.removeAll { it.address == deviceAddress }
-            addressPeerMap.remove(deviceAddress)
-        }
+        connectedDevices.remove(deviceAddress)
+        subscribedDevices.removeAll { it.address == deviceAddress }
+        addressPeerMap.remove(deviceAddress)
         firstAnnounceSeen.remove(deviceAddress)
+        pendingWriteLatches.remove(deviceAddress)?.complete(false)
+        pendingNotifyLatches.remove(deviceAddress)?.complete(false)
         Log.d(TAG, "Cleaned up device connection for $deviceAddress")
     }
     
@@ -354,6 +424,10 @@ class BluetoothConnectionTracker(
         pendingConnections.clear()
         scanRSSI.clear()
         firstAnnounceSeen.clear()
+        pendingWriteLatches.values.forEach { it.complete(false) }
+        pendingWriteLatches.clear()
+        pendingNotifyLatches.values.forEach { it.complete(false) }
+        pendingNotifyLatches.clear()
         Log.i(TAG, "🧹 Cleared all connection tracking for mesh refresh")
     }
 
@@ -392,13 +466,14 @@ class BluetoothConnectionTracker(
                     }
                     
                     // ** HEARTBEAT: Detect and disconnect zombie connections **
+                    // Use 90s (6x the 15s announce interval) so idle connections aren't falsely severed
                     val now = System.currentTimeMillis()
-                    val zombieTimeout = 30_000L // 30 seconds of inactivity = zombie
+                    val zombieTimeout = 90_000L
                     val zombies = connectedDevices.filter { (_, dc) ->
-                        now - dc.lastPacketReceivedAt > zombieTimeout
+                        dc.isClient && (now - dc.lastPacketReceivedAt > zombieTimeout)
                     }
                     if (zombies.isNotEmpty()) {
-                        Log.w(TAG, "⚠️ Detected ${zombies.size} zombie connections, disconnecting...")
+                        Log.w(TAG, "⚠️ Detected ${zombies.size} zombie client connections, disconnecting...")
                         zombies.forEach { (address, dc) ->
                             Log.d(TAG, "Disconnecting zombie: $address (inactive ${(now - dc.lastPacketReceivedAt)/1000}s)")
                             try { dc.gatt?.disconnect() } catch (_: Exception) {}

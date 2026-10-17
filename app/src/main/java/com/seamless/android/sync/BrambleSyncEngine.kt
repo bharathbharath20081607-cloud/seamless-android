@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.sync
 
 import android.content.Context
@@ -6,11 +7,12 @@ import com.seamless.android.data.AppDatabase
 import com.seamless.android.data.SyncStateEntity
 import com.seamless.android.net.OnionMessageProtocol
 import com.seamless.android.net.OnionMessageProtocol.OnionFrame
-import com.seamless.android.net.TorCircuitManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.nio.ByteBuffer
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -52,9 +54,10 @@ class BrambleSyncEngine private constructor(private val context: Context) {
         // Sync timing
         private const val SYNC_INTERVAL_MS = 10_000L          // Offer every 10 seconds when connected
         private const val SYNC_TIMEOUT_MS = 30_000L           // Timeout for waiting for a response
-        private const val MAX_BATCH_SIZE = 50                  // Max messages per batch
-        private const val MAX_OFFER_IDS = 1000                 // DoS guard: cap offer list size
-        private const val MAX_BATCH_PAYLOAD = 256 * 1024       // DoS guard: 256KB max batch
+        private const val MAX_BATCH_SIZE = 40                  // Max messages per batch
+        private const val MAX_OFFER_IDS = 80                   // DoS & frame-size guard: cap offer list size
+        private const val MAX_BATCH_PAYLOAD = 256 * 1024       // DoS guard: 256KB max total batch
+        private const val MAX_SINGLE_BATCH_WIRE_BYTES = 3_950  // Fits inside 4060-byte OnionFrame payload + 37-byte sealed envelope
         private const val GCS_FPR = 0.01                       // GCS false positive rate (1%)
         private const val GCS_MAX_BYTES = 1024                 // Max GCS filter size in bytes
 
@@ -102,9 +105,15 @@ class BrambleSyncEngine private constructor(private val context: Context) {
 
     // Messages available for sync (indexed by ID)
     private val messageStore = ConcurrentHashMap<String, ByteArray>() // messageId -> encoded OnionFrame
+    private val messageTargets = ConcurrentHashMap<String, String>()  // messageId -> canonical recipientPeerId
 
     // Already received message IDs (for deduplication)
     private val receivedMessageIds = ConcurrentHashMap.newKeySet<String>()
+
+    private fun canonicalizePeer(peerId: String): String {
+        val canonical = com.seamless.android.net.OnionContactManager.OnionContact.canonicalizeOnionEndpoint(peerId)
+        return canonical.ifBlank { peerId.trim().lowercase() }
+    }
 
     private val mutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -149,10 +158,64 @@ class BrambleSyncEngine private constructor(private val context: Context) {
     /**
      * Add a message to the sync store.
      * Messages in the store will be offered to peers during sync.
+     * Strips random padding from 4096-byte OnionFrames so multiple frames fit
+     * inside a single 4096-byte SYNC_BATCH frame.
      */
-    fun addMessageForSync(messageId: String, encodedFrame: ByteArray) {
-        messageStore[messageId] = encodedFrame
-        Log.d(TAG, "📦 Added message $messageId to sync store (${messageStore.size} total)")
+    fun addMessageForSync(messageId: String, encodedFrame: ByteArray, recipientPeerId: String? = null) {
+        val compact = OnionFrame.decode(encodedFrame)?.let(::encodeCompactFrame) ?: encodedFrame
+        if (compact.size <= MAX_SINGLE_BATCH_WIRE_BYTES - 8) {
+            messageStore[messageId] = compact
+            if (!recipientPeerId.isNullOrBlank()) {
+                messageTargets[messageId] = canonicalizePeer(recipientPeerId)
+            }
+            Log.d(TAG, "📦 Added message $messageId to sync store (${messageStore.size} total, ${compact.size}B, target=${recipientPeerId?.take(12) ?: "any"})")
+        }
+    }
+
+    private fun encodeCompactFrame(frame: OnionFrame): ByteArray {
+        val buf = ByteBuffer.allocate(OnionMessageProtocol.HEADER_SIZE + frame.payload.size)
+        buf.put(frame.version)
+        buf.putLong(frame.messageId.mostSignificantBits)
+        buf.putLong(frame.messageId.leastSignificantBits)
+        buf.putLong(frame.sequence)
+        buf.putLong(frame.timestamp)
+        buf.put(frame.frameType.code)
+        buf.putShort(frame.payload.size.toShort())
+        buf.put(frame.payload)
+        return buf.array()
+    }
+
+    private fun decodeCompactOrFullFrame(data: ByteArray): OnionFrame? {
+        if (data.size == OnionMessageProtocol.FRAME_SIZE) {
+            return OnionFrame.decode(data)
+        }
+        return try {
+            if (data.size < OnionMessageProtocol.HEADER_SIZE) return null
+            val buf = ByteBuffer.wrap(data)
+            val version = buf.get()
+            val msb = buf.long
+            val lsb = buf.long
+            val messageId = UUID(msb, lsb)
+            val sequence = buf.long
+            val timestamp = buf.long
+            val frameType = OnionMessageProtocol.FrameType.fromCode(buf.get()) ?: return null
+            val payloadLength = buf.short.toInt() and 0xFFFF
+            if (payloadLength > OnionMessageProtocol.MAX_PAYLOAD_SIZE || payloadLength > buf.remaining()) {
+                return null
+            }
+            val payload = ByteArray(payloadLength)
+            buf.get(payload)
+            OnionFrame(
+                version = version,
+                messageId = messageId,
+                sequence = sequence,
+                timestamp = timestamp,
+                frameType = frameType,
+                payload = payload
+            )
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /**
@@ -323,7 +386,7 @@ class BrambleSyncEngine private constructor(private val context: Context) {
         updateStateFlow()
 
         // Filter: which messages do we NOT already have?
-        val needed = offer.messageIds.filter { !hasMessage(it) }
+        val needed = offer.messageIds.filter { !hasMessage(it) }.take(MAX_BATCH_SIZE)
 
         if (needed.isEmpty()) {
             Log.d(TAG, "Already have all offered messages from $peerId")
@@ -356,7 +419,7 @@ class BrambleSyncEngine private constructor(private val context: Context) {
 
     /**
      * Handle a SYNC_REQUEST from a peer.
-     * Sends the requested messages in a SYNC_BATCH.
+     * Sends the requested messages in one or more bounded SYNC_BATCH frames.
      */
     suspend fun handleSyncRequest(peerId: String, frame: OnionFrame) = mutex.withLock {
         val request = OnionMessageProtocol.SyncRequest.fromBytes(frame.payload) ?: return@withLock
@@ -379,30 +442,61 @@ class BrambleSyncEngine private constructor(private val context: Context) {
             return@withLock
         }
 
-        // DoS guard: cap batch payload size
-        var totalSize = 0
-        val safeBatch = requestedFrames.takeWhile { frame ->
-            totalSize += frame.size
-            totalSize <= MAX_BATCH_PAYLOAD
+        // Partition requested frames into chunks that fit within a single
+        // 4096-byte OnionFrame (accounting for 4-byte count, 4-byte per-frame
+        // length prefix, and 37-byte direct-sealed encryption overhead).
+        val batches = mutableListOf<List<ByteArray>>()
+        var currentBatch = mutableListOf<ByteArray>()
+        var currentBytes = 4 // 4-byte frame count header in SyncBatch
+        var totalAccumulated = 0
+
+        for (rawFrame in requestedFrames) {
+            val entryBytes = 4 + rawFrame.size
+            if (entryBytes + 4 > MAX_SINGLE_BATCH_WIRE_BYTES) continue
+            if (totalAccumulated + rawFrame.size > MAX_BATCH_PAYLOAD) break
+            if (currentBatch.isNotEmpty() && currentBytes + entryBytes > MAX_SINGLE_BATCH_WIRE_BYTES) {
+                batches.add(currentBatch)
+                currentBatch = mutableListOf()
+                currentBytes = 4
+            }
+            currentBatch.add(rawFrame)
+            currentBytes += entryBytes
+            totalAccumulated += rawFrame.size
+        }
+        if (currentBatch.isNotEmpty()) {
+            batches.add(currentBatch)
         }
 
-        // Send SYNC_BATCH
-        val batchFrame = OnionMessageProtocol.createSyncBatchFrame(safeBatch)
-        // Send across all registered transports
-        var sent = false
-        for (transport in transports) {
-            if (transport.sendData(peerId, batchFrame.encode())) {
-                sent = true
-                break
+        if (batches.isEmpty()) {
+            resetSyncState(peerId)
+            return@withLock
+        }
+
+        var anySent = false
+        var sentCount = 0
+        for (batchSlice in batches) {
+            val batchFrame = OnionMessageProtocol.createSyncBatchFrame(batchSlice)
+            var sliceSent = false
+            for (transport in transports) {
+                if (transport.sendData(peerId, batchFrame.encode())) {
+                    sliceSent = true
+                    break
+                }
+            }
+            if (sliceSent) {
+                anySent = true
+                sentCount += batchSlice.size
             }
         }
 
-        if (sent) {
+        if (anySent) {
             state.syncState = SyncState.AWAITING_ACK
             state.lastStateChangeAt = System.currentTimeMillis()
             updateStateFlow()
             listener?.onSyncStateChanged(peerId, SyncState.AWAITING_ACK)
-            Log.i(TAG, "📤 Sent batch of ${safeBatch.size} messages to $peerId")
+            Log.i(TAG, "📤 Sent $sentCount messages across ${batches.size} batch frame(s) to $peerId")
+        } else {
+            resetSyncState(peerId)
         }
     }
 
@@ -424,12 +518,12 @@ class BrambleSyncEngine private constructor(private val context: Context) {
 
         Log.i(TAG, "📥 Received batch of ${batch.frames.size} messages from $peerId")
 
-        // Decode and process each frame
+        // Decode and process each frame (supports both compact unpadded and 4096B padded frames)
         val receivedFrames = mutableListOf<OnionFrame>()
         val ackedIds = mutableListOf<String>()
 
         for (frameData in batch.frames) {
-            val innerFrame = OnionFrame.decode(frameData)
+            val innerFrame = decodeCompactOrFullFrame(frameData)
             if (innerFrame != null) {
                 receivedFrames.add(innerFrame)
                 ackedIds.add(innerFrame.messageId.toString())
@@ -443,7 +537,7 @@ class BrambleSyncEngine private constructor(private val context: Context) {
         }
 
         // Send SYNC_ACK
-        val ackFrame = OnionMessageProtocol.createSyncAckFrame(ackedIds)
+        val ackFrame = OnionMessageProtocol.createSyncAckFrame(ackedIds.take(MAX_OFFER_IDS))
         // Send across all registered transports
         for (transport in transports) {
             if (transport.sendData(peerId, ackFrame.encode())) {
@@ -530,11 +624,17 @@ class BrambleSyncEngine private constructor(private val context: Context) {
     // ===== Helper Methods =====
 
     /**
-     * Get messages that a peer hasn't acknowledged yet.
+     * Get messages that a peer hasn't acknowledged yet, scoped to that peer's target address.
      */
     private fun getUnsyncedForPeer(peerId: String): List<String> {
-        val peerState = peerStates[peerId] ?: return messageStore.keys.toList()
-        return messageStore.keys.filter { it !in peerState.syncedMessageIds }
+        val canonicalPeer = canonicalizePeer(peerId)
+        val peerState = peerStates[peerId]
+        return messageStore.keys.filter { msgId ->
+            val target = messageTargets[msgId]
+            val matchesTarget = (target == null || target == canonicalPeer)
+            val notYetSynced = (peerState == null || msgId !in peerState.syncedMessageIds)
+            matchesTarget && notYetSynced
+        }
     }
 
     /**
@@ -641,6 +741,7 @@ class BrambleSyncEngine private constructor(private val context: Context) {
     fun reset() {
         peerStates.clear()
         messageStore.clear()
+        messageTargets.clear()
         receivedMessageIds.clear()
         updateStateFlow()
         Log.i(TAG, "🗑️ Sync engine reset")

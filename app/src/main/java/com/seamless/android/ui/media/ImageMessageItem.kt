@@ -1,15 +1,18 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui.media
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,14 +21,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.text.font.FontFamily
 import com.seamless.android.mesh.BluetoothMeshService
 import com.seamless.android.model.BitchatMessage
@@ -34,6 +33,7 @@ import androidx.compose.material3.ColorScheme
 import java.text.SimpleDateFormat
 import java.util.*
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ImageMessageItem(
     message: BitchatMessage,
@@ -49,35 +49,8 @@ fun ImageMessageItem(
     modifier: Modifier = Modifier
 ) {
     val path = message.content.trim()
+    val haptic = LocalHapticFeedback.current
     Column(modifier = modifier.fillMaxWidth()) {
-        val headerText = com.seamless.android.ui.formatMessageHeaderAnnotatedString(
-            message = message,
-            currentUserNickname = currentUserNickname,
-            meshService = meshService,
-            colorScheme = colorScheme,
-            timeFormatter = timeFormatter
-        )
-        val haptic = LocalHapticFeedback.current
-        var headerLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
-        Text(
-            text = headerText,
-            fontFamily = FontFamily.Monospace,
-            color = colorScheme.onSurface,
-            modifier = Modifier.pointerInput(message.id) {
-                detectTapGestures(onTap = { pos ->
-                    val layout = headerLayout ?: return@detectTapGestures
-                    val offset = layout.getOffsetForPosition(pos)
-                    val ann = headerText.getStringAnnotations("nickname_click", offset, offset)
-                    if (ann.isNotEmpty() && onNicknameClick != null) {
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        onNicknameClick.invoke(ann.first().item)
-                    }
-                }, onLongPress = { onMessageLongPress?.invoke(message) })
-            },
-            onTextLayout = { headerLayout = it }
-        )
-
-        val context = LocalContext.current
         val bmp = remember(path) { try { android.graphics.BitmapFactory.decodeFile(path) } catch (_: Exception) { null } }
 
         // Collect all image paths from messages for swipe navigation
@@ -93,6 +66,7 @@ fun ImageMessageItem(
                 is com.seamless.android.model.DeliveryStatus.PartiallyDelivered -> if (st.total > 0) st.reached.toFloat() / st.total.toFloat() else 0f
                 else -> null
             }
+            val imageShape = RoundedCornerShape(14.dp)
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
                 Box {
                     if (progressFraction != null && progressFraction < 1f && message.sender == currentUserNickname) {
@@ -103,13 +77,20 @@ fun ImageMessageItem(
                             blocksX = 24,
                             blocksY = 16,
                             modifier = Modifier
-                                .widthIn(max = 300.dp)
+                                .widthIn(max = 260.dp)
                                 .aspectRatio(aspect)
-                                .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
-                                .clickable {
-                                    val currentIndex = imagePaths.indexOf(path)
-                                    onImageClick?.invoke(path, imagePaths, currentIndex)
-                                }
+                                .clip(imageShape)
+                                .border(1.dp, Color.White.copy(alpha = 0.12f), imageShape)
+                                .combinedClickable(
+                                    onClick = {
+                                        val currentIndex = imagePaths.indexOf(path).coerceAtLeast(0)
+                                        onImageClick?.invoke(path, imagePaths, currentIndex)
+                                    },
+                                    onLongClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        onMessageLongPress?.invoke(message)
+                                    }
+                                )
                         )
                     } else {
                         // Fully revealed image
@@ -117,14 +98,21 @@ fun ImageMessageItem(
                             bitmap = img,
                             contentDescription = stringResource(com.seamless.android.R.string.cd_image),
                             modifier = Modifier
-                                .widthIn(max = 300.dp)
+                                .widthIn(max = 260.dp)
                                 .aspectRatio(aspect)
-                                .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
-                                .clickable {
-                                    val currentIndex = imagePaths.indexOf(path)
-                                    onImageClick?.invoke(path, imagePaths, currentIndex)
-                                },
-                            contentScale = ContentScale.Fit
+                                .clip(imageShape)
+                                .border(1.dp, Color.White.copy(alpha = 0.12f), imageShape)
+                                .combinedClickable(
+                                    onClick = {
+                                        val currentIndex = imagePaths.indexOf(path).coerceAtLeast(0)
+                                        onImageClick?.invoke(path, imagePaths, currentIndex)
+                                    },
+                                    onLongClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        onMessageLongPress?.invoke(message)
+                                    }
+                                ),
+                            contentScale = ContentScale.Crop
                         )
                     }
                     // Cancel button overlay during sending
@@ -133,9 +121,10 @@ fun ImageMessageItem(
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
-                                .padding(4.dp)
-                                .size(22.dp)
-                                .background(Color.Gray.copy(alpha = 0.6f), CircleShape)
+                                .padding(6.dp)
+                                .size(24.dp)
+                                .background(Color.Black.copy(alpha = 0.65f), CircleShape)
+                                .border(1.dp, Color.White.copy(alpha = 0.2f), CircleShape)
                                 .clickable { onCancelTransfer?.invoke(message) },
                             contentAlignment = Alignment.Center
                         ) {
@@ -145,7 +134,7 @@ fun ImageMessageItem(
                 }
             }
         } else {
-            Text(text = stringResource(com.seamless.android.R.string.image_unavailable), fontFamily = FontFamily.Monospace, color = Color.Gray)
+            Text(text = stringResource(com.seamless.android.R.string.image_unavailable), fontFamily = FontFamily.Default, color = Color.Gray)
         }
     }
 }

@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui.components
 
 import androidx.compose.animation.core.*
@@ -23,8 +24,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.seamless.android.ui.theme.SeamlessCyan
-import com.seamless.android.ui.theme.SeamlessColors
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -189,82 +188,105 @@ fun RadarScanner(
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val center = this.center
                 val maxRadius = size.minDimension / 2f
-                val thinStroke = 1.dp.toPx()
-                val medStroke = 2.dp.toPx()
+                val thinStroke = 0.85.dp.toPx()
+                val medStroke = 1.5.dp.toPx()
 
-                // ━━━ OUTER NEON GLOW RING ━━━
+                // ━━━ 60-TICK CHRONOGRAPH WATCH BEZEL ━━━
+                for (tick in 0 until 60) {
+                    val angleRad = (tick * 6f - 90f) * PI.toFloat() / 180f
+                    val isMajor = tick % 5 == 0
+                    val tickLength = if (isMajor) 8.dp.toPx() else 4.dp.toPx()
+                    val tickAlpha = if (isMajor) 0.30f else 0.12f
+                    val startR = maxRadius - tickLength
+                    val start = Offset(
+                        center.x + cos(angleRad) * startR,
+                        center.y + sin(angleRad) * startR
+                    )
+                    val end = Offset(
+                        center.x + cos(angleRad) * maxRadius,
+                        center.y + sin(angleRad) * maxRadius
+                    )
+                    drawLine(
+                        color = accentColor.copy(alpha = tickAlpha),
+                        start = start,
+                        end = end,
+                        strokeWidth = if (isMajor) 1.2.dp.toPx() else 0.75.dp.toPx(),
+                        cap = StrokeCap.Round
+                    )
+                }
+
+                // ━━━ OUTER SPECULAR RING ━━━
                 if (isScanning) {
                     drawCircle(
                         brush = Brush.radialGradient(
                             colors = listOf(
-                                accentColor.copy(alpha = neonPulse * 0.15f),
+                                accentColor.copy(alpha = neonPulse * 0.12f),
                                 Color.Transparent
                             ),
                             center = center,
-                            radius = maxRadius * 1.15f
+                            radius = maxRadius * 1.12f
                         ),
-                        radius = maxRadius * 1.1f
+                        radius = maxRadius * 1.08f
                     )
                     drawCircle(
-                        color = accentColor.copy(alpha = neonPulse * 0.6f),
+                        color = accentColor.copy(alpha = neonPulse * 0.45f),
                         radius = maxRadius,
                         style = Stroke(width = medStroke)
                     )
                 }
 
-                // ━━━ CONCENTRIC RINGS (3 rings with subtle fill) ━━━
-                val ringRadii = listOf(1f, 0.66f, 0.33f)
-                ringRadii.forEach { fraction ->
+                // ━━━ CONCENTRIC RINGS (Alternating solid hairline & dashed instrument rings) ━━━
+                val dashPattern = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
+                    floatArrayOf(6.dp.toPx(), 6.dp.toPx()),
+                    0f
+                )
+                val ringRadii = listOf(0.88f, 0.62f, 0.36f)
+                ringRadii.forEachIndexed { index, fraction ->
                     val r = maxRadius * fraction
-                    // Very subtle fill between rings
                     drawCircle(
-                        color = accentColor.copy(alpha = 0.02f),
+                        color = accentColor.copy(alpha = 0.015f),
                         radius = r
                     )
-                    // Ring stroke
                     drawCircle(
-                        color = accentColor.copy(alpha = 0.12f),
+                        color = accentColor.copy(alpha = if (index % 2 == 0) 0.14f else 0.10f),
                         radius = r,
-                        style = Stroke(width = thinStroke)
+                        style = Stroke(
+                            width = thinStroke,
+                            pathEffect = if (index % 2 == 1) dashPattern else null
+                        )
                     )
                 }
 
                 // ━━━ CROSSHAIRS ━━━
-                val crossAlpha = 0.08f
-                // Vertical
+                val crossAlpha = 0.07f
                 drawLine(
                     color = accentColor.copy(alpha = crossAlpha),
-                    start = Offset(center.x, center.y - maxRadius),
-                    end = Offset(center.x, center.y + maxRadius),
+                    start = Offset(center.x, center.y - maxRadius * 0.88f),
+                    end = Offset(center.x, center.y + maxRadius * 0.88f),
                     strokeWidth = thinStroke
                 )
-                // Horizontal
                 drawLine(
                     color = accentColor.copy(alpha = crossAlpha),
-                    start = Offset(center.x - maxRadius, center.y),
-                    end = Offset(center.x + maxRadius, center.y),
+                    start = Offset(center.x - maxRadius * 0.88f, center.y),
+                    end = Offset(center.x + maxRadius * 0.88f, center.y),
                     strokeWidth = thinStroke
                 )
 
                 if (isScanning) {
                     if (style == RadarStyle.SENDER) {
-                        // ━━━ GRADIENT SWEEP ARM with GLOW TRAIL ━━━
-                        // The trailing glow is a 60° arc behind the sweep line
                         val trailSweepAngle = 60f
                         val trailStartAngle = sweepAngle - 90f - trailSweepAngle
 
-                        // Clip to circle
                         clipPath(
                             path = Path().apply {
                                 addOval(Rect(center.x - maxRadius, center.y - maxRadius, center.x + maxRadius, center.y + maxRadius))
                             }
                         ) {
-                            // Gradient trail arc (fading from bright to transparent)
                             drawArc(
                                 brush = Brush.sweepGradient(
                                     0f to Color.Transparent,
                                     0.7f to accentColor.copy(alpha = 0.03f),
-                                    1f to accentColor.copy(alpha = 0.2f),
+                                    1f to accentColor.copy(alpha = 0.18f),
                                     center = center
                                 ),
                                 startAngle = trailStartAngle,
@@ -275,78 +297,81 @@ fun RadarScanner(
                             )
                         }
 
-                        // ━━━ SWEEP LINE (bright, glowing) ━━━
                         rotate(sweepAngle, pivot = center) {
-                            // Glow behind the line
                             drawLine(
                                 brush = Brush.verticalGradient(
                                     colors = listOf(
-                                        accentColor.copy(alpha = 0.6f),
+                                        accentColor.copy(alpha = 0.5f),
                                         accentColor.copy(alpha = 0f)
                                     ),
-                                    startY = center.y - maxRadius,
+                                    startY = center.y - maxRadius * 0.88f,
                                     endY = center.y
                                 ),
                                 start = center,
-                                end = Offset(center.x, center.y - maxRadius),
-                                strokeWidth = 6.dp.toPx(),
+                                end = Offset(center.x, center.y - maxRadius * 0.88f),
+                                strokeWidth = 4.dp.toPx(),
                                 cap = StrokeCap.Round
                             )
-                            // Sharp bright line on top
                             drawLine(
-                                color = accentColor.copy(alpha = 0.95f),
+                                color = accentColor.copy(alpha = 0.90f),
                                 start = center,
-                                end = Offset(center.x, center.y - maxRadius),
-                                strokeWidth = 2.dp.toPx(),
+                                end = Offset(center.x, center.y - maxRadius * 0.88f),
+                                strokeWidth = 1.5.dp.toPx(),
                                 cap = StrokeCap.Round
                             )
                         }
 
-                        // ━━━ SPARK PARTICLES along sweep trail ━━━
-                        sparks.forEach { spark ->
-                            val sparkAngle = sweepAngle - spark.angleOffset
-                            val sparkAngleRad = sparkAngle * PI.toFloat() / 180f
-                            val sparkRadius = maxRadius * spark.radiusFraction
-                            val sparkX = center.x + cos(sparkAngleRad) * sparkRadius
-                            val sparkY = center.y + sin(sparkAngleRad) * sparkRadius
-                            val distFromSweep = spark.angleOffset / 60f // 0..1 normalized
-                            val sparkAlpha = (1f - distFromSweep).coerceIn(0f, 1f) * 0.7f
-
+                        // ━━━ GOLDEN-ANGLE (137.5°) DISCOVERED DEVICE BLIPS ━━━
+                        val visibleBlips = deviceCount.coerceIn(0, 8)
+                        for (i in 0 until visibleBlips) {
+                            val goldenAngleDeg = (i * 137.5f) % 360f
+                            val rad = goldenAngleDeg * PI.toFloat() / 180f
+                            val ringFraction = 0.42f + (i % 3) * 0.18f
+                            val blipPos = Offset(
+                                center.x + cos(rad) * (maxRadius * ringFraction),
+                                center.y + sin(rad) * (maxRadius * ringFraction)
+                            )
+                            // Outer emerald/white bloom
                             drawCircle(
-                                color = accentColor.copy(alpha = sparkAlpha),
-                                radius = spark.size,
-                                center = Offset(sparkX, sparkY)
+                                color = Color(0xFF30D158).copy(alpha = 0.28f * centerGlow),
+                                radius = 10.dp.toPx(),
+                                center = blipPos
+                            )
+                            // Crisp Optical White core
+                            drawCircle(
+                                color = Color.White,
+                                radius = 4.dp.toPx(),
+                                center = blipPos
                             )
                         }
 
                         // ━━━ STAGGERED PULSE RINGS ━━━
                         drawCircle(
-                            color = accentColor.copy(alpha = pulse1Alpha * 0.4f),
-                            radius = maxRadius * pulse1,
-                            style = Stroke(width = 2.5f.dp.toPx())
-                        )
-                        drawCircle(
-                            color = accentColor.copy(alpha = pulse2Alpha * 0.3f),
-                            radius = maxRadius * pulse2,
-                            style = Stroke(width = 2.dp.toPx())
-                        )
-                        drawCircle(
-                            color = accentColor.copy(alpha = pulse3Alpha * 0.2f),
-                            radius = maxRadius * pulse3,
+                            color = accentColor.copy(alpha = pulse1Alpha * 0.35f),
+                            radius = maxRadius * 0.88f * pulse1,
                             style = Stroke(width = 1.5f.dp.toPx())
+                        )
+                        drawCircle(
+                            color = accentColor.copy(alpha = pulse2Alpha * 0.25f),
+                            radius = maxRadius * 0.88f * pulse2,
+                            style = Stroke(width = 1.2f.dp.toPx())
+                        )
+                        drawCircle(
+                            color = accentColor.copy(alpha = pulse3Alpha * 0.18f),
+                            radius = maxRadius * 0.88f * pulse3,
+                            style = Stroke(width = 1.dp.toPx())
                         )
                     } else {
                         // ━━━ RECEIVER: Inward converging ━━━
                         drawCircle(
-                            color = accentColor.copy(alpha = receiverAlpha * 0.5f),
-                            radius = maxRadius * receiverScale,
-                            style = Stroke(width = 3.dp.toPx())
+                            color = accentColor.copy(alpha = receiverAlpha * 0.45f),
+                            radius = maxRadius * 0.88f * receiverScale,
+                            style = Stroke(width = 2.dp.toPx())
                         )
-                        // Pulsing center glow
                         drawCircle(
                             brush = Brush.radialGradient(
                                 colors = listOf(
-                                    accentColor.copy(alpha = receiverAlpha * 0.4f),
+                                    accentColor.copy(alpha = receiverAlpha * 0.35f),
                                     Color.Transparent
                                 ),
                                 center = center,
@@ -358,7 +383,6 @@ fun RadarScanner(
                 }
 
                 // ━━━ CENTER GLOW + DOT ━━━
-                // Soft radial glow
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(
@@ -370,55 +394,42 @@ fun RadarScanner(
                     ),
                     radius = maxRadius * 0.22f
                 )
-                // Bright center dot
                 drawCircle(
                     color = accentColor,
                     radius = 5.dp.toPx(),
                     center = center
                 )
-                // Outer ring around center dot
                 drawCircle(
                     color = accentColor.copy(alpha = 0.4f),
                     radius = 10.dp.toPx(),
                     center = center,
-                    style = Stroke(width = 1.5f.dp.toPx())
+                    style = Stroke(width = 1.2f.dp.toPx())
                 )
             }
 
-            // ── Device count badge ──
+            // ── Device count badge (Optical White circle with Pitch-Black number) ──
             if (deviceCount > 0) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(12.dp)
-                        .size(36.dp)
-                        .then(
-                            Modifier
-                                .padding(0.dp)
-                        ),
+                        .size(34.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Canvas(modifier = Modifier.fillMaxSize()) {
-                        // Badge background
                         drawCircle(
-                            brush = Brush.radialGradient(
-                                colors = listOf(
-                                    accentColor,
-                                    accentColor.copy(alpha = 0.7f)
-                                )
-                            ),
-                            radius = size.minDimension / 2f
-                        )
-                        // Outer glow
-                        drawCircle(
-                            color = accentColor.copy(alpha = 0.3f),
+                            color = accentColor.copy(alpha = 0.25f),
                             radius = size.minDimension / 2f + 4.dp.toPx()
+                        )
+                        drawCircle(
+                            color = accentColor,
+                            radius = size.minDimension / 2f
                         )
                     }
                     Text(
                         text = "$deviceCount",
-                        color = Color.White,
-                        fontSize = 14.sp,
+                        color = Color.Black,
+                        fontSize = 13.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }

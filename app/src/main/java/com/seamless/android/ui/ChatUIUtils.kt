@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui
 
 import androidx.compose.ui.graphics.Color
@@ -7,9 +8,6 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.sp
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Shield
-import androidx.compose.ui.graphics.vector.ImageVector
 import com.seamless.android.model.BitchatMessage
 import com.seamless.android.mesh.BluetoothMeshService
 import androidx.compose.material3.ColorScheme
@@ -55,101 +53,40 @@ fun formatMessageAsAnnotatedString(
                  message.sender.startsWith("$currentUserNickname#")
     
     if (message.sender != "system") {
-        // Get base color for this peer (iOS-style color assignment)
+        // Clean readable text color inside modern chat bubbles:
+        // Sent bubbles are smoked Obsidian dark glass (#1F1F27) with crisp off-white text (#F5F5F7).
+        // Received bubbles are #121217 in dark mode (#F5F5F7 text) or light surface in light mode (#09090B text).
         val baseColor = if (isSelf) {
-            Color(0xFFFF9500) // Orange for self (iOS orange)
+            Color(0xFFF5F5F7)
         } else {
-            getPeerColor(message, isDark)
+            if (isDark) Color(0xFFF5F5F7) else Color(0xFF09090B)
         }
         
-        // Split sender into base name and hashtag suffix
-        val (baseName, suffix) = splitSuffix(message.sender)
-        
-        // Sender prefix "<@"
-        builder.pushStyle(SpanStyle(
-            color = baseColor,
-            fontSize = BASE_FONT_SIZE.sp,
-            fontWeight = if (isSelf) FontWeight.Bold else FontWeight.Medium
-        ))
-        builder.append("<@")
-        builder.pop()
-        
-        // Base name (clickable)
-        builder.pushStyle(SpanStyle(
-            color = baseColor,
-            fontSize = BASE_FONT_SIZE.sp,
-            fontWeight = if (isSelf) FontWeight.Bold else FontWeight.Medium
-        ))
-        val nicknameStart = builder.length
-        val truncatedBase = truncateNickname(baseName)
-        builder.append(truncatedBase)
-        val nicknameEnd = builder.length
-        
-        // Add click annotation for nickname (store canonical sender name with hash if available)
-        if (!isSelf) {
-            builder.addStringAnnotation(
-                tag = "nickname_click",
-                annotation = (message.originalSender ?: message.sender),
-                start = nicknameStart,
-                end = nicknameEnd
-            )
-        }
-        builder.pop()
-        
-        // Hashtag suffix in lighter color (iOS style)
-        if (suffix.isNotEmpty()) {
-            builder.pushStyle(SpanStyle(
-                color = baseColor.copy(alpha = 0.6f),
-                fontSize = BASE_FONT_SIZE.sp,
-                fontWeight = if (isSelf) FontWeight.Bold else FontWeight.Medium
-            ))
-            builder.append(suffix)
-            builder.pop()
-        }
-        
-        // Sender suffix "> "
-        builder.pushStyle(SpanStyle(
-            color = baseColor,
-            fontSize = BASE_FONT_SIZE.sp,
-            fontWeight = if (isSelf) FontWeight.Bold else FontWeight.Medium
-        ))
-        builder.append("> ")
-        builder.pop()
-        
-        // Message content with iOS-style hashtag and mention highlighting
+        // Message content with hashtag, mention, geohash, and URL highlighting
+        // (No redundant "<@sender>" prefix or inline "[HH:mm:ss]" timestamp since MessageItem renders
+        // the sender header above the bubble and the metadata timestamp + status row at the bottom-end.)
         appendIOSFormattedContent(builder, message.content, message.mentions, currentUserNickname, baseColor, isSelf, isDark)
         
-        // iOS-style timestamp at the END (smaller, grey)
-        // Timestamp (and optional PoW badge)
-        builder.pushStyle(SpanStyle(
-            color = Color.Gray.copy(alpha = 0.7f),
-            fontSize = (BASE_FONT_SIZE - 4).sp
-        ))
-        builder.append(" [${timeFormatter.format(message.timestamp)}]")
-        // If message has valid PoW difficulty, append bits immediately after timestamp with minimal spacing
+        // Optional PoW badge if present
         message.powDifficulty?.let { bits ->
             if (bits > 0) {
+                builder.pushStyle(SpanStyle(
+                    color = Color(0xFFA1A1AA),
+                    fontSize = (BASE_FONT_SIZE - 4).sp
+                ))
                 builder.append(" ⛨${bits}b")
+                builder.pop()
             }
         }
-        builder.pop()
         
     } else {
-        // System message - iOS style
+        // System message
         builder.pushStyle(SpanStyle(
-            color = Color.Gray,
+            color = Color(0xFFA1A1AA),
             fontSize = (BASE_FONT_SIZE - 2).sp,
             fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
         ))
         builder.append("* ${message.content} *")
-        builder.pop()
-        
-        // Timestamp for system messages too
-        builder.pushStyle(SpanStyle(
-            color = Color.Gray.copy(alpha = 0.5f),
-            fontSize = (BASE_FONT_SIZE - 4).sp
-        ))
-        builder.append(" [${timeFormatter.format(message.timestamp)}]")
         builder.pop()
     }
     

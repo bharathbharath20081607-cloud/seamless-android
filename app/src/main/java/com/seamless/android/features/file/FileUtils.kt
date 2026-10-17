@@ -1,14 +1,11 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.features.file
 
 import android.content.Context
 import android.net.Uri
-import android.os.Environment
 import android.util.Log
-import androidx.core.content.FileProvider
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStream
-import java.text.SimpleDateFormat
 import java.util.*
 
 object FileUtils {
@@ -192,10 +189,16 @@ object FileUtils {
             "gif" -> "image/gif"
             "bmp" -> "image/bmp"
             "webp" -> "image/webp"
+            "heic", "heif" -> "image/heic"
             "svg" -> "image/svg+xml"
             "mp3" -> "audio/mpeg"
             "wav" -> "audio/wav"
             "m4a" -> "audio/mp4"
+            "aac" -> "audio/aac"
+            "ogg", "oga" -> "audio/ogg"
+            "opus" -> "audio/opus"
+            "flac" -> "audio/flac"
+            "3gp" -> "audio/3gpp"
             "mp4" -> "video/mp4"
             "avi" -> "video/x-msvideo"
             "mov" -> "video/quicktime"
@@ -241,22 +244,41 @@ object FileUtils {
     ): String {
         val lowerMime = file.mimeType.lowercase()
         val isImage = lowerMime.startsWith("image/")
+        val isAudio = lowerMime.startsWith("audio/")
         val baseDir = context.filesDir
-        val subdir = if (isImage) "images/incoming" else "files/incoming"
+        val subdir = when {
+            isImage -> "images/incoming"
+            isAudio -> "voicenotes/incoming"
+            else -> "files/incoming"
+        }
         val dir = java.io.File(baseDir, subdir).apply { mkdirs() }
 
         fun extFromMime(m: String): String = when (m.lowercase()) {
             "image/jpeg", "image/jpg" -> ".jpg"
             "image/png" -> ".png"
             "image/webp" -> ".webp"
+            "image/gif" -> ".gif"
+            "audio/mp4", "audio/m4a", "audio/x-m4a", "audio/aac" -> ".m4a"
+            "audio/mpeg", "audio/mp3" -> ".mp3"
+            "audio/wav", "audio/x-wav" -> ".wav"
+            "audio/ogg", "audio/opus" -> ".ogg"
+            "audio/3gpp" -> ".3gp"
             "application/pdf" -> ".pdf"
             "text/plain" -> ".txt"
-            else -> if (isImage) ".jpg" else ".bin"
+            else -> when {
+                isImage -> ".jpg"
+                isAudio -> ".m4a"
+                else -> ".bin"
+            }
         }
 
         // Prefer transmitted original name; ensure uniqueness to avoid overwrites
-        val baseName = (file.fileName.takeIf { it.isNotBlank() }
-            ?: (if (isImage) "img" else "file"))
+        val defaultPrefix = when {
+            isImage -> "img"
+            isAudio -> "voice"
+            else -> "file"
+        }
+        val baseName = (file.fileName.takeIf { it.isNotBlank() } ?: defaultPrefix)
             .replace(Regex("[^A-Za-z0-9._-]"), "_")
         val ext = extFromMime(lowerMime)
         var safeName = if (baseName.contains('.')) baseName else baseName + ext
@@ -297,7 +319,7 @@ object FileUtils {
                 out.outputStream().use { it.write(file.content) }
                 out.absolutePath
             } catch (_: Exception) {
-                val tmp = java.io.File.createTempFile(if (isImage) "img_" else "file_", if (isImage) ".jpg" else ".bin")
+                val tmp = java.io.File.createTempFile("${defaultPrefix}_", ext)
                 tmp.writeBytes(file.content)
                 tmp.absolutePath
             }

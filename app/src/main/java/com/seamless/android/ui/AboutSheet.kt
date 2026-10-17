@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui
 
 import androidx.compose.animation.core.animateFloatAsState
@@ -11,14 +12,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Public
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -28,7 +27,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.seamless.android.nostr.NostrProofOfWork
 import com.seamless.android.nostr.PoWPreferenceManager
-import com.seamless.android.ui.debug.DebugSettingsSheet
 import androidx.compose.ui.res.stringResource
 import com.seamless.android.R
 /**
@@ -83,11 +81,18 @@ fun AboutSheet(
             containerColor = MaterialTheme.colorScheme.background,
             dragHandle = null
         ) {
+            val chipColors = FilterChipDefaults.filterChipColors(
+                selectedContainerColor = if (isDark) Color.White else Color.Black,
+                selectedLabelColor = if (isDark) Color.Black else Color.White,
+                containerColor = if (isDark) Color(0xFF141419) else colorScheme.surfaceVariant,
+                labelColor = if (isDark) Color(0xFFA1A1AA) else colorScheme.onSurfaceVariant
+            )
+
             Box(modifier = Modifier.fillMaxWidth()) {
                 LazyColumn(
                     state = lazyListState,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(top = 80.dp, bottom = 20.dp)
+                    contentPadding = PaddingValues(top = 68.dp, bottom = 32.dp)
                 ) {
                     // Header Section
                     item(key = "header") {
@@ -105,9 +110,10 @@ fun AboutSheet(
                                 Text(
                                     text = stringResource(R.string.app_name),
                                     style = TextStyle(
-                                        fontFamily = FontFamily.Monospace,
+                                        fontFamily = FontFamily.Default,
                                         fontWeight = FontWeight.Bold,
-                                        fontSize = 32.sp
+                                        fontSize = 32.sp,
+                                        letterSpacing = (-0.5).sp
                                     ),
                                     color = MaterialTheme.colorScheme.onBackground
                                 )
@@ -115,7 +121,7 @@ fun AboutSheet(
                                 Text(
                                     text = stringResource(R.string.version_prefix, versionName?:""),
                                     fontSize = 11.sp,
-                                    fontFamily = FontFamily.Monospace,
+                                    fontFamily = FontFamily.Default,
                                     color = colorScheme.onBackground.copy(alpha = 0.5f),
                                     style = MaterialTheme.typography.bodySmall.copy(
                                         baselineShift = BaselineShift(0.1f)
@@ -125,8 +131,8 @@ fun AboutSheet(
 
                             Text(
                                 text = stringResource(R.string.about_tagline),
-                                fontSize = 12.sp,
-                                fontFamily = FontFamily.Monospace,
+                                fontSize = 13.sp,
+                                fontFamily = FontFamily.Default,
                                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
                             )
                         }
@@ -248,17 +254,20 @@ fun AboutSheet(
                             FilterChip(
                                 selected = themePref.isSystem,
                                 onClick = { com.seamless.android.ui.theme.ThemePreferenceManager.set(context, com.seamless.android.ui.theme.ThemePreference.System) },
-                                label = { Text(stringResource(R.string.about_system), fontFamily = FontFamily.Monospace) }
+                                label = { Text(stringResource(R.string.about_system), fontFamily = FontFamily.Default, fontWeight = FontWeight.Medium) },
+                                colors = chipColors
                             )
                             FilterChip(
                                 selected = themePref.isLight,
                                 onClick = { com.seamless.android.ui.theme.ThemePreferenceManager.set(context, com.seamless.android.ui.theme.ThemePreference.Light) },
-                                label = { Text(stringResource(R.string.about_light), fontFamily = FontFamily.Monospace) }
+                                label = { Text(stringResource(R.string.about_light), fontFamily = FontFamily.Default, fontWeight = FontWeight.Medium) },
+                                colors = chipColors
                             )
                             FilterChip(
                                 selected = themePref.isDark,
                                 onClick = { com.seamless.android.ui.theme.ThemePreferenceManager.set(context, com.seamless.android.ui.theme.ThemePreference.Dark) },
-                                label = { Text(stringResource(R.string.about_dark), fontFamily = FontFamily.Monospace) }
+                                label = { Text(stringResource(R.string.about_dark), fontFamily = FontFamily.Default, fontWeight = FontWeight.Medium) },
+                                colors = chipColors
                             )
                         }
                     }
@@ -290,7 +299,8 @@ fun AboutSheet(
                                 FilterChip(
                                     selected = !powEnabled,
                                     onClick = { PoWPreferenceManager.setPowEnabled(false) },
-                                    label = { Text(stringResource(R.string.about_pow_off), fontFamily = FontFamily.Monospace) }
+                                    label = { Text(stringResource(R.string.about_pow_off), fontFamily = FontFamily.Default, fontWeight = FontWeight.Medium) },
+                                    colors = chipColors
                                 )
                                 FilterChip(
                                     selected = powEnabled,
@@ -300,23 +310,24 @@ fun AboutSheet(
                                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Text(stringResource(R.string.about_pow_on), fontFamily = FontFamily.Monospace)
+                                            Text(stringResource(R.string.about_pow_on), fontFamily = FontFamily.Default, fontWeight = FontWeight.Medium)
                                             // Show current difficulty
                                             if (powEnabled) {
                                                 Surface(
-                                                    color = if (isDark) Color(0xFF32D74B) else Color(0xFF248A3D),
+                                                    color = com.seamless.android.ui.theme.SeamlessColors.Success,
                                                     shape = RoundedCornerShape(50)
                                                 ) { Box(Modifier.size(8.dp)) }
                                             }
                                         }
-                                    }
+                                    },
+                                    colors = chipColors
                                 )
                             }
 
                             Text(
                                 text = stringResource(R.string.about_pow_tip),
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Default,
                                 color = colorScheme.onSurface.copy(alpha = 0.6f)
                             )
 
@@ -329,7 +340,7 @@ fun AboutSheet(
                                     Text(
                                         text = stringResource(R.string.about_pow_difficulty, powDifficulty, NostrProofOfWork.estimateMiningTime(powDifficulty)),
                                         fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace,
+                                        fontFamily = FontFamily.Default,
                                     )
 
                                     Slider(
@@ -338,8 +349,8 @@ fun AboutSheet(
                                         valueRange = 0f..32f,
                                         steps = 33,
                                         colors = SliderDefaults.colors(
-                                            thumbColor = if (isDark) Color(0xFF32D74B) else Color(0xFF248A3D),
-                                            activeTrackColor = if (isDark) Color(0xFF32D74B) else Color(0xFF248A3D)
+                                            thumbColor = colorScheme.primary,
+                                            activeTrackColor = colorScheme.primary
                                         )
                                     )
 
@@ -370,7 +381,7 @@ fun AboutSheet(
                                                     else -> stringResource(R.string.about_pow_desc_extreme)
                                                 },
                                                 fontSize = 10.sp,
-                                                fontFamily = FontFamily.Monospace,
+                                                fontFamily = FontFamily.Default,
                                                 color = colorScheme.onSurface.copy(alpha = 0.6f)
                                             )
                                         }
@@ -403,7 +414,8 @@ fun AboutSheet(
                                         torMode.value = com.seamless.android.net.TorMode.OFF
                                         com.seamless.android.net.TorPreferenceManager.set(context, torMode.value)
                                     },
-                                    label = { Text("tor off", fontFamily = FontFamily.Monospace) }
+                                    label = { Text("tor off", fontFamily = FontFamily.Default, fontWeight = FontWeight.Medium) },
+                                    colors = chipColors
                                 )
                                 FilterChip(
                                     selected = torMode.value == com.seamless.android.net.TorMode.ON,
@@ -416,17 +428,18 @@ fun AboutSheet(
                                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Text("tor on", fontFamily = FontFamily.Monospace)
+                                            Text("tor on", fontFamily = FontFamily.Default, fontWeight = FontWeight.Medium)
                                             val statusColor = when {
-                                                torStatus.running && torStatus.bootstrapPercent < 100 -> Color(0xFFFF9500)
-                                                torStatus.running && torStatus.bootstrapPercent >= 100 -> if (isDark) Color(0xFF32D74B) else Color(0xFF248A3D)
-                                                else -> Color.Red
+                                                torStatus.running && torStatus.bootstrapPercent < 100 -> com.seamless.android.ui.theme.SeamlessColors.Warning
+                                                torStatus.running && torStatus.bootstrapPercent >= 100 -> com.seamless.android.ui.theme.SeamlessColors.Success
+                                                else -> com.seamless.android.ui.theme.SeamlessColors.Error
                                             }
                                             Surface(color = statusColor, shape = CircleShape) {
                                                 Box(Modifier.size(8.dp))
                                             }
                                         }
-                                    }
+                                    },
+                                    colors = chipColors
                                 )
                             }
                             Text(
@@ -436,7 +449,6 @@ fun AboutSheet(
                             )
                             if (torMode.value == com.seamless.android.net.TorMode.ON) {
                                 val statusText = if (torStatus.running) "Running" else "Stopped"
-                                // Debug status (temporary)
                                 Surface(
                                     modifier = Modifier.fillMaxWidth(),
                                     color = colorScheme.surfaceVariant.copy(alpha = 0.25f),
@@ -451,11 +463,15 @@ fun AboutSheet(
                                             style = MaterialTheme.typography.bodySmall,
                                             color = colorScheme.onSurface.copy(alpha = 0.75f)
                                         )
-                                        val lastLog = torStatus.lastLogLine
+                                        // Strip raw ANSI escape codes (e.g. \u001B[2m...\u001B[0m) so they never render as broken boxes
+                                        val lastLog = remember(torStatus.lastLogLine) {
+                                            torStatus.lastLogLine.replace(Regex("\\u001B\\[[;\\d]*m"), "")
+                                        }
                                         if (lastLog.isNotEmpty()) {
                                             Text(
                                                 text = stringResource(R.string.about_last, lastLog.take(160)),
                                                 style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = FontFamily.Monospace,
                                                 color = colorScheme.onSurface.copy(alpha = 0.6f)
                                             )
                                         }

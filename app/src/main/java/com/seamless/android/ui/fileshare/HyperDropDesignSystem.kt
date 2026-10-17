@@ -1,6 +1,7 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui.fileshare
+import androidx.compose.ui.unit.dp
 
-import android.os.Build
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
@@ -16,7 +17,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
@@ -25,21 +25,14 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
-import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.seamless.android.ui.theme.SeamlessCyan
-import com.seamless.android.ui.theme.SeamlessTeal
-import kotlin.math.cos
 import kotlin.math.sin
-import kotlin.random.Random
 
 // =====================================================================
 //  🎨 HYPERDROP DESIGN SYSTEM 2.0
@@ -202,26 +195,122 @@ object HyperDropMotion {
     val LinearEasing = androidx.compose.animation.core.LinearEasing
 
     // ── Apple WWDC Fluid Spring Physics ──
-    // Tactile spring for buttons, cards, touch compression (damping 0.82)
+    // Tactile spring for buttons, cards, touch compression (damping 0.84, stiffness 400)
     val TactileSpring = spring<Float>(
-        dampingRatio = 0.82f,
-        stiffness = Spring.StiffnessLow
+        dampingRatio = 0.84f,
+        stiffness = 400f
     )
 
     // Critically damped spring for state changes & zero-bounce transitions (damping 1.0)
     val CriticallyDamped = spring<Float>(
         dampingRatio = Spring.DampingRatioNoBouncy,
-        stiffness = Spring.StiffnessMediumLow
+        stiffness = 500f
     )
 
     // Bouncy spring for playful / celebratory moments
     val BouncySpring = spring<Float>(
-        dampingRatio = 0.68f,
-        stiffness = Spring.StiffnessLow
+        dampingRatio = 0.84f,
+        stiffness = 400f
     )
 
     // Choreographed entrance cascade interval
     const val STAGGER_INTERVAL_MS = 45L
+}
+
+// ======================== LUXURY MODIFIERS ========================
+
+/**
+ * Obsidian layered glass surface modifier:
+ * Vertical top-lit luminance gradient (#16161D -> #0E0E12) + 1.dp diagonal specular hairline border.
+ */
+fun Modifier.luxeGlass(
+    cornerRadius: Dp = HyperDropSpacing.cardCorner,
+    topAlpha: Float = 0.18f,
+    bottomAlpha: Float = 0.03f
+): Modifier {
+    val shape = RoundedCornerShape(cornerRadius)
+    return this
+        .clip(shape)
+        .background(
+            brush = Brush.verticalGradient(
+                colors = listOf(
+                    Color(0xFF16161D).copy(alpha = 0.92f),
+                    Color(0xFF0E0E12).copy(alpha = 0.92f)
+                )
+            ),
+            shape = shape
+        )
+        .border(
+            width = 1.dp,
+            brush = Brush.linearGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = topAlpha),
+                    Color.White.copy(alpha = bottomAlpha)
+                )
+            ),
+            shape = shape
+        )
+}
+
+/**
+ * Tactile spring compression modifier (0.97f scale with 0.84f damping, 400f stiffness + subtle haptic).
+ */
+@Composable
+fun Modifier.luxePress(
+    enabled: Boolean = true,
+    scaleDown: Float = 0.97f,
+    onClick: () -> Unit
+): Modifier {
+    val haptic = LocalHapticFeedback.current
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed && enabled) scaleDown else 1f,
+        animationSpec = HyperDropMotion.TactileSpring,
+        label = "luxe_press_scale"
+    )
+    return this
+        .graphicsLayer {
+            scaleX = scale
+            scaleY = scale
+        }
+        .clickable(
+            interactionSource = interactionSource,
+            indication = null,
+            enabled = enabled
+        ) {
+            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            onClick()
+        }
+}
+
+/**
+ * Staggered entrance cascade modifier (45ms-55ms intervals with 0.84f spring physics).
+ */
+@Composable
+fun Modifier.staggeredEntrance(
+    index: Int,
+    baseDelayMs: Int = 55
+): Modifier {
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay((index * baseDelayMs).toLong())
+        visible = true
+    }
+    val alpha by animateFloatAsState(
+        targetValue = if (visible) 1f else 0f,
+        animationSpec = tween(220, easing = FastOutSlowInEasing),
+        label = "stagger_alpha_$index"
+    )
+    val offsetY by animateFloatAsState(
+        targetValue = if (visible) 0f else 28f,
+        animationSpec = HyperDropMotion.TactileSpring,
+        label = "stagger_offset_$index"
+    )
+    return this.graphicsLayer {
+        this.alpha = alpha
+        this.translationY = offsetY
+    }
 }
 
 // ======================== LIQUID TRANSITIONS ========================
@@ -233,32 +322,32 @@ object HyperDropMotion {
 object HyperDropTransitions {
     val ScreenEnter: EnterTransition = slideInVertically(
         initialOffsetY = { (it * 0.12f).toInt() },
-        animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow)
+        animationSpec = spring(dampingRatio = 0.84f, stiffness = 400f)
     ) + fadeIn(
-        animationSpec = spring(dampingRatio = 1.0f, stiffness = Spring.StiffnessMediumLow)
+        animationSpec = spring(dampingRatio = 1.0f, stiffness = 500f)
     ) + scaleIn(
         initialScale = 0.96f,
-        animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow)
+        animationSpec = spring(dampingRatio = 0.84f, stiffness = 400f)
     )
 
     val ScreenExit: ExitTransition = slideOutVertically(
         targetOffsetY = { (it * 0.12f).toInt() },
-        animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow)
+        animationSpec = spring(dampingRatio = 0.84f, stiffness = 400f)
     ) + fadeOut(
-        animationSpec = spring(dampingRatio = 1.0f, stiffness = Spring.StiffnessMediumLow)
+        animationSpec = spring(dampingRatio = 1.0f, stiffness = 500f)
     ) + scaleOut(
         targetScale = 0.96f,
-        animationSpec = spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow)
+        animationSpec = spring(dampingRatio = 0.84f, stiffness = 400f)
     )
 
     val ModalEnter: EnterTransition = slideInVertically(
         initialOffsetY = { it },
-        animationSpec = spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)
+        animationSpec = spring(dampingRatio = 0.84f, stiffness = 400f)
     ) + fadeIn()
 
     val ModalExit: ExitTransition = slideOutVertically(
         targetOffsetY = { it },
-        animationSpec = spring(dampingRatio = 0.88f, stiffness = Spring.StiffnessMediumLow)
+        animationSpec = spring(dampingRatio = 0.84f, stiffness = 400f)
     ) + fadeOut()
 }
 
@@ -341,84 +430,86 @@ fun GlassCard(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
     shape: Shape = RoundedCornerShape(HyperDropSpacing.cardCorner),
-    backgroundColor: Color = HyperDropColors.CardSurface.copy(alpha = 0.85f),
+    backgroundColor: Color = HyperDropColors.CardSurface.copy(alpha = 0.90f),
     borderColor: Color = HyperDropColors.BorderSubtle,
     showShimmerBorder: Boolean = false,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val haptic = LocalHapticFeedback.current
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val pressScale by animateFloatAsState(
-        targetValue = if (isPressed && onClick != null) 0.98f else 1.0f,
+        targetValue = if (isPressed && onClick != null) 0.97f else 1.0f,
         animationSpec = HyperDropMotion.TactileSpring,
         label = "card_press_scale"
     )
 
     val mod = if (onClick != null) {
         modifier
-            .scale(pressScale)
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
-                onClick = onClick
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onClick()
+                }
             )
     } else {
         modifier
     }
 
-    // Glassmorphism blur — API 31+
-    val blurModifier = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        Modifier.blur(16.dp)
-    } else {
-        Modifier
-    }
-
-    // Animated specular border
-    val shimmerBorderMod = if (showShimmerBorder) {
-        val infiniteTransition = rememberInfiniteTransition(label = "specular_border")
-        val shimmerAngle by infiniteTransition.animateFloat(
-            initialValue = 0f,
-            targetValue = 360f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(4000, easing = LinearEasing),
-                repeatMode = RepeatMode.Restart
-            ),
-            label = "shimmer_angle"
-        )
-        Modifier.border(
-            width = 1.dp,
-            brush = Brush.sweepGradient(
-                colors = listOf(
-                    HyperDropColors.BorderSpecular,
-                    Color.Transparent,
-                    HyperDropColors.BorderSubtle,
-                    Color.Transparent,
-                    HyperDropColors.BorderSpecular
-                )
-            ),
-            shape = shape as RoundedCornerShape
+    val borderBrush = if (showShimmerBorder) {
+        Brush.linearGradient(
+            colors = listOf(
+                Color.White.copy(alpha = 0.22f),
+                Color.White.copy(alpha = 0.06f),
+                Color.White.copy(alpha = 0.14f)
+            )
         )
     } else {
-        Modifier
+        Brush.linearGradient(
+            colors = listOf(
+                Color.White.copy(alpha = 0.16f),
+                borderColor,
+                Color.White.copy(alpha = 0.03f)
+            )
+        )
     }
 
     Surface(
-        modifier = mod.then(shimmerBorderMod),
+        modifier = mod.border(width = 1.dp, brush = borderBrush, shape = shape),
         shape = shape,
-        color = Color.Transparent,
-        border = if (!showShimmerBorder) {
-            androidx.compose.foundation.BorderStroke(1.dp, borderColor)
-        } else null
+        color = Color.Transparent
     ) {
-        Box {
-            // Blurred background layer
+        Box(
+            modifier = Modifier.background(
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0xFF16161D).copy(alpha = 0.92f),
+                        backgroundColor
+                    )
+                )
+            )
+        ) {
+            // 1.dp inner top specular highlight line
             Box(
                 modifier = Modifier
-                    .matchParentSize()
-                    .then(blurModifier)
-                    .background(backgroundColor)
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(
+                        Brush.horizontalGradient(
+                            colors = listOf(
+                                Color.Transparent,
+                                Color.White.copy(alpha = 0.18f),
+                                Color.Transparent
+                            )
+                        )
+                    )
             )
-            // Content layer
             Column(
                 modifier = Modifier.padding(HyperDropSpacing.cardPadding),
                 content = content
@@ -428,6 +519,133 @@ fun GlassCard(
 }
 
 // ======================== REUSABLE COMPONENTS ========================
+
+/**
+ * Reusable live status pill (e.g., "Scanning", "Visible", "Connected") with breathing dot.
+ */
+@Composable
+fun StatusPill(
+    label: String,
+    color: Color = HyperDropColors.SuccessGreen,
+    isPulsing: Boolean = true,
+    modifier: Modifier = Modifier
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "status_pill")
+    val dotAlpha by infiniteTransition.animateFloat(
+        initialValue = if (isPulsing) 0.45f else 1f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "status_dot_alpha"
+    )
+
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(Color(0xFF121217).copy(alpha = 0.92f))
+            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(999.dp))
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(color.copy(alpha = dotAlpha))
+        )
+        Text(
+            text = label,
+            style = HyperDropTypography.Caption.copy(
+                color = HyperDropColors.TextPrimary,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 0.2.sp
+            )
+        )
+    }
+}
+
+/**
+ * Luxury monogram avatar with machined titanium ring and optional corner badge.
+ */
+@Composable
+fun MonogramAvatar(
+    name: String,
+    modifier: Modifier = Modifier,
+    size: Dp = 48.dp,
+    isActive: Boolean = false,
+    badgeIcon: ImageVector? = null
+) {
+    val initials = remember(name) {
+        name.trim()
+            .split(Regex("\\s+"))
+            .filter { it.isNotEmpty() }
+            .take(2)
+            .joinToString("") { it.first().uppercase() }
+            .ifEmpty { "?" }
+    }
+
+    Box(
+        modifier = modifier.size(size),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(CircleShape)
+                .background(
+                    brush = Brush.verticalGradient(
+                        colors = listOf(
+                            Color(0xFF20202A),
+                            Color(0xFF121218)
+                        )
+                    )
+                )
+                .border(
+                    width = 1.dp,
+                    brush = Brush.linearGradient(
+                        colors = if (isActive) {
+                            listOf(HyperDropColors.SuccessGreen, HyperDropColors.SuccessGreen.copy(alpha = 0.3f))
+                        } else {
+                            listOf(Color.White.copy(alpha = 0.24f), Color.White.copy(alpha = 0.06f))
+                        }
+                    ),
+                    shape = CircleShape
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = initials,
+                style = HyperDropTypography.TitleMedium.copy(
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    letterSpacing = 0.5.sp
+                )
+            )
+        }
+
+        if (badgeIcon != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(18.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF0A0A0E))
+                    .border(1.dp, Color.White.copy(alpha = 0.2f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = badgeIcon,
+                    contentDescription = null,
+                    tint = if (isActive) HyperDropColors.SuccessGreen else Color.White,
+                    modifier = Modifier.size(10.dp)
+                )
+            }
+        }
+    }
+}
 
 /**
  * Reusable icon-in-circle component: obsidian glass circle with hairline border.

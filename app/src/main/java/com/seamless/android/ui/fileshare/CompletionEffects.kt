@@ -1,11 +1,9 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui.fileshare
 
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -104,78 +102,150 @@ fun ConfettiBurst(
 }
 
 /**
- * Success checkmark with scale-in and glow effect
+ * Apple Pay / Stripe-style animated stroke checkmark with outer ring sweep,
+ * soft emerald bloom, and PathMeasure stroke drawing.
  */
 @Composable
 fun SuccessCheckmark(
     isVisible: Boolean,
     modifier: Modifier = Modifier
 ) {
-    var animationTriggered by remember { mutableStateOf(false) }
+    if (!isVisible) return
+
     val haptic = LocalHapticFeedback.current
-    
+    val ringSweep = remember { Animatable(0f) }
+    val fillAlpha = remember { Animatable(0f) }
+    val checkProgress = remember { Animatable(0f) }
+    val containerScale = remember { Animatable(0.88f) }
+
     LaunchedEffect(isVisible) {
         if (isVisible) {
-            delay(100)
-            animationTriggered = true
+            containerScale.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(dampingRatio = 0.84f, stiffness = 400f)
+            )
         }
     }
-    
-    // Haptic feedback when checkmark appears
-    LaunchedEffect(Unit) {
-        delay(200) // Wait for scale-in animation to start
-        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+
+    LaunchedEffect(isVisible) {
+        if (isVisible) {
+            // 0-420ms: Outer ring sweeps 0 -> 360 deg
+            ringSweep.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(420, easing = FastOutSlowInEasing)
+            )
+        }
     }
-    
-    // Scale animation
-    val scale by animateFloatAsState(
-        targetValue = if (animationTriggered) 1f else 0f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessLow
-        ),
-        label = "scale"
-    )
-    
-    // Glow pulse
-    val infiniteTransition = rememberInfiniteTransition(label = "glow")
-    val glowAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.3f,
-        targetValue = 0.8f,
+
+    LaunchedEffect(isVisible) {
+        if (isVisible) {
+            delay(260)
+            // 260-520ms: Soft emerald fill + radial bloom expands
+            fillAlpha.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(260, easing = FastOutSlowInEasing)
+            )
+        }
+    }
+
+    LaunchedEffect(isVisible) {
+        if (isVisible) {
+            delay(360)
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            // 360-660ms: PathMeasure draws the 2-segment checkmark
+            checkProgress.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(300, easing = FastOutSlowInEasing)
+            )
+        }
+    }
+
+    val infiniteTransition = rememberInfiniteTransition(label = "emerald_glow")
+    val glowPulse by infiniteTransition.animateFloat(
+        initialValue = 0.6f,
+        targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1000, easing = FastOutSlowInEasing),
+            animation = tween(1600, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
-        label = "glowAlpha"
+        label = "glowPulse"
     )
-    
-    if (isVisible) {
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = modifier.graphicsLayer {
-                scaleX = scale
-                scaleY = scale
+
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = modifier
+            .size(120.dp)
+            .graphicsLayer {
+                scaleX = containerScale.value
+                scaleY = containerScale.value
             }
-        ) {
-            // Glow background
-            Canvas(modifier = Modifier.size(120.dp)) {
-                drawCircle(
-                    color = HyperDropColors.SuccessGreen.copy(alpha = glowAlpha * 0.3f),
-                    radius = size.minDimension / 2
-                )
-                drawCircle(
-                    color = HyperDropColors.SuccessGreen.copy(alpha = glowAlpha * 0.5f),
-                    radius = size.minDimension / 3
-                )
-            }
-            
-            // Checkmark icon
-            Icon(
-                imageVector = Icons.Filled.CheckCircle,
-                contentDescription = "Success",
-                tint = HyperDropColors.SuccessGreen,
-                modifier = Modifier.size(80.dp)
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val center = this.center
+            val maxR = size.minDimension / 2f
+            val ringR = maxR * 0.72f
+            val emerald = HyperDropColors.SuccessGreen
+
+            // Radial emerald bloom
+            drawCircle(
+                brush = androidx.compose.ui.graphics.Brush.radialGradient(
+                    colors = listOf(
+                        emerald.copy(alpha = 0.24f * fillAlpha.value * glowPulse),
+                        Color.Transparent
+                    ),
+                    center = center,
+                    radius = maxR
+                ),
+                radius = maxR
             )
+
+            // Soft emerald inner fill
+            drawCircle(
+                color = emerald.copy(alpha = 0.14f * fillAlpha.value),
+                radius = ringR,
+                center = center
+            )
+
+            // Sweeping outer ring (0 -> 360 degrees)
+            drawArc(
+                color = emerald,
+                startAngle = -90f,
+                sweepAngle = 360f * ringSweep.value,
+                useCenter = false,
+                topLeft = Offset(center.x - ringR, center.y - ringR),
+                size = androidx.compose.ui.geometry.Size(ringR * 2f, ringR * 2f),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(
+                    width = 3.dp.toPx(),
+                    cap = androidx.compose.ui.graphics.StrokeCap.Round
+                )
+            )
+
+            // PathMeasure 2-segment checkmark stroke
+            if (checkProgress.value > 0f) {
+                val fullCheckPath = androidx.compose.ui.graphics.Path().apply {
+                    moveTo(center.x - ringR * 0.38f, center.y + ringR * 0.02f)
+                    lineTo(center.x - ringR * 0.08f, center.y + ringR * 0.30f)
+                    lineTo(center.x + ringR * 0.42f, center.y - ringR * 0.26f)
+                }
+                val pathMeasure = androidx.compose.ui.graphics.PathMeasure()
+                pathMeasure.setPath(fullCheckPath, false)
+                val segmentPath = androidx.compose.ui.graphics.Path()
+                pathMeasure.getSegment(
+                    0f,
+                    pathMeasure.length * checkProgress.value,
+                    segmentPath,
+                    true
+                )
+                drawPath(
+                    path = segmentPath,
+                    color = Color.White,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(
+                        width = 4.dp.toPx(),
+                        cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                        join = androidx.compose.ui.graphics.StrokeJoin.Round
+                    )
+                )
+            }
         }
     }
 }

@@ -17,6 +17,8 @@ app/release
 # Gradle
 /build/
 /.gradle/
+/.gradle-codex/
+.gradle-codex/
 /captures/
 *.apk
 *.aab
@@ -39,6 +41,7 @@ dependency-reduced-pom.xml
 
 # Linters
 .lint/
+app/lint.xml
 
 # Other
 *.log

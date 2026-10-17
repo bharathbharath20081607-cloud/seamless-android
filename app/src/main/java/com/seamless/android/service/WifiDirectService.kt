@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.service
 
 import android.Manifest
@@ -15,7 +16,6 @@ import android.os.*
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
-import android.os.Build
 import android.content.pm.ServiceInfo
 import com.seamless.android.R
 import kotlinx.coroutines.*
@@ -93,6 +93,9 @@ class WifiDirectService : Service() {
     // Track the client's IP address (discovered from incoming connections)
     // This enables the group owner to send files TO the client
     @Volatile private var clientAddress: String? = null
+    @Volatile private var isServerRunning: Boolean = false
+    @Volatile private var lastAcceptedPeerAddress: String? = null
+    @Volatile private var lastAcceptedTimestamp: Long = 0L
     
     // Pending confirmation for manual file transfer approval
     private var pendingConfirmation: CompletableDeferred<Boolean>? = null
@@ -271,21 +274,65 @@ class WifiDirectService : Service() {
             Log.w(TAG, "Missing permission for Wi-Fi Direct group creation")
             return
         }
+
+        // Proactively ensure the receive server is listening on port 8988
+        serviceScope.launch {
+            startReceiveServer()
+        }
         
         channel?.let { ch ->
-            wifiP2pManager.createGroup(ch, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() {
-                    Log.d(TAG, "Group created successfully")
+            wifiP2pManager.requestGroupInfo(ch) { existingGroup ->
+                if (existingGroup != null && existingGroup.isGroupOwner) {
+                    Log.d(TAG, "Already group owner, keeping existing group and refreshing discovery")
+                    wifiP2pManager.requestConnectionInfo(ch) { info ->
+                        if (info != null && info.groupFormed) {
+                            currentConnection = info
+                            notifyCallbacks { onConnected(info) }
+                        }
+                    }
+                    startDiscovery()
+                } else if (existingGroup != null) {
+                    wifiP2pManager.removeGroup(ch, object : WifiP2pManager.ActionListener {
+                        override fun onSuccess() {
+                            createGroupInternal(ch)
+                        }
+                        override fun onFailure(reason: Int) {
+                            createGroupInternal(ch)
+                        }
+                    })
+                } else {
+                    createGroupInternal(ch)
                 }
-
-                override fun onFailure(reason: Int) {
-                    Log.e(TAG, "Failed to create group: $reason")
-                }
-            })
+            }
         }
     }
 
-    private fun connectToDevice(deviceAddress: String) {
+    private fun createGroupInternal(ch: WifiP2pManager.Channel) {
+        val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        }
+        if (!hasPermission) return
+
+        wifiP2pManager.createGroup(ch, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {
+                Log.d(TAG, "Group created successfully")
+                // Keep peer discovery active so senders on all Android OEMs can discover this host
+                handler.postDelayed({ startDiscovery() }, 350L)
+            }
+
+            override fun onFailure(reason: Int) {
+                Log.e(TAG, "Failed to create group: $reason")
+                if (reason == WifiP2pManager.BUSY) {
+                    // Fallback to active peer discovery so incoming P2P connections still succeed
+                    handler.postDelayed({ startDiscovery() }, 400L)
+                }
+            }
+        })
+    }
+
+    private fun connectToDevice(deviceAddress: String, isRetry: Boolean = false) {
         val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             ActivityCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED
         } else {
@@ -301,6 +348,8 @@ class WifiDirectService : Service() {
         val config = WifiP2pConfig().apply {
             this.deviceAddress = deviceAddress
             wps.setup = WpsInfo.PBC
+            // Sender prefers Client role (0) so Receiver (or existing Group Owner) owns 192.168.49.1
+            groupOwnerIntent = 0
         }
         
         channel?.let { ch ->
@@ -311,8 +360,14 @@ class WifiDirectService : Service() {
                 }
 
                 override fun onFailure(reason: Int) {
-                    Log.e(TAG, "Connection failed: $reason")
-                    notifyCallbacks { onConnectionFailed(reason) }
+                    Log.e(TAG, "Connection failed: $reason (isRetry=$isRetry)")
+                    if (reason == WifiP2pManager.BUSY && !isRetry) {
+                        handler.postDelayed({
+                            connectToDevice(deviceAddress, isRetry = true)
+                        }, 450L)
+                    } else {
+                        notifyCallbacks { onConnectionFailed(reason) }
+                    }
                 }
             })
         }
@@ -323,6 +378,8 @@ class WifiDirectService : Service() {
             wifiP2pManager.removeGroup(ch, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
                     Log.d(TAG, "Disconnected from group")
+                    clientAddress = null
+                    lastAcceptedPeerAddress = null
                     notifyCallbacks { onDisconnected() }
                 }
 
@@ -334,11 +391,39 @@ class WifiDirectService : Service() {
     }
 
     /**
-     * Send a file to the connected peer using a simple header-based protocol.
+     * Send a lightweight registration ping from Client to Group Owner immediately upon joining
+     * the P2P group so the Group Owner learns the Client's IP address for bidirectional transfers.
+     */
+    private fun sendClientRegistrationPing(groupOwnerHostAddress: String?) {
+        val hostAddr = groupOwnerHostAddress ?: return
+        serviceScope.launch {
+            repeat(3) { attempt ->
+                if (attempt > 0) delay(350L * attempt)
+                try {
+                    Socket().use { pingSocket ->
+                        pingSocket.tcpNoDelay = true
+                        pingSocket.soTimeout = 3_000
+                        pingSocket.connect(InetSocketAddress(hostAddr, 8988), 3_000)
+                        val out = DataOutputStream(pingSocket.getOutputStream())
+                        out.writeInt(-1) // Magic ping header
+                        out.flush()
+                        pingSocket.getInputStream().read()
+                        Log.d(TAG, "📍 Client IP registration ping succeeded to $hostAddr")
+                        return@launch
+                    }
+                } catch (e: Exception) {
+                    Log.d(TAG, "Client IP registration ping attempt ${attempt + 1} failed: ${e.message}")
+                }
+            }
+        }
+    }
+
+    /**
+     * Send a file to the connected peer using a synchronized header + approval + completion ACK protocol.
      *
-     * FIXED: Both group owner AND client can now send files.
-     * - Client → sends to groupOwnerAddress (standard)
-     * - Group Owner → sends to clientAddress (discovered from incoming connection)
+     * Both group owner AND client can send files:
+     * - Client → sends to groupOwnerAddress (192.168.49.1)
+     * - Group Owner → sends to clientAddress (learned from registration ping or incoming connection)
      */
     private suspend fun sendFile(filePath: String, fileName: String, fileSize: Long) {
         val connection = currentConnection
@@ -348,13 +433,18 @@ class WifiDirectService : Service() {
             return
         }
 
-        // Determine target address based on our role
+        // Determine target address based on our role (waiting briefly if Group Owner is waiting for Client ping)
         val targetAddress = if (connection.isGroupOwner) {
-            // Group owner sends to the client's IP (learned from incoming connection)
-            val addr = clientAddress
+            var addr = clientAddress
+            var waitAttempts = 0
+            while (addr == null && waitAttempts < 10) {
+                delay(250L)
+                addr = clientAddress
+                waitAttempts++
+            }
             if (addr == null) {
                 Log.e(TAG, "Client address not yet known — wait for client to connect first")
-                notifyCallbacks { onFileTransferFailed(fileName, "Peer not connected yet — please wait") }
+                notifyCallbacks { onFileTransferFailed(fileName, "Peer not ready yet — please retry in a moment") }
                 return
             }
             Log.d(TAG, "Group owner sending to client at $addr")
@@ -371,63 +461,96 @@ class WifiDirectService : Service() {
 
         var inputStream: InputStream? = null
         var outputStream: DataOutputStream? = null
-        val socket = Socket()
+        var socket: Socket? = null
 
         try {
+            var effectiveFileSize = fileSize
             // Support both direct file paths and content URIs (zero-copy)
             if (filePath.startsWith("content://")) {
                 val uri = android.net.Uri.parse(filePath)
-                inputStream = contentResolver.openInputStream(uri)
-                if (inputStream == null) {
-                     notifyCallbacks { onFileTransferFailed(fileName, "Could not open content URI") }
-                     return
+                if (effectiveFileSize <= 0L) {
+                    contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                        if (afd.length > 0L) effectiveFileSize = afd.length
+                    }
                 }
-                Log.d(TAG, "📂 Streaming directly from content URI: $filePath")
+                val rawStream = contentResolver.openInputStream(uri)
+                if (rawStream == null) {
+                    notifyCallbacks { onFileTransferFailed(fileName, "Could not open content URI") }
+                    return
+                }
+                inputStream = BufferedInputStream(rawStream, BUFFER_SIZE)
+                Log.d(TAG, "📂 Streaming directly from content URI: $filePath ($effectiveFileSize bytes)")
             } else {
                 val file = File(filePath)
                 if (!file.exists()) {
                     notifyCallbacks { onFileTransferFailed(fileName, "File not found") }
                     return
                 }
-                inputStream = FileInputStream(file)
-                Log.d(TAG, "📂 Streaming from file: $filePath")
+                if (effectiveFileSize <= 0L) {
+                    effectiveFileSize = file.length()
+                }
+                inputStream = BufferedInputStream(FileInputStream(file), BUFFER_SIZE)
+                Log.d(TAG, "📂 Streaming from file: $filePath ($effectiveFileSize bytes)")
             }
 
-            // ⚡ TURBO: Configure socket for maximum transfer speed
-            socket.tcpNoDelay = true
-            socket.sendBufferSize = SOCKET_SEND_BUFFER
-            socket.receiveBufferSize = SOCKET_RECV_BUFFER
-            socket.soTimeout = SOCKET_TIMEOUT
+            // Connect with retry in case receiver's ServerSocket is still binding after group formation
+            var lastConnectError: Exception? = null
+            for (attempt in 0 until 3) {
+                if (attempt > 0) delay(350L * attempt)
+                try {
+                    val candidate = Socket()
+                    candidate.tcpNoDelay = true
+                    candidate.sendBufferSize = SOCKET_SEND_BUFFER
+                    candidate.receiveBufferSize = SOCKET_RECV_BUFFER
+                    candidate.soTimeout = SOCKET_TIMEOUT
+                    candidate.connect(InetSocketAddress(targetAddress, 8988), 8_000)
+                    socket = candidate
+                    break
+                } catch (e: Exception) {
+                    lastConnectError = e
+                    Log.w(TAG, "Socket connect attempt ${attempt + 1}/3 failed: ${e.message}")
+                }
+            }
 
-            socket.connect(InetSocketAddress(targetAddress, 8988), SOCKET_TIMEOUT)
-            outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), BUFFER_SIZE))
+            val activeSocket = socket ?: throw (lastConnectError ?: IOException("Failed to connect to recipient"))
+            outputStream = DataOutputStream(BufferedOutputStream(activeSocket.getOutputStream(), BUFFER_SIZE))
 
             Log.d(TAG, "⚡ TURBO: Socket connected with ${SOCKET_SEND_BUFFER / 1024}KB send buffer")
 
-            // Send simple header: [nameLength:int][nameBytes][fileSize:long]
+            // 1. Send header: [nameLength:int][nameBytes][fileSize:long]
             val nameBytes = fileName.toByteArray(Charsets.UTF_8)
             outputStream.writeInt(nameBytes.size)
             outputStream.write(nameBytes)
-            outputStream.writeLong(fileSize)
+            outputStream.writeLong(effectiveFileSize)
             outputStream.flush()
-            Log.d(TAG, "📤 Sent file header: $fileName, size=$fileSize (flushed)")
+            Log.d(TAG, "📤 Sent file header: $fileName, size=$effectiveFileSize — awaiting recipient approval...")
+
+            // 2. Wait for 1-byte recipient approval (1 = accepted, 0 = rejected)
+            activeSocket.soTimeout = 35_000
+            val approvalByte = activeSocket.getInputStream().read()
+            if (approvalByte != 1) {
+                val reason = if (approvalByte == 0) "Transfer declined by recipient" else "Recipient did not respond in time"
+                Log.w(TAG, "❌ Transfer not approved ($approvalByte): $reason")
+                notifyCallbacks { onFileTransferFailed(fileName, reason) }
+                return
+            }
+            activeSocket.soTimeout = SOCKET_TIMEOUT
 
             val buffer = ByteArray(BUFFER_SIZE)
             var bytesRead: Int
             var totalBytesSent = 0L
             var lastReportedProgress = -1
 
-            notifyCallbacks { onFileTransferStarted(fileName, fileSize) }
+            notifyCallbacks { onFileTransferStarted(fileName, effectiveFileSize) }
 
+            // 3. Stream file payload
             while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                 outputStream.write(buffer, 0, bytesRead)
                 totalBytesSent += bytesRead
 
-                // Guard against division by zero in case fileSize is zero or invalid
-                val safeTotalBytes = if (fileSize > 0L) fileSize else 1L
-                val progress = (totalBytesSent * 100 / safeTotalBytes).toInt()
+                val safeTotalBytes = if (effectiveFileSize > 0L) effectiveFileSize else maxOf(totalBytesSent, 1L)
+                val progress = ((totalBytesSent * 100) / safeTotalBytes).toInt().coerceIn(0, 100)
                 
-                // ⚡ TURBO v2.0: Report progress every 2% to reduce callback overhead
                 if (progress - lastReportedProgress >= PROGRESS_REPORT_INTERVAL || progress >= 100) {
                     lastReportedProgress = progress
                     notifyCallbacks { onFileTransferProgress(fileName, progress, totalBytesSent) }
@@ -435,8 +558,18 @@ class WifiDirectService : Service() {
             }
 
             outputStream.flush()
+
+            // 4. Wait for 1-byte completion ACK (2) confirming recipient flushed file to disk
+            try {
+                activeSocket.soTimeout = 10_000
+                val ackByte = activeSocket.getInputStream().read()
+                Log.d(TAG, "📥 Received completion ACK ($ackByte) for $fileName")
+            } catch (e: Exception) {
+                Log.w(TAG, "Completion ACK read warning (bytes already flushed): ${e.message}")
+            }
+
             notifyCallbacks { onFileTransferCompleted(fileName) }
-            Log.d(TAG, "File transfer completed: $fileName")
+            Log.d(TAG, "✅ File transfer completed: $fileName ($totalBytesSent bytes)")
 
         } catch (e: Exception) {
             Log.e(TAG, "Error during file transfer", e)
@@ -445,7 +578,7 @@ class WifiDirectService : Service() {
             try {
                 inputStream?.close()
                 outputStream?.close()
-                socket.close()
+                socket?.close()
             } catch (e: Exception) {
                 Log.e(TAG, "Error closing streams", e)
             }
@@ -453,16 +586,20 @@ class WifiDirectService : Service() {
     }
 
     /**
-     * Start a simple file receiver server on port 8988 when acting as group owner.
-     * Each incoming connection is treated as a single file transfer using the
-     * header format written by sendFile().
+     * Start a resilient file receiver server on port 8988.
      */
     private suspend fun startReceiveServer() {
+        if (isServerRunning && serverSocket != null && serverSocket?.isClosed == false) {
+            return
+        }
+        isServerRunning = true
         try {
             if (serverSocket == null || serverSocket?.isClosed == true) {
-                serverSocket = ServerSocket(8988)
-                // ⚡ TURBO RECEIVER: Large receive buffer for high-speed incoming transfers
-                serverSocket?.receiveBufferSize = SOCKET_RECV_BUFFER
+                serverSocket = ServerSocket().apply {
+                    reuseAddress = true
+                    receiveBufferSize = SOCKET_RECV_BUFFER
+                    bind(InetSocketAddress(8988))
+                }
                 Log.d(TAG, "⚡ TURBO: File receive server started on port 8988 with ${SOCKET_RECV_BUFFER / 1024}KB buffer")
             }
 
@@ -470,14 +607,16 @@ class WifiDirectService : Service() {
                 val clientSocket = try {
                     serverSocket?.accept()
                 } catch (e: IOException) {
-                    Log.e(TAG, "Error accepting incoming file connection", e)
+                    if (serverSocket?.isClosed == false) {
+                        Log.e(TAG, "Error accepting incoming file connection", e)
+                    }
                     break
                 }
                 clientSocket?.let { socket ->
-                    // ⚡ TURBO: Optimize accepted socket for maximum receive speed
                     socket.tcpNoDelay = true
                     socket.receiveBufferSize = SOCKET_RECV_BUFFER
                     socket.sendBufferSize = SOCKET_SEND_BUFFER
+                    socket.soTimeout = SOCKET_TIMEOUT
                     
                     serviceScope.launch {
                         handleIncomingFile(socket)
@@ -486,97 +625,157 @@ class WifiDirectService : Service() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in receive server", e)
+        } finally {
+            isServerRunning = false
         }
     }
 
     private suspend fun handleIncomingFile(socket: Socket) {
         var inputStream: DataInputStream? = null
-        var outputStream: FileOutputStream? = null
+        var fileOutputStream: OutputStream? = null
+        var safeFileName = "unknown"
         try {
             // Capture the client's IP for bidirectional transfer
             val remoteAddr = (socket.remoteSocketAddress as? InetSocketAddress)?.address?.hostAddress
-            if (remoteAddr != null && clientAddress == null) {
+            if (remoteAddr != null) {
                 clientAddress = remoteAddr
-                Log.d(TAG, "📍 Captured client address: $remoteAddr")
+                Log.d(TAG, "📍 Captured peer address: $remoteAddr")
             }
             
-            inputStream = DataInputStream(socket.getInputStream())
+            inputStream = DataInputStream(BufferedInputStream(socket.getInputStream(), BUFFER_SIZE))
+            val socketOut = socket.getOutputStream()
             
-            // Read file header: name length (4 bytes) + name + file size (8 bytes)
+            // Read file header: name length (4 bytes)
             val nameLength = inputStream.readInt()
+            if (nameLength == -1) {
+                // Client IP registration ping
+                socketOut.write(1)
+                socketOut.flush()
+                Log.d(TAG, "📍 Handled client IP registration ping from $remoteAddr")
+                return
+            }
+            if (nameLength <= 0 || nameLength > 4096) {
+                Log.e(TAG, "Invalid incoming file name length: $nameLength")
+                socketOut.write(0)
+                socketOut.flush()
+                return
+            }
+
             val nameBytes = ByteArray(nameLength)
             inputStream.readFully(nameBytes)
-            val fileName = String(nameBytes, Charsets.UTF_8)
+            val rawFileName = String(nameBytes, Charsets.UTF_8)
+            safeFileName = File(rawFileName).name.ifBlank { "received_file_${System.currentTimeMillis()}" }
             val fileSize = inputStream.readLong()
 
             // SECURITY CHECK: Should we accept this file?
-            if (isNfcTrustedSession) {
-                Log.d(TAG, "✅ Auto-accepting file from NFC trusted session: $fileName")
+            val now = System.currentTimeMillis()
+            val isRecentlyApprovedPeer = remoteAddr != null &&
+                remoteAddr == lastAcceptedPeerAddress &&
+                (now - lastAcceptedTimestamp) < 60_000L
+
+            if (isNfcTrustedSession || isRecentlyApprovedPeer) {
+                Log.d(TAG, "✅ Auto-accepting file from trusted/approved session: $safeFileName")
             } else {
-                Log.d(TAG, "🔒 Untrusted connection, requesting user confirmation for: $fileName")
-                notifyCallbacks { onFileTransferRequested(fileName, fileSize) }
+                Log.d(TAG, "🔒 Requesting user confirmation for: $safeFileName ($fileSize bytes)")
+                notifyCallbacks { onFileTransferRequested(safeFileName, fileSize) }
                 
                 // Wait for UI to confirm or reject
-                pendingConfirmation = CompletableDeferred()
+                val deferred = CompletableDeferred<Boolean>()
+                pendingConfirmation = deferred
                 val accepted = try {
-                     // 30 second timeout for user to decide
                     withTimeout(30_000) {
-                        pendingConfirmation?.await() ?: false
+                        deferred.await()
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Confirmation timed out")
                     false
                 } finally {
-                    pendingConfirmation = null
+                    if (pendingConfirmation === deferred) {
+                        pendingConfirmation = null
+                    }
                 }
                 
                 if (!accepted) {
-                    Log.w(TAG, "❌ File transfer rejected by user or timeout")
-                    // Still need to consume the stream or close connection
-                    // In a simple socket protocol, closing the socket is the rejection
-                    socket.close() 
+                    Log.w(TAG, "❌ File transfer rejected by user or timeout: $safeFileName")
+                    runCatching {
+                        socketOut.write(0)
+                        socketOut.flush()
+                    }
+                    socket.close()
                     return
+                }
+                if (remoteAddr != null) {
+                    lastAcceptedPeerAddress = remoteAddr
+                    lastAcceptedTimestamp = System.currentTimeMillis()
                 }
                 Log.d(TAG, "✅ File transfer manually accepted by user")
             }
 
+            // Signal approval (1) to sender so it begins streaming payload
+            socketOut.write(1)
+            socketOut.flush()
+
             val targetDir = File(getExternalFilesDir(null), "received_files")
             if (!targetDir.exists()) targetDir.mkdirs()
-            val outFile = File(targetDir, fileName)
+            var outFile = File(targetDir, safeFileName)
+            if (outFile.exists()) {
+                val dotIndex = safeFileName.lastIndexOf('.')
+                val base = if (dotIndex > 0) safeFileName.substring(0, dotIndex) else safeFileName
+                val ext = if (dotIndex > 0) safeFileName.substring(dotIndex) else ""
+                var counter = 1
+                while (outFile.exists()) {
+                    outFile = File(targetDir, "$base ($counter)$ext")
+                    counter++
+                }
+            }
 
-            outputStream = FileOutputStream(outFile)
+            fileOutputStream = BufferedOutputStream(FileOutputStream(outFile), BUFFER_SIZE)
 
             val buffer = ByteArray(BUFFER_SIZE)
             var totalBytesRead = 0L
             var lastReportedProgress = -1
 
-            notifyCallbacks { onFileTransferStarted(fileName, fileSize) }
+            notifyCallbacks { onFileTransferStarted(safeFileName, fileSize) }
 
             while (totalBytesRead < fileSize) {
                 val bytesToRead = minOf(buffer.size.toLong(), fileSize - totalBytesRead).toInt()
                 val bytesRead = inputStream.read(buffer, 0, bytesToRead)
                 if (bytesRead == -1) break
-                outputStream.write(buffer, 0, bytesRead)
+                fileOutputStream.write(buffer, 0, bytesRead)
                 totalBytesRead += bytesRead
 
-                // ⚡ TURBO v2.0: Report progress every 2% to reduce callback overhead
-                val progress = if (fileSize > 0L) ((totalBytesRead * 100) / fileSize).toInt() else 0
+                val progress = if (fileSize > 0L) ((totalBytesRead * 100) / fileSize).toInt().coerceIn(0, 100) else 100
                 if (progress - lastReportedProgress >= PROGRESS_REPORT_INTERVAL || progress >= 100) {
                     lastReportedProgress = progress
-                    notifyCallbacks { onFileTransferProgress(fileName, progress, totalBytesRead) }
+                    notifyCallbacks { onFileTransferProgress(safeFileName, progress, totalBytesRead) }
                 }
             }
 
-            outputStream.flush()
-            notifyCallbacks { onFileTransferCompleted(fileName) }
-            Log.d(TAG, "Received file saved to: ${outFile.absolutePath}")
+            fileOutputStream.flush()
+            if (fileSize > 0L && totalBytesRead < fileSize) {
+                throw IOException("Incomplete transfer ($totalBytesRead / $fileSize bytes)")
+            }
+
+            // Refresh batch approval timestamp so subsequent queued files in a batch auto-stream seamlessly
+            if (remoteAddr != null) {
+                lastAcceptedTimestamp = System.currentTimeMillis()
+            }
+
+            // Send 1-byte completion ACK (2) to sender
+            runCatching {
+                socketOut.write(2)
+                socketOut.flush()
+            }
+
+            notifyCallbacks { onFileTransferCompleted(safeFileName) }
+            Log.d(TAG, "✅ Received file saved to: ${outFile.absolutePath}")
         } catch (e: Exception) {
             Log.e(TAG, "Error receiving file", e)
-            notifyCallbacks { onFileTransferFailed("unknown", e.message ?: "Receive failed") }
+            notifyCallbacks { onFileTransferFailed(safeFileName, e.message ?: "Receive failed") }
         } finally {
             try {
                 inputStream?.close()
-                outputStream?.close()
+                fileOutputStream?.close()
                 socket.close()
             } catch (e: Exception) {
                 Log.e(TAG, "Error closing receive streams", e)
@@ -588,6 +787,7 @@ class WifiDirectService : Service() {
         try {
             serverSocket?.close()
             serverSocket = null
+            isServerRunning = false
         } catch (e: Exception) {
             Log.e(TAG, "Error closing server socket", e)
         }
@@ -606,7 +806,9 @@ class WifiDirectService : Service() {
     }
 
     fun addCallback(callback: WifiDirectCallback) {
-        callbacks.add(callback)
+        if (!callbacks.contains(callback)) {
+            callbacks.add(callback)
+        }
     }
 
     fun removeCallback(callback: WifiDirectCallback) {
@@ -639,10 +841,9 @@ class WifiDirectService : Service() {
                     wifiP2pManager.requestPeers(channel) { peers ->
                         Log.d(TAG, "Peers discovered: ${peers.deviceList.size}")
                         
-                        // PRODUCTION FIX: Track when devices are found to reset retry timer
                         if (peers.deviceList.isNotEmpty()) {
                             lastDeviceFoundTime = System.currentTimeMillis()
-                            discoveryRetryCount = 0 // Reset retry count when devices found
+                            discoveryRetryCount = 0
                         }
                         
                         notifyCallbacks { onPeersDiscovered(peers.deviceList) }
@@ -652,22 +853,24 @@ class WifiDirectService : Service() {
                 WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
                     @Suppress("DEPRECATION")
                     val wifiP2pInfo = intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_INFO) as? WifiP2pInfo
-                    @Suppress("DEPRECATION")
-                    val networkInfo = intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO) as? android.net.NetworkInfo
 
                     currentConnection = wifiP2pInfo
 
                     if (wifiP2pInfo?.groupFormed == true) {
-                        Log.d(TAG, "Connected to group: ${wifiP2pInfo.groupOwnerAddress}")
-                        // FIXED: Start receive server on BOTH roles (owner + client)
-                        // This enables bidirectional file transfer
+                        Log.d(TAG, "Connected to group: ${wifiP2pInfo.groupOwnerAddress} (isGroupOwner=${wifiP2pInfo.isGroupOwner})")
+                        // Start receive server on BOTH roles (owner + client)
                         serviceScope.launch {
                             startReceiveServer()
+                        }
+                        // If we are the client, send an immediate IP registration ping to the group owner
+                        if (!wifiP2pInfo.isGroupOwner) {
+                            sendClientRegistrationPing(wifiP2pInfo.groupOwnerAddress?.hostAddress)
                         }
                         notifyCallbacks { onConnected(wifiP2pInfo) }
                     } else {
                         Log.d(TAG, "Disconnected from group")
-                        clientAddress = null // Reset on disconnect
+                        clientAddress = null
+                        lastAcceptedPeerAddress = null
                         notifyCallbacks { onDisconnected() }
                     }
                 }

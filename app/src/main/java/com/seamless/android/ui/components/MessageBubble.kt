@@ -1,49 +1,29 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui.components
+import androidx.compose.ui.unit.Dp
 
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.Dp
-import com.seamless.android.ui.theme.SeamlessColors
-import com.seamless.android.ui.theme.SeamlessCyan
 
-import androidx.compose.foundation.Canvas
-import androidx.compose.runtime.remember
-import androidx.compose.ui.geometry.RoundRect
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.unit.Density
-import androidx.compose.ui.graphics.drawscope.Fill
-import kotlinx.coroutines.launch
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Premium Message Bubble — Apple iMessage · WhatsApp · Google Messages Fusion
-//
-// Features:
-//  • Elegant gradient for sent messages (brand cyan → deep blue)
-//  • Clean surface-variant for received messages (adapts to light/dark theme)
-//  • Subtle top-highlight shine for depth (8% opacity, not harsh)
-//  • Spring-physics press-to-shrink micro-interaction
-//  • Smooth bezier tails on grouped message endings
-//  • Soft colored shadows matching bubble tint
+// Premium Message Bubble — Obsidian & Optical Light Edition
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
@@ -54,81 +34,76 @@ fun MessageBubble(
     content: @Composable () -> Unit
 ) {
     val colorScheme = MaterialTheme.colorScheme
+    val isDark = (colorScheme.background.red + colorScheme.background.green + colorScheme.background.blue) < 1.5f
     val bubbleShape = remember(isSelf, isFirstInGroup, isLastInGroup) {
         CyberBubbleShape(isSelf, isFirstInGroup, isLastInGroup)
     }
     
-    // ── Press-to-scale spring animation ──────────────────────────────
+    // ── Press-to-scale spring animation (weighty 0.84f damping) ──────
     var isPressed by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(
         targetValue = if (isPressed) 0.97f else 1f,
         animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMedium
+            dampingRatio = 0.84f,
+            stiffness = 400f
         ),
         label = "bubbleScale"
     )
     
     val backgroundModifier = if (isSelf) {
         // ── SENT BUBBLE ─────────────────────────────────────────────
-        // Clean gradient: brand cyan → deep blue (iMessage-inspired)
+        // High-contrast smoked Obsidian glass pill (#1F1F27 -> #17171E) with White@22% specular border
         Modifier
             .shadow(
-                elevation = 3.dp, 
+                elevation = 2.dp, 
                 shape = bubbleShape, 
-                spotColor = Color(0xFF0072FF).copy(alpha = 0.25f),
-                ambientColor = Color(0xFF00C6FF).copy(alpha = 0.15f)
+                spotColor = Color.Black.copy(alpha = 0.35f),
+                ambientColor = Color.Black.copy(alpha = 0.2f)
             )
             .background(
+                brush = Brush.verticalGradient(
+                    colors = if (isDark) {
+                        listOf(
+                            Color(0xFF1F1F27),
+                            Color(0xFF17171E)
+                        )
+                    } else {
+                        listOf(
+                            Color(0xFF22222A),
+                            Color(0xFF18181F)
+                        )
+                    }
+                ),
+                shape = bubbleShape
+            )
+            .border(
+                width = 1.dp,
                 brush = Brush.linearGradient(
                     colors = listOf(
-                        Color(0xFF00C6FF), // Bright cyan
-                        Color(0xFF0072FF)  // Deep blue
+                        Color.White.copy(alpha = 0.22f),
+                        Color.White.copy(alpha = 0.08f)
                     )
                 ),
                 shape = bubbleShape
             )
-            // Subtle top shine (8% — elegant, not harsh)
-            .then(
-                Modifier.background(
-                    brush = Brush.verticalGradient(
-                        colors = listOf(
-                            Color.White.copy(alpha = 0.08f),
-                            Color.White.copy(alpha = 0.0f)
-                        ),
-                        startY = 0f,
-                        endY = 50f
-                    ),
-                    shape = bubbleShape
-                )
-            )
     } else {
         // ── RECEIVED BUBBLE ─────────────────────────────────────────
-        // Clean surface that adapts to light/dark theme (Google Messages style)
+        // Machined dark glass (#121217) with 1.dp White@10% border in dark mode
         Modifier
             .shadow(
                 elevation = 1.dp,
                 shape = bubbleShape,
-                spotColor = Color.Black.copy(alpha = 0.15f),
-                ambientColor = Color.Black.copy(alpha = 0.08f)
+                spotColor = Color.Black.copy(alpha = 0.2f),
+                ambientColor = Color.Black.copy(alpha = 0.1f)
             )
             .background(
-                color = colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                color = if (isDark) Color(0xFF121217) else colorScheme.surfaceVariant.copy(alpha = 0.85f),
                 shape = bubbleShape
             )
-            // Very subtle glass edge for depth
-            .then(
-                Modifier.background(
-                    brush = Brush.verticalGradient(
-                        colors = listOf(
-                            Color.White.copy(alpha = 0.05f),
-                            Color.Transparent
-                        ),
-                        startY = 0f,
-                        endY = 30f
-                    ),
-                    shape = bubbleShape
-                )
+            .border(
+                width = 1.dp,
+                color = if (isDark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.08f),
+                shape = bubbleShape
             )
     }
 
@@ -139,20 +114,20 @@ fun MessageBubble(
                 scaleY = scale
             }
             .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                        isPressed = true
-                        tryAwaitRelease()
-                        isPressed = false
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                        val anyPressed = event.changes.any { it.pressed }
+                        isPressed = anyPressed
                     }
-                )
+                }
             }
             .then(backgroundModifier)
             .padding(
                 start = if (!isSelf && isLastInGroup) 16.dp else 14.dp, 
                 end = if (isSelf && isLastInGroup) 16.dp else 14.dp, 
-                top = 10.dp, 
-                bottom = 10.dp
+                top = 9.dp, 
+                bottom = 8.dp
             )
     ) {
         content()

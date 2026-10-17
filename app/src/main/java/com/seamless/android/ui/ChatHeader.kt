@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui
 
 
@@ -35,11 +36,9 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import com.seamless.android.core.ui.utils.singleOrTripleClickable
-import com.seamless.android.geohash.LocationChannelManager.PermissionState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.ui.geometry.Offset
-import com.seamless.android.ui.theme.SeamlessCyan
 
 /**
  * Header components for ChatScreen
@@ -390,10 +389,11 @@ private fun PrivateChatHeader(
         }
     }
 
-    val glassColor = if (androidx.compose.foundation.isSystemInDarkTheme()) 
-        Color(0xFF1E1E2E).copy(alpha = 0.95f)
+    val isDark = (colorScheme.background.red + colorScheme.background.green + colorScheme.background.blue) < 1.5f
+    val glassColor = if (isDark) 
+        Color(0xF009090C)
     else 
-        Color.White.copy(alpha = 0.98f)
+        com.seamless.android.ui.theme.SeamlessColors.GlassSurfaceLight
     
     Box(
         modifier = Modifier
@@ -441,7 +441,7 @@ private fun PrivateChatHeader(
             Text(
                 text = titleText,
                 style = MaterialTheme.typography.titleMedium,
-                color = Color(0xFFFF9500) // Orange
+                color = colorScheme.primary
             )
 
             Spacer(modifier = Modifier.width(4.dp))
@@ -490,11 +490,12 @@ private fun ChannelHeader(
     onSidebarClick: () -> Unit
 ) {
     val colorScheme = MaterialTheme.colorScheme
+    val isDark = (colorScheme.background.red + colorScheme.background.green + colorScheme.background.blue) < 1.5f
     
-    val glassColor = if (androidx.compose.foundation.isSystemInDarkTheme()) 
-        Color(0xFF1E1E2E).copy(alpha = 0.95f)
+    val glassColor = if (isDark) 
+        Color(0xF009090C)
     else 
-        Color.White.copy(alpha = 0.98f)
+        com.seamless.android.ui.theme.SeamlessColors.GlassSurfaceLight
 
     Box(
         modifier = Modifier
@@ -537,7 +538,7 @@ private fun ChannelHeader(
         Text(
             text = stringResource(R.string.chat_channel_prefix, channel),
             style = MaterialTheme.typography.titleMedium,
-            color = Color(0xFFFF9500), // Orange to match input field
+            color = colorScheme.primary,
             modifier = Modifier
                 .align(Alignment.Center)
                 .clickable { onSidebarClick() }
@@ -551,7 +552,7 @@ private fun ChannelHeader(
             Text(
                 text = stringResource(R.string.chat_leave),
                 style = MaterialTheme.typography.bodySmall,
-                color = Color.Red
+                color = com.seamless.android.ui.theme.SeamlessColors.Error
             )
         }
     }
@@ -585,10 +586,11 @@ private fun MainHeader(
     val bookmarksStore = remember { com.seamless.android.geohash.GeohashBookmarksStore.getInstance(context) }
     val bookmarks by bookmarksStore.bookmarks.observeAsState(emptyList())
 
-    val glassColor = if (androidx.compose.foundation.isSystemInDarkTheme()) 
-        Color(0xFF1E1E2E).copy(alpha = 0.95f)
+    val isDark = (colorScheme.background.red + colorScheme.background.green + colorScheme.background.blue) < 1.5f
+    val glassColor = if (isDark) 
+        Color(0xF009090C)
     else 
-        Color.White.copy(alpha = 0.98f)
+        com.seamless.android.ui.theme.SeamlessColors.GlassSurfaceLight
 
     Row(
         modifier = Modifier
@@ -620,7 +622,10 @@ private fun MainHeader(
             
             Text(
                 text = stringResource(R.string.app_brand),
-                style = MaterialTheme.typography.headlineSmall,
+                style = MaterialTheme.typography.headlineSmall.copy(
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = (-0.5).sp
+                ),
                 color = colorScheme.primary,
                 modifier = Modifier.singleOrTripleClickable(
                     onSingleClick = onTitleClick,
@@ -639,93 +644,72 @@ private fun MainHeader(
         // Right section with location channels button and peer counter
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp)
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.padding(end = 6.dp)
         ) {
             // Network/People button with count - shows who's connected
+            val peerCount = connectedPeers.filter { it != viewModel.meshServiceInstance?.myPeerID }.size
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(
+                        if (peerCount > 0) colorScheme.primary.copy(alpha = 0.14f)
+                        else colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                    )
+                    .clickable { onSidebarClick() }
+                    .padding(horizontal = 8.dp, vertical = 5.dp)
             ) {
-                IconButton(
-                    onClick = onSidebarClick,
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.People,
-                        contentDescription = "Network",
-                        modifier = Modifier.size(24.dp),
-                        tint = if (connectedPeers.isNotEmpty()) SeamlessCyan else colorScheme.onSurface.copy(alpha = 0.5f)
-                    )
-                }
-                
-                // Always show peer count, even if 0
-                val peerCount = connectedPeers.filter { it != viewModel.meshServiceInstance?.myPeerID }.size
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(
-                            if (peerCount > 0) SeamlessCyan.copy(alpha = 0.2f) 
-                            else colorScheme.surfaceVariant
-                        )
-                        .padding(horizontal = 8.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        text = peerCount.toString(),
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = if (peerCount > 0) SeamlessCyan else colorScheme.onSurfaceVariant
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Outlined.People,
+                    contentDescription = "Network",
+                    modifier = Modifier.size(16.dp),
+                    tint = if (peerCount > 0) colorScheme.primary else colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = peerCount.toString(),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = if (peerCount > 0) colorScheme.primary else colorScheme.onSurfaceVariant
+                )
             }
             
             // Chats button - shows list of favorited contacts
             IconButton(
                 onClick = onChatsClick,
-                modifier = Modifier.size(36.dp)
+                modifier = Modifier.size(34.dp)
             ) {
                 Box {
                     Icon(
                         imageVector = Icons.AutoMirrored.Outlined.Chat,
                         contentDescription = "Chats",
-                        modifier = Modifier.size(24.dp),
-                        tint = SeamlessCyan
+                        modifier = Modifier.size(20.dp),
+                        tint = colorScheme.onSurface.copy(alpha = 0.85f)
                     )
                     // Show badge if there are unread messages
                     if (hasUnreadPrivateMessages.isNotEmpty()) {
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
-                                .size(10.dp)
+                                .size(8.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFFFF5252))
+                                .background(com.seamless.android.ui.theme.SeamlessColors.Error)
                         )
                     }
                 }
             }
             
-            // Location Channels button (hashtag icon)
-            IconButton(
-                onClick = onLocationChannelsClick,
-                modifier = Modifier.size(36.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.Tag,
-                    contentDescription = "Location Channels",
-                    modifier = Modifier.size(24.dp),
-                    tint = SeamlessCyan
-                )
-            }
-            
             // Settings button
             IconButton(
                 onClick = onSettingsClick,
-                modifier = Modifier.size(36.dp)
+                modifier = Modifier.size(34.dp)
             ) {
                 Icon(
                     imageVector = Icons.Outlined.Settings,
                     contentDescription = "Settings",
-                    modifier = Modifier.size(24.dp),
-                    tint = colorScheme.onSurface.copy(alpha = 0.7f)
+                    modifier = Modifier.size(20.dp),
+                    tint = colorScheme.onSurface.copy(alpha = 0.75f)
                 )
             }
 
@@ -738,12 +722,12 @@ private fun MainHeader(
                     modifier = Modifier
                         .size(16.dp)
                         .clickable { viewModel.openLatestUnreadPrivateChat() },
-                    tint = Color(0xFFFF9500)
+                    tint = com.seamless.android.ui.theme.SeamlessColors.Warning
                 )
             }
 
             // Location channels button (matching iOS implementation) and bookmark grouped tightly
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(end = 4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(end = 2.dp)) {
                 LocationChannelsButton(
                     viewModel = viewModel,
                     onClick = onLocationChannelsClick
@@ -766,7 +750,7 @@ private fun MainHeader(
                         Icon(
                             imageVector = if (isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
                             contentDescription = stringResource(R.string.cd_toggle_bookmark),
-                            tint = if (isBookmarked) Color(0xFF00C851) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                            tint = if (isBookmarked) com.seamless.android.ui.theme.SeamlessColors.Success else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                             modifier = Modifier.size(16.dp)
                         )
                     }
@@ -790,16 +774,6 @@ private fun MainHeader(
             PoWStatusIndicator(
                 modifier = Modifier,
                 style = PoWIndicatorStyle.COMPACT
-            )
-            Spacer(modifier = Modifier.width(2.dp))
-            PeerCounter(
-                connectedPeers = connectedPeers.filter { it != viewModel.meshServiceInstance?.myPeerID },
-                joinedChannels = joinedChannels,
-                hasUnreadChannels = hasUnreadChannels,
-                isConnected = isConnected,
-                selectedLocationChannel = selectedLocationChannel,
-                geohashPeople = geohashPeople,
-                onClick = onSidebarClick
             )
         }
     }

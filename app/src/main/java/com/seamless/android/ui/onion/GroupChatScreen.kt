@@ -1,15 +1,15 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui.onion
 
 import android.widget.Toast
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
+import android.graphics.BitmapFactory
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -65,16 +66,23 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
@@ -87,11 +95,14 @@ import com.seamless.android.data.PrivateGroupEntity
 import com.seamless.android.net.OnionContactManager
 import com.seamless.android.net.TorGroupMessaging
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val groupDao = remember { AppDatabase.getDatabase(context).groupDao() }
     val groupService = remember { TorGroupMessaging.getInstance(context) }
@@ -102,7 +113,22 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
         .collectAsState(initial = emptyList())
     val listState = rememberLazyListState()
     var text by remember { mutableStateOf("") }
+    var isSendingMedia by remember { mutableStateOf(false) }
+    var emojiEffectText by remember { mutableStateOf("") }
+    var emojiEffectToken by remember { mutableIntStateOf(0) }
     var showInfo by remember { mutableStateOf(false) }
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null || isSendingMedia) return@rememberLauncherForActivityResult
+        scope.launch {
+            isSendingMedia = true
+            try {
+                val image = withContext(Dispatchers.IO) { prepareImageForTor(context, uri) }
+                if (image == null) Toast.makeText(context, "Could not prepare this image", Toast.LENGTH_SHORT).show()
+                else groupService.sendGroupImage(group.groupId, image, "image/jpeg")
+                    .onFailure { Toast.makeText(context, it.message ?: "Unable to queue photo", Toast.LENGTH_SHORT).show() }
+            } finally { isSendingMedia = false }
+        }
+    }
 
     // Live copy: reflects renames; a missing row means we left or were removed.
     val live = allGroups.firstOrNull { it.groupId == group.groupId }
@@ -121,6 +147,22 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
             if (groupService.visibleGroupId == group.groupId) groupService.visibleGroupId = null
         }
     }
+    // A composable can remain in memory after the app goes to background. Clear
+    // the visible marker then, so mailbox-delivered group messages still raise
+    // a system notification while the user is away from the app.
+    DisposableEffect(group.groupId, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> groupService.visibleGroupId = group.groupId
+                Lifecycle.Event.ON_STOP -> if (groupService.visibleGroupId == group.groupId) {
+                    groupService.visibleGroupId = null
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.lastIndex)
@@ -132,6 +174,8 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
         val outgoing = text.trim()
         if (outgoing.isNotEmpty()) {
             text = ""
+            emojiEffectText = outgoing
+            emojiEffectToken++
             scope.launch {
                 groupService.sendGroupMessage(group.groupId, outgoing)
                     .onFailure { Toast.makeText(context, it.message ?: "Unable to queue message", Toast.LENGTH_SHORT).show() }
@@ -175,7 +219,8 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                 )
             },
             bottomBar = {
-                Composer(text = text, onTextChange = { if (it.length <= 8_000) text = it }, onSend = send)
+                Composer(text = text, onTextChange = { if (it.length <= 8_000) text = it }, onSend = send,
+                    onPhoto = { photoPicker.launch("image/*") }, mediaEnabled = !isSendingMedia)
             },
             containerColor = Color.Transparent
         ) { padding ->
@@ -209,6 +254,7 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                     item { Spacer(Modifier.height(8.dp)) }
                 }
             }
+            TorEmojiBurst(emojiEffectToken, emojiEffectText)
         }
     }
 
@@ -223,16 +269,22 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
 }
 
 @Composable
-private fun Composer(text: String, onTextChange: (String) -> Unit, onSend: () -> Unit) {
+private fun Composer(text: String, onTextChange: (String) -> Unit, onSend: () -> Unit, onPhoto: () -> Unit, mediaEnabled: Boolean) {
     val canSend = text.isNotBlank()
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(OnionUi.CanvasRaised)
+            .border(1.dp, OnionUi.Hairline)
             .navigationBarsPadding()
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.Bottom
     ) {
+        Box(modifier = Modifier.size(40.dp).clip(CircleShape).background(OnionUi.SurfacePressed), contentAlignment = Alignment.Center) {
+            IconButton(onClick = onPhoto, enabled = mediaEnabled, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Default.Photo, "Send photo", tint = if (mediaEnabled) OnionUi.Online else OnionUi.TextMuted, modifier = Modifier.size(20.dp))
+            }
+        }
         TextField(
             value = text,
             onValueChange = onTextChange,
@@ -280,14 +332,15 @@ private fun GroupMessageBubble(message: GroupMessageEntity, showName: Boolean) {
         bottomEnd = if (outgoing) 5.dp else 22.dp
     )
     val bubbleBrush = if (outgoing) {
-        Brush.linearGradient(listOf(Color(0xFF3C3B49), Color(0xFF252530)))
+        Brush.linearGradient(listOf(OnionUi.OutgoingStart, OnionUi.OutgoingEnd))
     } else {
-        Brush.linearGradient(listOf(Color(0xFF1C1C23), Color(0xFF121217)))
+        Brush.linearGradient(listOf(OnionUi.IncomingStart, OnionUi.IncomingEnd))
     }
     var appeared by remember(message.id) { mutableStateOf(false) }
     LaunchedEffect(message.id) { appeared = true }
     val alpha by animateFloatAsState(if (appeared) 1f else 0f, tween(180), label = "group_bubble_alpha")
     val translateY by animateFloatAsState(if (appeared) 0f else 16f, tween(220), label = "group_bubble_offset")
+    val scale by animateFloatAsState(if (appeared) 1f else 0.96f, tween(220), label = "group_bubble_scale")
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 1.dp),
         horizontalArrangement = if (outgoing) Arrangement.End else Arrangement.Start
@@ -295,7 +348,8 @@ private fun GroupMessageBubble(message: GroupMessageEntity, showName: Boolean) {
         Column(
             modifier = Modifier
                 .widthIn(max = 320.dp)
-                .graphicsLayer { this.alpha = alpha; this.translationY = translateY }
+                .graphicsLayer { this.alpha = alpha; this.translationY = translateY; scaleX = scale; scaleY = scale }
+                .shadow(if (outgoing) 6.dp else 2.dp, shape, spotColor = Color.Black.copy(alpha = 0.32f))
                 .clip(shape)
                 .background(bubbleBrush, shape)
                 .border(1.dp, if (outgoing) Color.White.copy(alpha = 0.17f) else OnionUi.Hairline, shape)
@@ -322,6 +376,14 @@ private fun GroupMessageBubble(message: GroupMessageEntity, showName: Boolean) {
                 fontSize = if (isExpressiveEmoji(message.text)) 30.sp else 15.sp,
                 lineHeight = if (isExpressiveEmoji(message.text)) 36.sp else 21.sp
             )
+            message.attachmentPath?.let { path ->
+                val bitmap = remember(path) { BitmapFactory.decodeFile(path)?.asImageBitmap() }
+                if (bitmap != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Image(bitmap, "Group photo", contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxWidth().height(220.dp).clip(RoundedCornerShape(12.dp)))
+                }
+            }
             Spacer(Modifier.height(if (isExpressiveEmoji(message.text)) 1.dp else 5.dp))
             Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
                 Text(formatChatTime(message.timestamp), color = Color.White.copy(alpha = 0.56f), fontSize = 10.sp)

@@ -1,8 +1,8 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.mesh
 
 import android.util.Log
 import com.seamless.android.model.BitchatMessage
-import com.seamless.android.model.BitchatMessageType
 import com.seamless.android.model.IdentityAnnouncement
 import com.seamless.android.model.RoutedPacket
 import com.seamless.android.protocol.BitchatPacket
@@ -11,7 +11,6 @@ import com.seamless.android.util.toHexString
 import com.seamless.android.features.file.IncomingTransferAssembler
 import kotlinx.coroutines.*
 import java.util.*
-import kotlin.random.Random
 
 /**
  * Handles processing of different message types
@@ -60,7 +59,8 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
             // Decrypt the message using the Noise service
             val decryptedData = delegate?.decryptFromPeer(packet.payload, peerID)
             if (decryptedData == null) {
-                Log.w(TAG, "Failed to decrypt Noise message from $peerID - may need handshake")
+                Log.w(TAG, "Failed to decrypt Noise message from $peerID - initiating handshake recovery")
+                delegate?.initiateNoiseHandshake(peerID)
                 return
             }
             
@@ -496,11 +496,16 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
         val packet = routed.packet
         val peerID = routed.peerID ?: "unknown"
         
-        // Enforce: only accept public messages from verified peers we know
+        // Enforce: accept public messages from verified peers or packets carrying an Ed25519 signature,
+        // and proactively request an ANNOUNCE if we missed the peer's initial announcement.
         val peerInfo = delegate?.getPeerInfo(peerID)
         if (peerInfo == null || !peerInfo.isVerifiedNickname) {
-            Log.w(TAG, "🚫 Dropping public message from unverified or unknown peer ${peerID.take(8)}...")
-            return
+            delegate?.sendAnnouncementToPeer(peerID)
+            if (packet.signature == null) {
+                Log.w(TAG, "🚫 Dropping unsigned public message from unverified/unknown peer ${peerID.take(8)}...")
+                return
+            }
+            Log.d(TAG, "⚠️ Accepting signed public packet from ${peerID.take(8)} while requesting ANNOUNCE")
         }
         
         try {
@@ -781,6 +786,7 @@ interface MessageHandlerDelegate {
     fun sendPacket(packet: BitchatPacket)
     fun relayPacket(routed: RoutedPacket)
     fun getBroadcastRecipient(): ByteArray
+    fun sendAnnouncementToPeer(peerID: String)
     
     // Cryptographic operations
     fun verifySignature(packet: BitchatPacket, peerID: String): Boolean

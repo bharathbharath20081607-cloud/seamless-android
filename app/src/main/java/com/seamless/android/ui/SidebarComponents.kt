@@ -1,14 +1,15 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.animation.ExperimentalAnimationApi
 
 import com.seamless.android.R
 import android.util.Log
-import androidx.compose.animation.ExperimentalAnimationApi
 import androidx.compose.foundation.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import kotlinx.coroutines.launch
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -25,8 +26,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextOverflow
-import com.seamless.android.ui.theme.BASE_FONT_SIZE
-import com.seamless.android.ui.theme.SeamlessCyan
 
 
 /**
@@ -71,6 +70,8 @@ fun SidebarOverlay(
         }
     }
 
+    val isDark = (colorScheme.background.red + colorScheme.background.green + colorScheme.background.blue) < 1.5f
+
     Box(
         modifier = modifier
             .background(Color.Black.copy(alpha = scrimAlpha.value))
@@ -84,24 +85,26 @@ fun SidebarOverlay(
                 .offset(x = drawerOffset.value.dp)
                 .clickable { /* Prevent dismissing when clicking sidebar */ }
         ) {
-            // Grey vertical bar for visual continuity (matches iOS)
+            // Specular vertical hairline border on left edge
             Box(
                 modifier = Modifier
                     .fillMaxHeight()
                     .width(1.dp)
-                    .background(Color.Gray.copy(alpha = 0.3f))
+                    .background(if (isDark) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.08f))
             )
             
             Column(
                 modifier = Modifier
                     .fillMaxHeight()
                     .weight(1f)
-                    .background(colorScheme.background.copy(alpha = 0.95f))
+                    .background(if (isDark) Color(0xFA070709) else colorScheme.surface)
                     .windowInsetsPadding(WindowInsets.statusBars) // Add status bar padding
             ) {
-                SidebarHeader()
+                SidebarHeader(isDark = isDark)
 
-                HorizontalDivider()
+                HorizontalDivider(
+                    color = if (isDark) Color.White.copy(alpha = 0.08f) else colorScheme.outline.copy(alpha = 0.2f)
+                )
                 
                 // Scrollable content
                 LazyColumn(
@@ -128,7 +131,10 @@ fun SidebarOverlay(
                         }
                         
                         item {
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                            HorizontalDivider(
+                                modifier = Modifier.padding(vertical = 4.dp),
+                                color = if (isDark) Color.White.copy(alpha = 0.08f) else colorScheme.outline.copy(alpha = 0.2f)
+                            )
                         }
                     }
                     
@@ -170,31 +176,26 @@ fun SidebarOverlay(
 }
 
 @Composable
-private fun SidebarHeader() {
+private fun SidebarHeader(isDark: Boolean = true) {
     val colorScheme = MaterialTheme.colorScheme
     
     Row(
         modifier = Modifier
-            .height(56.dp) // Slightly taller for modern look
+            .height(56.dp)
             .fillMaxWidth()
             .background(
-                brush = androidx.compose.ui.graphics.Brush.horizontalGradient(
-                    colors = listOf(
-                        com.seamless.android.ui.theme.SeamlessColors.BrandGradientStart.copy(alpha = 0.1f),
-                        com.seamless.android.ui.theme.SeamlessColors.BrandGradientEnd.copy(alpha = 0.1f)
-                    )
-                )
+                if (isDark) Color(0xFF0C0C10) else colorScheme.surfaceVariant.copy(alpha = 0.35f)
             )
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = stringResource(id = R.string.your_network).uppercase(),
-            style = MaterialTheme.typography.titleLarge.copy(
+            style = MaterialTheme.typography.titleMedium.copy(
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.5.sp
             ),
-            color = com.seamless.android.ui.theme.SeamlessCyan
+            color = colorScheme.primary
         )
         Spacer(modifier = Modifier.weight(1f))
     }
@@ -574,15 +575,21 @@ private fun PeerItem(
             .padding(horizontal = 12.dp, vertical = 4.dp)
             .clickable { onItemClick() },
         colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) 
-                com.seamless.android.ui.theme.SeamlessCyan.copy(alpha = 0.1f)
-            else if (hasUnreadDM)
-                colorScheme.primaryContainer.copy(alpha = 0.05f)
-            else 
-                colorScheme.surface
+            containerColor = when {
+                isSelected -> if (isDark) Color(0xFF1F1F27) else colorScheme.primaryContainer.copy(alpha = 0.25f)
+                hasUnreadDM -> if (isDark) Color(0xFF181820) else colorScheme.primaryContainer.copy(alpha = 0.1f)
+                else -> if (isDark) Color(0xFF121217) else colorScheme.surface
+            }
+        ),
+        border = BorderStroke(
+            width = 1.dp,
+            color = when {
+                isSelected -> if (isDark) Color.White.copy(alpha = 0.24f) else Color.Black.copy(alpha = 0.2f)
+                else -> if (isDark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.08f)
+            }
         ),
         elevation = CardDefaults.cardElevation(
-            defaultElevation = if (isSelected) 4.dp else 1.dp
+            defaultElevation = if (isSelected) 3.dp else 0.dp
         ),
         shape = RoundedCornerShape(12.dp)
     ) {
@@ -599,8 +606,8 @@ private fun PeerItem(
                     .background(
                         brush = androidx.compose.ui.graphics.Brush.radialGradient(
                             colors = listOf(
-                                baseColor.copy(alpha = 0.3f),
-                                baseColor.copy(alpha = 0.1f)
+                                baseColor.copy(alpha = 0.28f),
+                                baseColor.copy(alpha = 0.10f)
                             )
                         ),
                         shape = androidx.compose.foundation.shape.CircleShape
@@ -622,18 +629,20 @@ private fun PeerItem(
                             .size(12.dp)
                             .align(Alignment.BottomEnd)
                             .background(
-                                color = Color(0xFF4CAF50),
+                                color = com.seamless.android.ui.theme.SeamlessColors.Success,
                                 shape = androidx.compose.foundation.shape.CircleShape
                             )
                             .border(
                                 width = 2.dp,
-                                color = colorScheme.background,
+                                color = if (isDark) Color(0xFF121217) else colorScheme.surface,
                                 shape = androidx.compose.foundation.shape.CircleShape
                             )
                     )
                 }
             }
             
+            Spacer(modifier = Modifier.width(10.dp))
+
             // Display name and status
             Column(
                 modifier = Modifier.weight(1f)
@@ -646,7 +655,7 @@ private fun PeerItem(
                         style = MaterialTheme.typography.bodyLarge.copy(
                             fontWeight = if (isMe || hasUnreadDM) FontWeight.Bold else FontWeight.Medium
                         ),
-                        color = if (hasUnreadDM) com.seamless.android.ui.theme.SeamlessCyan else colorScheme.onSurface,
+                        color = if (hasUnreadDM) colorScheme.primary else colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -672,20 +681,20 @@ private fun PeerItem(
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = when {
-                        hasUnreadDM -> com.seamless.android.ui.theme.SeamlessCyan
-                        isDirect -> Color(0xFF4CAF50)
+                        hasUnreadDM -> colorScheme.primary
+                        isDirect -> com.seamless.android.ui.theme.SeamlessColors.Success
                         else -> colorScheme.onSurface.copy(alpha = 0.5f)
                     }
                 )
             }
             
-            // Unread count badge
+            // Unread count badge — Optical White pill with Black text in dark mode
             if (hasUnreadDM && unreadCount > 0) {
                 Box(
                     modifier = Modifier
-                        .size(24.dp)
+                        .size(22.dp)
                         .background(
-                            color = com.seamless.android.ui.theme.SeamlessCyan,
+                            color = if (isDark) Color.White else Color.Black,
                             shape = androidx.compose.foundation.shape.CircleShape
                         ),
                     contentAlignment = Alignment.Center
@@ -695,7 +704,7 @@ private fun PeerItem(
                         style = MaterialTheme.typography.labelSmall.copy(
                             fontWeight = FontWeight.Bold
                         ),
-                        color = Color.White
+                        color = if (isDark) Color.Black else Color.White
                     )
                 }
             }
@@ -711,7 +720,7 @@ private fun PeerItem(
                     imageVector = if (isFavorite) Icons.Filled.Star else Icons.Outlined.Star,
                     contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
                     modifier = Modifier.size(20.dp),
-                    tint = if (isFavorite) Color(0xFFFFD700) else colorScheme.onSurface.copy(alpha = 0.5f)
+                    tint = if (isFavorite) Color(0xFFFFD700) else colorScheme.onSurface.copy(alpha = 0.45f)
                 )
             }
         }

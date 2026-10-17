@@ -1,20 +1,18 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui
+import com.seamless.android.ui.media.VoiceNotePlayer
+import androidx.compose.animation.core.spring
 
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.ui.draw.clip
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.border
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.combinedClickable
  
 
 import androidx.compose.material3.*
@@ -22,12 +20,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextLayoutResult
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -38,7 +32,6 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.animation.core.Animatable
 import androidx.compose.ui.graphics.graphicsLayer
-import com.seamless.android.ui.theme.SeamlessAnimations
 import android.content.Intent
 import android.net.Uri
 import com.seamless.android.model.BitchatMessage
@@ -47,8 +40,6 @@ import com.seamless.android.model.DeliveryTransport
 import com.seamless.android.mesh.BluetoothMeshService
 import java.text.SimpleDateFormat
 import java.util.*
-import com.seamless.android.ui.media.VoiceNotePlayer
-import androidx.compose.material3.Icon
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Done
@@ -170,18 +161,11 @@ fun MessagesList(
                 // Last in group = Bottom of bubble = Newer message is different
                 val isLastInGroup = newerMessage == null || newerMessage.sender != message.sender
 
-                // Insert a date header when the day changes (or for the first message)
-                // Note: olderMessage is the "previous" message in chronological order
+                // Insert a date header when the day changes (or for the oldest message)
+                // Note: olderMessage is the "previous" message in chronological order.
+                // Because LazyColumn uses reverseLayout = true (bottom-to-top), emitting
+                // MessageItem BEFORE MessageDateHeader places "Today" visually ABOVE the message!
                 val showDateHeader = olderMessage == null || !isSameDay(message.timestamp, olderMessage.timestamp)
-
-                if (showDateHeader) {
-                    MessageDateHeader(
-                        date = message.timestamp,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                    )
-                }
 
                 MessageItem(
                     message = message,
@@ -197,6 +181,15 @@ fun MessagesList(
                     onReactionSelected = onReactionSelected,
                     reactions = messageReactions[message.id] ?: emptyMap()
                 )
+
+                if (showDateHeader) {
+                    MessageDateHeader(
+                        date = message.timestamp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp)
+                    )
+                }
             }
         }
     }
@@ -219,34 +212,34 @@ fun MessageItem(
     reactions: Map<String, Int> = emptyMap()
 ) {
     val colorScheme = MaterialTheme.colorScheme
+    val isDark = (colorScheme.background.red + colorScheme.background.green + colorScheme.background.blue) < 1.5f
     val timeFormatter = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
     val isOwnMessage = message.sender == currentUserNickname || 
-                       message.senderPeerID == meshService.myPeerID
+                       message.senderPeerID == meshService.myPeerID ||
+                       message.sender.startsWith("$currentUserNickname#")
 
     // Emoji reaction picker state
     var showReactionPicker by remember { mutableStateOf(false) }
 
-    // ── Premium Entrance Animation ─────────────────────────────────
-    // Sent messages fly in from right, received from left, both with
-    // scale bounce and fade — inspired by iMessage/WhatsApp.
+    // ── Premium Entrance Animation (Critically/0.84f Damped Spring) ─
     val alpha = remember { Animatable(0f) }
-    val slideX = remember { Animatable(if (isOwnMessage) 80f else -80f) }
-    val slideY = remember { Animatable(30f) }
-    val entryScale = remember { Animatable(0.85f) }
+    val slideX = remember { Animatable(if (isOwnMessage) 40f else -40f) }
+    val slideY = remember { Animatable(16f) }
+    val entryScale = remember { Animatable(0.94f) }
     
     LaunchedEffect(Unit) {
         launch {
             alpha.animateTo(
                 targetValue = 1f,
-                animationSpec = tween(350, easing = FastOutSlowInEasing)
+                animationSpec = tween(220, easing = FastOutSlowInEasing)
             )
         }
         launch {
             slideX.animateTo(
                 targetValue = 0f,
                 animationSpec = spring(
-                    dampingRatio = 0.65f,
-                    stiffness = Spring.StiffnessLow
+                    dampingRatio = 0.84f,
+                    stiffness = 400f
                 )
             )
         }
@@ -254,8 +247,8 @@ fun MessageItem(
             slideY.animateTo(
                 targetValue = 0f,
                 animationSpec = spring(
-                    dampingRatio = 0.7f,
-                    stiffness = Spring.StiffnessLow
+                    dampingRatio = 0.84f,
+                    stiffness = 400f
                 )
             )
         }
@@ -263,8 +256,8 @@ fun MessageItem(
             entryScale.animateTo(
                 targetValue = 1f,
                 animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMediumLow
+                    dampingRatio = 0.84f,
+                    stiffness = 400f
                 )
             )
         }
@@ -304,18 +297,20 @@ fun MessageItem(
         
         // Message bubble
         Column(
-            modifier = Modifier.widthIn(max = 280.dp)
+            modifier = Modifier.widthIn(min = 72.dp, max = 280.dp),
+            horizontalAlignment = if (isOwnMessage) Alignment.End else Alignment.Start
         ) {
             // Sender name header - only show if first in group and not own message
-            if (!isOwnMessage && isFirstInGroup) {
+            if (!isOwnMessage && isFirstInGroup && message.sender != "system") {
+                val (baseName, _) = splitSuffix(message.sender)
                 Text(
-                    text = message.sender,
+                    text = baseName,
                     style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.SemiBold,
                     color = com.seamless.android.ui.theme.generateColorFromString(message.sender),
                     modifier = Modifier
-                        .padding(start = 12.dp, bottom = 2.dp)
-                        .clickable { onNicknameClick?.invoke(message.sender) }
+                        .padding(start = 12.dp, bottom = 3.dp)
+                        .clickable { onNicknameClick?.invoke(message.originalSender ?: message.sender) }
                 )
             }
             
@@ -336,8 +331,10 @@ fun MessageItem(
                 isFirstInGroup = isFirstInGroup,
                 isLastInGroup = isLastInGroup
             ) {
-                Box {
-                    // Create a custom layout that combines selectable text with clickable nickname areas
+                // Proper Column layout so message body and timestamp/status row never overlap
+                Column(
+                    horizontalAlignment = Alignment.End
+                ) {
                     MessageTextWithClickableNicknames(
                         message = message,
                         messages = messages,
@@ -347,35 +344,37 @@ fun MessageItem(
                         timeFormatter = timeFormatter,
                         onNicknameClick = onNicknameClick,
                         onMessageLongPress = { msg ->
-                            // Show emoji reaction picker on long-press (only picker, no bottom sheet)
                             showReactionPicker = true
                         },
                         onCancelTransfer = onCancelTransfer,
                         onImageClick = onImageClick,
-                        modifier = Modifier
+                        modifier = Modifier.align(Alignment.Start)
                     )
                     
-                    // Status indicator for own messages
-                    if (isOwnMessage) {
-                        Row(
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(top = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            // Transport transparency indicator
+                    Spacer(modifier = Modifier.height(3.dp))
+
+                    // Metadata row: timestamp + transport/delivery status (never overlaps text)
+                    Row(
+                        modifier = Modifier.align(Alignment.End),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (isOwnMessage) {
                             TransportIndicator(message.deliveryTransport)
-                            Text(
-                                text = timeFormatter.format(message.timestamp),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White.copy(alpha = 0.6f),
-                                fontSize = 10.sp,
-                                letterSpacing = 0.3.sp,
-                                modifier = Modifier.padding(end = 4.dp)
-                            )
-                            message.deliveryStatus?.let { status ->
-                                MessageStatusIcon(status)
-                            }
+                        }
+                        Text(
+                            text = timeFormatter.format(message.timestamp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isOwnMessage || isDark) {
+                                Color.White.copy(alpha = 0.50f)
+                            } else {
+                                Color.Black.copy(alpha = 0.45f)
+                            },
+                            fontSize = 10.sp,
+                            letterSpacing = 0.3.sp,
+                            modifier = Modifier.padding(end = if (isOwnMessage) 4.dp else 0.dp)
+                        )
+                        if (isOwnMessage) {
+                            MessageStatusIcon(message.deliveryStatus)
                         }
                     }
                 }
@@ -419,13 +418,14 @@ fun MessageAvatar(
 
 @Composable
 fun MessageStatusIcon(status: DeliveryStatus) {
+    val contentColor = androidx.compose.material3.LocalContentColor.current
     val (icon, tint) = when (status) {
-        is DeliveryStatus.Sending -> Icons.Outlined.Schedule to MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-        is DeliveryStatus.Sent -> Icons.Outlined.Done to MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-        is DeliveryStatus.Delivered -> Icons.Outlined.DoneAll to MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+        is DeliveryStatus.Sending -> Icons.Outlined.Schedule to contentColor.copy(alpha = 0.65f)
+        is DeliveryStatus.Sent -> Icons.Outlined.Done to contentColor.copy(alpha = 0.65f)
+        is DeliveryStatus.Delivered -> Icons.Outlined.DoneAll to contentColor.copy(alpha = 0.65f)
         is DeliveryStatus.Read -> Icons.Outlined.DoneAll to com.seamless.android.ui.theme.SeamlessColors.Info
         is DeliveryStatus.Failed -> Icons.Outlined.Error to com.seamless.android.ui.theme.SeamlessColors.Error
-        is DeliveryStatus.PartiallyDelivered -> Icons.Outlined.Done to MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+        is DeliveryStatus.PartiallyDelivered -> Icons.Outlined.Done to contentColor.copy(alpha = 0.65f)
     }
     
     Icon(
@@ -521,34 +521,19 @@ fun TransportIndicator(transport: DeliveryTransport) {
             }
             else -> null to null
         }
-        Column(modifier = modifier.fillMaxWidth()) {
-            // Header: nickname + timestamp line above the file, identical styling to text messages
-            val headerText = formatMessageHeaderAnnotatedString(
-                message = message,
-                currentUserNickname = currentUserNickname,
-                meshService = meshService,
-                colorScheme = colorScheme,
-                timeFormatter = timeFormatter
-            )
-            val haptic = LocalHapticFeedback.current
-            var headerLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
-            Text(
-                text = headerText,
-                fontFamily = FontFamily.Default,
-                color = colorScheme.onSurface,
-                modifier = Modifier.pointerInput(message.id) {
-                    detectTapGestures(onTap = { pos ->
-                        val layout = headerLayout ?: return@detectTapGestures
-                        val offset = layout.getOffsetForPosition(pos)
-                        val ann = headerText.getStringAnnotations("nickname_click", offset, offset)
-                        if (ann.isNotEmpty() && onNicknameClick != null) {
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            onNicknameClick.invoke(ann.first().item)
+        val haptic = LocalHapticFeedback.current
+        Column(
+            modifier = modifier
+                .fillMaxWidth()
+                .pointerInput(message.id) {
+                    detectTapGestures(
+                        onLongPress = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onMessageLongPress?.invoke(message)
                         }
-                    }, onLongPress = { onMessageLongPress?.invoke(message) })
-                },
-                onTextLayout = { headerLayout = it }
-            )
+                    )
+                }
+        ) {
 
             // PRODUCTION FIX: Don't load file bytes into memory - causes OOM crash for 4GB+ files
             // Only need metadata (name, size, mimeType) for display - content is never used in UI

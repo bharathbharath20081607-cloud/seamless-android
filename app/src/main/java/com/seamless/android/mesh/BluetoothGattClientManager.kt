@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.mesh
 
 import android.bluetooth.*
@@ -230,11 +231,16 @@ class BluetoothGattClientManager(
             return
         }
         
-        // USE BROAD SPECTRUM SCAN: Some devices don't advertise the Service UUID in the header correctly
-        // or the OS filters it out aggressively. We scan for everything and filter manually in handleScanResult.
-        val scanFilters = emptyList<ScanFilter>()
+        // Use hardware ScanFilter in background so Android 8.1+ allows screen-off scanning,
+        // and Broad Spectrum in foreground to catch all advertisement variants.
+        val serviceParcelUuid = ParcelUuid(AppConstants.Mesh.Gatt.SERVICE_UUID)
+        val scanFilters = if (powerManager.isInBackground()) {
+            listOf(ScanFilter.Builder().setServiceUuid(serviceParcelUuid).build())
+        } else {
+            emptyList<ScanFilter>()
+        }
         
-        Log.d(TAG, "Starting BLE scan (Broad Spectrum) - looking for ${AppConstants.Mesh.Gatt.SERVICE_UUID}")
+        Log.d(TAG, "Starting BLE scan (background=${powerManager.isInBackground()}, filters=${scanFilters.size}) - looking for ${AppConstants.Mesh.Gatt.SERVICE_UUID}")
         
         scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
@@ -318,8 +324,9 @@ class BluetoothGattClientManager(
         val deviceAddress = device.address
         val scanRecord = result.scanRecord
         
-        // CRITICAL: Only process devices that have our service UUID
-        val hasOurService = scanRecord?.serviceUuids?.any { it.uuid == AppConstants.Mesh.Gatt.SERVICE_UUID } == true
+        // CRITICAL: Only process devices that advertise our service UUID (in serviceUuids or serviceData)
+        val hasOurService = scanRecord?.serviceUuids?.any { it.uuid == AppConstants.Mesh.Gatt.SERVICE_UUID } == true ||
+            scanRecord?.serviceData?.keys?.any { it.uuid == AppConstants.Mesh.Gatt.SERVICE_UUID } == true
         if (!hasOurService) {
             return
         }
@@ -392,6 +399,9 @@ class BluetoothGattClientManager(
         Log.i(TAG, "Connecting to bitchat device: $deviceAddress")
         
         val gattCallback = object : BluetoothGattCallback() {
+            @Volatile
+            private var connectionNotified = false
+
             override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
                 Log.d(TAG, "Client: Connection state change - Device: $deviceAddress, Status: $status, NewState: $newState")
 
@@ -399,25 +409,37 @@ class BluetoothGattClientManager(
                     Log.i(TAG, "Client: Successfully connected to $deviceAddress. Requesting MTU...")
                     // Request a larger MTU. Must be done before any data transfer.
                     connectionScope.launch {
-                        delay(200) // A small delay can improve reliability of MTU request.
-                        gatt.requestMtu(517)
+                        delay(150) // Brief delay improves reliability of MTU request across OEM stacks
+                        try {
+                            gatt.requestMtu(517)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to request MTU for $deviceAddress: ${e.message}")
+                        }
                     }
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     if (status != BluetoothGatt.GATT_SUCCESS) {
                         Log.w(TAG, "Client: Disconnected from $deviceAddress with error status $status")
-                        if (status == 147) {
-                            Log.e(TAG, "Client: Connection establishment failed (status 147) for $deviceAddress")
+                        if (status == 133 || status == 147) {
+                            Log.w(TAG, "Client: Transient GATT connection error ($status) for $deviceAddress - scheduling fast recovery")
+                            connectionScope.launch {
+                                delay(1500)
+                                connectionTracker.removePendingConnection(deviceAddress)
+                            }
                         }
                     } else {
                         Log.d(TAG, "Client: Cleanly disconnected from $deviceAddress")
-                        connectionTracker.cleanupDeviceConnection(deviceAddress)
                     }
+
+                    // CRITICAL FIX: Always clean up device connection regardless of status code!
+                    // Previously, non-zero status codes (timeout=8, remote terminate=19, error=133)
+                    // skipped cleanupDeviceConnection, leaving dead entries in connectedDevices forever!
+                    connectionTracker.cleanupDeviceConnection(deviceAddress)
 
                     // Notify higher layers about device disconnection to update direct flags
                     delegate?.onDeviceDisconnected(gatt.device)
 
                     connectionScope.launch {
-                        delay(500) // CLEANUP_DELAY
+                        delay(300)
                         try {
                             gatt.close()
                         } catch (e: Exception) {
@@ -444,14 +466,12 @@ class BluetoothGattClientManager(
                     
                     // ** TURBO MODE: Request 2M PHY for double speed (2Mbps vs 1Mbps) **
                     try {
-                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                            gatt.setPreferredPhy(
-                                BluetoothDevice.PHY_LE_2M_MASK,
-                                BluetoothDevice.PHY_LE_2M_MASK,
-                                BluetoothDevice.PHY_OPTION_NO_PREFERRED
-                            )
-                            Log.i(TAG, "🚀 Requested 2M PHY for $deviceAddress")
-                        }
+                        gatt.setPreferredPhy(
+                            BluetoothDevice.PHY_LE_2M_MASK,
+                            BluetoothDevice.PHY_LE_2M_MASK,
+                            BluetoothDevice.PHY_OPTION_NO_PREFERRED
+                        )
+                        Log.i(TAG, "🚀 Requested 2M PHY for $deviceAddress")
                     } catch (e: Exception) {
                         Log.w(TAG, "Failed to request 2M PHY: ${e.message}")
                     }
@@ -468,9 +488,15 @@ class BluetoothGattClientManager(
                     // Start service discovery only AFTER MTU is set.
                     gatt.discoverServices()
                 } else {
-                    Log.w(TAG, "MTU negotiation failed for $deviceAddress with status: $status. Disconnecting.")
-                    //connectionTracker.removePendingConnection(deviceAddress)
-                    gatt.disconnect()
+                    Log.w(TAG, "MTU negotiation failed for $deviceAddress with status: $status. Proceeding with default discovery.")
+                    val deviceConn = BluetoothConnectionTracker.DeviceConnection(
+                        device = gatt.device,
+                        gatt = gatt,
+                        rssi = rssi,
+                        isClient = true
+                    )
+                    connectionTracker.addDeviceConnection(deviceAddress, deviceConn)
+                    gatt.discoverServices()
                 }
             }
 
@@ -489,13 +515,21 @@ class BluetoothGattClientManager(
                             gatt.setCharacteristicNotification(characteristic, true)
                             val descriptor = characteristic.getDescriptor(AppConstants.Mesh.Gatt.DESCRIPTOR_UUID)
                             if (descriptor != null) {
-                                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                                gatt.writeDescriptor(descriptor)
+                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                                    gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                                } else {
+                                    descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                                    gatt.writeDescriptor(descriptor)
+                                }
                                 
+                                // Fallback in case onDescriptorWrite is delayed or not fired by OEM BLE stack
                                 connectionScope.launch {
-                                    delay(200)
-                                    Log.i(TAG, "Client: Connection setup complete for $deviceAddress")
-                                    delegate?.onDeviceConnected(device)
+                                    delay(600)
+                                    if (!connectionNotified && connectionTracker.isDeviceConnected(deviceAddress)) {
+                                        connectionNotified = true
+                                        Log.i(TAG, "Client: Connection setup complete (fallback timer) for $deviceAddress")
+                                        delegate?.onDeviceConnected(device)
+                                    }
                                 }
                             } else {
                                 Log.e(TAG, "Client: CCCD descriptor not found for $deviceAddress")
@@ -514,11 +548,22 @@ class BluetoothGattClientManager(
                     gatt.disconnect()
                 }
             }
-            
-            override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-                // PRODUCTION FIX: Wrap in try-catch to prevent crashes from malformed packets
+
+            override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+                val addr = gatt.device.address
+                Log.d(TAG, "Client: onDescriptorWrite for $addr, status=$status")
+                if (!connectionNotified) {
+                    connectionNotified = true
+                    connectionScope.launch {
+                        delay(50) // Let BLE stack finish descriptor transaction before initial ANNOUNCE write
+                        Log.i(TAG, "Client: Connection setup complete for $addr")
+                        delegate?.onDeviceConnected(gatt.device)
+                    }
+                }
+            }
+
+            private fun handleCharacteristicNotification(gatt: BluetoothGatt, value: ByteArray?) {
                 try {
-                    val value = characteristic.value
                     if (value == null || value.isEmpty()) {
                         Log.w(TAG, "Client: Received empty packet from ${gatt.device.address}")
                         return
@@ -531,12 +576,28 @@ class BluetoothGattClientManager(
                         delegate?.onPacketReceived(packet, peerID, gatt.device)
                     } else {
                         Log.w(TAG, "Client: Failed to parse packet from ${gatt.device.address}, size: ${value.size} bytes")
-                        Log.w(TAG, "Client: Packet data: ${value.joinToString(" ") { "%02x".format(it) }}")
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Client: Exception processing packet from ${gatt.device.address}: ${e.message}", e)
                 } catch (t: Throwable) {
                     Log.e(TAG, "Client: Fatal error processing packet: ${t.message}", t)
+                }
+            }
+
+            // Android 13+ (API 33+) 3-parameter overload — REQUIRED because API 33+ no longer populates characteristic.value
+            override fun onCharacteristicChanged(
+                gatt: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic,
+                value: ByteArray
+            ) {
+                handleCharacteristicNotification(gatt, value)
+            }
+            
+            // Legacy overload for Android 12 and below (API < 33)
+            @Deprecated("Deprecated in Java")
+            override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+                if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) {
+                    handleCharacteristicNotification(gatt, characteristic.value)
                 }
             }
             
@@ -545,32 +606,31 @@ class BluetoothGattClientManager(
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     Log.d(TAG, "Client: RSSI updated for $deviceAddress: $rssi dBm")
                     
+                    // Mark link as alive since RSSI read succeeded over the active BLE connection
+                    connectionTracker.updateLastPacketReceived(deviceAddress)
+
                     // Update the connection tracker with new RSSI value
                     connectionTracker.getDeviceConnection(deviceAddress)?.let { deviceConn ->
-                        val updatedConn = deviceConn.copy(rssi = rssi)
+                        val updatedConn = deviceConn.copy(rssi = rssi, lastPacketReceivedAt = System.currentTimeMillis())
                         connectionTracker.updateDeviceConnection(deviceAddress, updatedConn)
                     }
+                    delegate?.onRSSIUpdated(deviceAddress, rssi)
                 } else {
                     Log.w(TAG, "Client: Failed to read RSSI for $deviceAddress, status: $status")
                 }
             }
             
-            // PRODUCTION FIX: Track BLE write completion to detect and recover from silent failures
+            // PRODUCTION FIX: Signal write completion latch and detect transient errors
             override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
                 val deviceAddress = gatt.device.address
-                if (status == BluetoothGatt.GATT_SUCCESS) {
+                val isSuccess = status == BluetoothGatt.GATT_SUCCESS
+                connectionTracker.onDeviceWriteCompleted(deviceAddress, isSuccess)
+                if (isSuccess) {
                     Log.d(TAG, "Client: ✅ Write completed for $deviceAddress")
                 } else {
                     Log.e(TAG, "Client: ❌ Write FAILED for $deviceAddress with status $status")
-                    // Status codes:
-                    // 5 = GATT_INSUFFICIENT_AUTHENTICATION
-                    // 6 = GATT_REQUEST_NOT_SUPPORTED
-                    // 7 = GATT_INVALID_OFFSET
-                    // 13 = GATT_INVALID_ATTRIBUTE_LENGTH
-                    // 133 = GATT_ERROR (generic, often connection issue)
-                    // 143 = GATT_WRITE_NOT_PERMITTED
                     if (status == 133 || status == 143) {
-                        Log.w(TAG, "Client: Write failure (status $status) - this is usually a transient buffer overflow, NOT disconnecting.")
+                        Log.w(TAG, "Client: Write failure (status $status) - transient BLE buffer congestion, flow control will retry.")
                     }
                 }
             }

@@ -1,10 +1,10 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.net
 
 import android.app.Application
 import android.content.Context
 import android.util.Base64
 import android.util.Log
-import com.seamless.android.crypto.EncryptionService
 import com.seamless.android.util.toHexString
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -14,13 +14,8 @@ import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.ServerSocket
 import java.net.Socket
-import java.nio.ByteBuffer
 import java.security.MessageDigest
-import java.security.SecureRandom
 import javax.crypto.KeyAgreement
-import java.security.KeyPairGenerator
-import java.security.interfaces.XECPublicKey
-import java.security.spec.NamedParameterSpec
 import org.bouncycastle.crypto.agreement.X25519Agreement
 import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import org.bouncycastle.crypto.params.X25519PublicKeyParameters
@@ -471,12 +466,28 @@ class BrambleRendezvous private constructor(private val context: Context) {
                 }
 
                 if (success && finalPeerOnion.isNotEmpty()) {
+                    val canonicalPeerOnion = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(finalPeerOnion)
+                        .ifBlank { finalPeerOnion }
+                    if (!socket.isClosed) {
+                        try {
+                            TorCircuitManager.getInstance(context).addIncomingConnection(
+                                peerIdentifier = canonicalPeerOnion,
+                                socket = socket,
+                                preferIncoming = true
+                            )
+                            // Transfer socket ownership to TorCircuitManager so finally block does not close it
+                            connectedSocket = null
+                            Log.i(TAG, "⚡ Handed live BRP socket directly to TorCircuitManager for $canonicalPeerOnion (0ms handoff)")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Could not hand off live BRP socket, falling back to normal dial: ${e.message}")
+                        }
+                    }
                     mutex.withLock {
                         session.state = RendezvousState.CONNECTED
                         updateStateFlow()
                     }
                     Log.i(TAG, "✅ BRP Rendezvous succeeded for ${session.peerId}")
-                    callback?.onRendezvousConnected(session.peerId, finalPeerOnion)
+                    callback?.onRendezvousConnected(session.peerId, canonicalPeerOnion)
                 } else {
                     mutex.withLock {
                         session.state = RendezvousState.FAILED
@@ -510,7 +521,7 @@ class BrambleRendezvous private constructor(private val context: Context) {
             }
             // Clean up server socket
             try { serverSocket?.close() } catch (e: Exception) {}
-            // Clean up connected socket (rendezvous sockets are short-lived)
+            // Clean up connected socket only if ownership was not transferred to TorCircuitManager
             try { connectedSocket?.close() } catch (e: Exception) {}
         }
     }

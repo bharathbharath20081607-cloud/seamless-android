@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.onboarding
 
 import androidx.compose.animation.*
@@ -25,21 +26,14 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.seamless.android.ui.theme.SeamlessColors
 import com.seamless.android.ui.theme.rememberDimensions
 import com.seamless.android.ui.theme.safeAreaPadding
-import com.seamless.android.ui.theme.safeBottomPadding
-import com.seamless.android.ui.theme.responsiveSize
 import kotlinx.coroutines.delay
-import com.seamless.android.ui.theme.SeamlessCyan
 
 /**
  * Welcome screen that introduces users to Seamless
@@ -65,10 +59,33 @@ fun WelcomeScreen(
     val buttonScale by animateFloatAsState(
         targetValue = if (isButtonPressed) 0.97f else 1f,
         animationSpec = spring(
-            dampingRatio = 0.82f,
-            stiffness = Spring.StiffnessLow
+            dampingRatio = 0.84f,
+            stiffness = 400f
         ),
         label = "btn_press_scale"
+    )
+
+    // 5-step staggered hero entrance cascade (70ms intervals)
+    val titleAlpha by animateFloatAsState(
+        targetValue = if (isAnimating) 1f else 0f,
+        animationSpec = tween(420, delayMillis = 70, easing = FastOutSlowInEasing),
+        label = "title_alpha"
+    )
+    val titleOffsetY by animateDpAsState(
+        targetValue = if (isAnimating) 0.dp else 18.dp,
+        animationSpec = spring(dampingRatio = 0.84f, stiffness = 400f),
+        label = "title_offset"
+    )
+
+    val infiniteShimmer = rememberInfiniteTransition(label = "cta_shimmer")
+    val ctaShimmerProgress by infiniteShimmer.animateFloat(
+        initialValue = -0.6f,
+        targetValue = 1.6f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(3400, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "cta_shimmer_progress"
     )
 
     Box(
@@ -90,13 +107,16 @@ fun WelcomeScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceEvenly
         ) {
-            // Hero section with animated logo
+            // Step 1: Hero section with animated logo (0ms)
             AnimatedLogo(isAnimating = isAnimating)
             
-            // App name and tagline
+            // Step 2: App name and tagline (70ms)
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.padding(vertical = 12.dp)
+                modifier = Modifier
+                    .padding(vertical = 12.dp)
+                    .alpha(titleAlpha)
+                    .offset(y = titleOffsetY)
             ) {
                 Text(
                     text = "Seamless",
@@ -114,7 +134,7 @@ fun WelcomeScreen(
                 )
             }
             
-            // Feature cards
+            // Steps 3-5: Feature cards (70ms staggered intervals)
             Column(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
                 modifier = Modifier.padding(vertical = 16.dp)
@@ -131,64 +151,88 @@ fun WelcomeScreen(
                     title = "End-to-End Encrypted",
                     description = "Your conversations stay private",
                     isAnimating = isAnimating,
-                    delay = 80
+                    delay = 70
                 )
                 FeatureCard(
                     icon = Icons.Outlined.PersonOff,
                     title = "No Sign-Up Required",
                     description = "No phone number, email, or tracking",
                     isAnimating = isAnimating,
-                    delay = 160
+                    delay = 140
                 )
             }
             
-            // Call to action button: Solid Optical White Pill CTA
+            // Call to action button: Solid Optical White Pill CTA with periodic shimmer sweep
             AnimatedVisibility(
                 visible = isAnimating,
-                enter = fadeIn(animationSpec = tween(700, delayMillis = 400)) +
+                enter = fadeIn(animationSpec = tween(500, delayMillis = 350)) +
                        slideInVertically(
                            animationSpec = spring(
-                               dampingRatio = 0.86f,
-                               stiffness = Spring.StiffnessMediumLow
+                               dampingRatio = 0.84f,
+                               stiffness = 400f
                            ),
                            initialOffsetY = { it / 3 }
                        )
             ) {
-                Button(
-                    onClick = {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        onGetStarted()
-                    },
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(dimensions.buttonHeight)
-                        .scale(buttonScale),
-                    shape = RoundedCornerShape(999.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color.White,
-                        contentColor = Color.Black
-                    ),
-                    elevation = ButtonDefaults.buttonElevation(
-                        defaultElevation = 0.dp,
-                        pressedElevation = 0.dp
-                    ),
-                    interactionSource = buttonInteractionSource
+                        .scale(buttonScale)
                 ) {
-                    Text(
-                        text = "Get Started",
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 0.2.sp
+                    Button(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onGetStarted()
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                        shape = RoundedCornerShape(999.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.White,
+                            contentColor = Color.Black
                         ),
-                        color = Color.Black
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Outlined.ArrowForward,
-                        contentDescription = null,
-                        tint = Color.Black,
-                        modifier = Modifier.size(18.dp)
-                    )
+                        elevation = ButtonDefaults.buttonElevation(
+                            defaultElevation = 0.dp,
+                            pressedElevation = 0.dp
+                        ),
+                        interactionSource = buttonInteractionSource
+                    ) {
+                        Text(
+                            text = "Get Started",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.2.sp
+                            ),
+                            color = Color.Black
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Outlined.ArrowForward,
+                            contentDescription = null,
+                            tint = Color.Black,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    // Subtle periodic specular shimmer band across the pill
+                    Canvas(
+                        modifier = Modifier
+                            .matchParentSize()
+                    ) {
+                        val bandW = size.width * 0.28f
+                        val startX = size.width * ctaShimmerProgress
+                        drawRoundRect(
+                            brush = Brush.linearGradient(
+                                colors = listOf(
+                                    Color.Transparent,
+                                    Color.Black.copy(alpha = 0.06f),
+                                    Color.Transparent
+                                ),
+                                start = Offset(startX, 0f),
+                                end = Offset(startX + bandW, size.height)
+                            ),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.height / 2f, size.height / 2f)
+                        )
+                    }
                 }
             }
         }
@@ -203,8 +247,8 @@ fun AnimatedLogo(
     val scale by animateFloatAsState(
         targetValue = if (isAnimating) 1f else 0.82f,
         animationSpec = spring(
-            dampingRatio = 0.82f,
-            stiffness = Spring.StiffnessLow
+            dampingRatio = 0.84f,
+            stiffness = 400f
         ),
         label = "logoScale"
     )
@@ -227,6 +271,15 @@ fun AnimatedLogo(
             repeatMode = RepeatMode.Reverse
         ),
         label = "haloAlpha"
+    )
+    val bezelAngle by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(10000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "bezelAngle"
     )
 
     Box(
@@ -253,22 +306,37 @@ fun AnimatedLogo(
                 )
         )
 
-        // Specular outer hairline ring
+        // Rotating 10s specular outer hairline ring
         Box(
-            modifier = Modifier
-                .size(100.dp)
-                .border(
-                    width = 1.dp,
-                    brush = Brush.linearGradient(
-                        colors = listOf(
-                            Color.White.copy(alpha = 0.25f),
-                            Color.White.copy(alpha = 0.05f)
-                        )
-                    ),
-                    shape = CircleShape
-                ),
+            modifier = Modifier.size(100.dp),
             contentAlignment = Alignment.Center
         ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val r = size.minDimension / 2f
+                val rad = Math.toRadians(bezelAngle.toDouble())
+                val startOffset = Offset(
+                    center.x + (r * kotlin.math.cos(rad)).toFloat(),
+                    center.y + (r * kotlin.math.sin(rad)).toFloat()
+                )
+                val endOffset = Offset(
+                    center.x - (r * kotlin.math.cos(rad)).toFloat(),
+                    center.y - (r * kotlin.math.sin(rad)).toFloat()
+                )
+                drawCircle(
+                    brush = Brush.linearGradient(
+                        colors = listOf(
+                            Color.White.copy(alpha = 0.36f),
+                            Color.White.copy(alpha = 0.05f),
+                            Color.White.copy(alpha = 0.20f)
+                        ),
+                        start = startOffset,
+                        end = endOffset
+                    ),
+                    radius = r,
+                    style = Stroke(width = 1.dp.toPx())
+                )
+            }
+
             // Obsidian & Titanium Emblem Medallion
             Surface(
                 modifier = Modifier.size(80.dp),

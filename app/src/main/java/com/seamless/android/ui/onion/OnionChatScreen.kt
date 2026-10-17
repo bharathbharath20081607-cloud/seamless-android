@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui.onion
 
 import android.graphics.Bitmap
@@ -771,9 +772,9 @@ private fun TorMessageBubble(
         bottomEnd = if (message.isFromMe) 5.dp else 22.dp
     )
     val bubbleBrush = if (message.isFromMe) {
-        Brush.linearGradient(listOf(Color(0xFF3C3B49), Color(0xFF252530)))
+        Brush.linearGradient(listOf(OnionUi.OutgoingStart, OnionUi.OutgoingEnd))
     } else {
-        Brush.linearGradient(listOf(Color(0xFF1C1C23), Color(0xFF121217)))
+        Brush.linearGradient(listOf(OnionUi.IncomingStart, OnionUi.IncomingEnd))
     }
     val bubbleOutline = if (message.isFromMe) {
         Color.White.copy(alpha = 0.17f)
@@ -784,6 +785,7 @@ private fun TorMessageBubble(
     LaunchedEffect(message.id) { appeared = true }
     val bubbleAlpha by animateFloatAsState(if (appeared) 1f else 0f, tween(180), label = "bubble_alpha")
     val bubbleOffset by animateFloatAsState(if (appeared) 0f else 18f, tween(220), label = "bubble_offset")
+    val bubbleScale by animateFloatAsState(if (appeared) 1f else 0.96f, tween(220), label = "bubble_scale")
 
     Column(
         modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
@@ -795,6 +797,8 @@ private fun TorMessageBubble(
                 .graphicsLayer {
                     alpha = bubbleAlpha
                     translationY = bubbleOffset
+                    scaleX = bubbleScale
+                    scaleY = bubbleScale
                 }
                 .shadow(
                     elevation = if (message.isFromMe) 6.dp else 2.dp,
@@ -820,7 +824,7 @@ private fun TorMessageBubble(
                         contentDescription = "Open photo",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
-                            .widthIn(max = 252.dp)
+                            .widthIn(max = 276.dp)
                             .heightIn(max = 300.dp)
                             .clip(RoundedCornerShape(12.dp))
                             .clickable { previewPath = attachment?.absolutePath }
@@ -994,7 +998,7 @@ private suspend fun savePhotoToGallery(
     }
 }
 
-private fun prepareImageForTor(context: android.content.Context, uri: Uri): ByteArray? {
+internal fun prepareImageForTor(context: android.content.Context, uri: Uri): ByteArray? {
     val source = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
     val original = BitmapFactory.decodeByteArray(source, 0, source.size) ?: return null
     val scale = minOf(1f, 1280f / maxOf(original.width, original.height).toFloat())

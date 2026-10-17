@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.mesh
 
 import android.bluetooth.le.AdvertiseSettings
@@ -85,6 +86,8 @@ class PowerManager(private val context: Context) {
         }
     }
     
+    private var isReceiverRegistered = false
+
     init {
         registerBatteryReceiver()
         updatePowerMode()
@@ -92,15 +95,20 @@ class PowerManager(private val context: Context) {
     
     fun start() {
         Log.i(TAG, "Starting power management")
+        registerBatteryReceiver()
+        updatePowerMode()
         startDutyCycle()
     }
     
     fun stop() {
         Log.i(TAG, "Stopping power management")
-        powerScope.cancel()
+        stopDutyCycle()
+        powerScope.coroutineContext.cancelChildren()
         unregisterBatteryReceiver()
     }
     
+    fun isInBackground(): Boolean = isAppInBackground
+
     fun setAppBackgroundState(inBackground: Boolean) {
         if (isAppInBackground != inBackground) {
             isAppInBackground = inBackground
@@ -303,6 +311,7 @@ class PowerManager(private val context: Context) {
     }
     
     private fun registerBatteryReceiver() {
+        if (isReceiverRegistered) return
         try {
             val filter = IntentFilter().apply {
                 addAction(Intent.ACTION_BATTERY_CHANGED)
@@ -310,14 +319,17 @@ class PowerManager(private val context: Context) {
                 addAction(Intent.ACTION_POWER_DISCONNECTED)
             }
             context.registerReceiver(batteryReceiver, filter)
+            isReceiverRegistered = true
         } catch (e: Exception) {
             Log.w(TAG, "Failed to register battery receiver: ${e.message}")
         }
     }
     
     private fun unregisterBatteryReceiver() {
+        if (!isReceiverRegistered) return
         try {
             context.unregisterReceiver(batteryReceiver)
+            isReceiverRegistered = false
         } catch (e: Exception) {
             Log.w(TAG, "Failed to unregister battery receiver: ${e.message}")
         }

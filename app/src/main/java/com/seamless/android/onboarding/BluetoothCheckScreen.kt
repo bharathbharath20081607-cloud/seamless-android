@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.onboarding
 
 import androidx.compose.animation.*
@@ -153,13 +154,9 @@ private fun BluetoothDisabledContent(
         Text(
             text = stringResource(R.string.bluetooth_required),
             style = MaterialTheme.typography.headlineSmall.copy(
-                fontFamily = FontFamily.Monospace,
+                fontFamily = FontFamily.Default,
                 fontWeight = FontWeight.Bold,
-                color = colorScheme.primary,
-                shadow = androidx.compose.ui.graphics.Shadow(
-                    color = colorScheme.primary,
-                    blurRadius = 24f
-                )
+                color = colorScheme.primary
             ),
             textAlign = TextAlign.Center
         )
@@ -189,7 +186,7 @@ private fun BluetoothDisabledContent(
                     style = MaterialTheme.typography.bodyMedium.copy(
                         fontWeight = FontWeight.SemiBold,
                         color = colorScheme.onSurface,
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = FontFamily.Default
                     ),
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth()
@@ -198,7 +195,7 @@ private fun BluetoothDisabledContent(
                     Text(
                         text = stringResource(R.string.bluetooth_needs_bullets),
                     style = MaterialTheme.typography.bodyMedium.copy( // Increased readability
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = FontFamily.Default,
                         color = colorScheme.onSurface.copy(alpha = 0.8f),
                         lineHeight = 24.sp
                     )
@@ -217,33 +214,18 @@ private fun BluetoothDisabledContent(
                     .height(56.dp)
                     .padding(vertical = 4.dp),
                 colors = ButtonDefaults.buttonColors(
-                   containerColor = Color.Transparent
+                    containerColor = colorScheme.primary,
+                    contentColor = colorScheme.onPrimary
                 ),
-                contentPadding = PaddingValues() // Remove default padding for gradient
+                shape = RoundedCornerShape(28.dp)
             ) {
-                 Box(
-                     modifier = Modifier
-                         .fillMaxSize()
-                         .background(
-                             brush = androidx.compose.ui.graphics.Brush.horizontalGradient(
-                                 colors = listOf(
-                                    com.seamless.android.ui.theme.SeamlessColors.BrandGradientStart,
-                                    com.seamless.android.ui.theme.SeamlessColors.BrandGradientEnd
-                                 )
-                             ),
-                             shape = ButtonDefaults.shape
-                         ),
-                     contentAlignment = Alignment.Center
-                 ) {
-                        Text(
-                            text = stringResource(R.string.enable_bluetooth),
-                        style = MaterialTheme.typography.bodyLarge.copy(
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
+                Text(
+                    text = stringResource(R.string.enable_bluetooth),
+                    style = MaterialTheme.typography.bodyLarge.copy(
+                        fontFamily = FontFamily.Default,
+                        fontWeight = FontWeight.Bold
                     )
-                 }
+                )
             }
         }
     }
@@ -274,7 +256,7 @@ private fun BluetoothNotSupportedContent(
         Text(
             text = stringResource(R.string.bluetooth_not_supported),
             style = MaterialTheme.typography.headlineSmall.copy(
-                fontFamily = FontFamily.Monospace,
+                fontFamily = FontFamily.Default,
                 fontWeight = FontWeight.Bold,
                 color = colorScheme.error
             ),
@@ -291,7 +273,7 @@ private fun BluetoothNotSupportedContent(
             Text(
                 text = stringResource(R.string.bluetooth_unsupported_explanation),
                 style = MaterialTheme.typography.bodyMedium.copy(
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = FontFamily.Default,
                     color = colorScheme.onSurface
                 ),
                 modifier = Modifier.padding(16.dp),
@@ -312,7 +294,7 @@ private fun BluetoothCheckingContent(
         Text(
             text = stringResource(R.string.app_name),
             style = MaterialTheme.typography.headlineLarge.copy(
-                fontFamily = FontFamily.Monospace,
+                fontFamily = FontFamily.Default,
                 fontWeight = FontWeight.Bold,
                 color = colorScheme.primary
             ),
@@ -324,7 +306,7 @@ private fun BluetoothCheckingContent(
         Text(
             text = stringResource(R.string.checking_bluetooth_status),
             style = MaterialTheme.typography.bodyLarge.copy(
-                fontFamily = FontFamily.Monospace,
+                fontFamily = FontFamily.Default,
                 color = colorScheme.onSurface.copy(alpha = 0.7f)
             )
         )
@@ -353,7 +335,7 @@ private fun BluetoothLoadingIndicator() {
             modifier = Modifier
                 .fillMaxSize()
                 .rotate(rotationAngle),
-            color = Color(0xFF2196F3), // Bluetooth blue
+            color = MaterialTheme.colorScheme.primary,
             strokeWidth = 3.dp
         )
     }

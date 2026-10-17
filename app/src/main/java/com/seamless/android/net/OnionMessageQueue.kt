@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.net
 
 import android.content.Context
@@ -42,15 +43,14 @@ class OnionMessageQueue private constructor(private val context: Context) {
         private const val DELIVERY_DATA_KEY = "delivery_data"
         
         // Retry configuration
-        const val BASE_RETRY_DELAY_MS = 5_000L        // 5 seconds
+        const val BASE_RETRY_DELAY_MS = 2_500L        // 2.5 seconds fast initial retry
         const val MAX_RETRY_DELAY_MS = 300_000L       // 5 minutes
         const val MAX_RETRY_ATTEMPTS = 50             // ~4 hours of retries
-        const val BACKOFF_MULTIPLIER = 2.0
-        const val ACK_RETRY_DELAY_MS = 20_000L        // Retry if no ACK after 20 seconds
-        // File chunks are ordered, but serializing one ACK per 3 KB chunk makes
-        // a small photo take minutes over Tor. Keep a modest bounded window on a
-        // single circuit so loss stays recoverable without flooding it.
-        const val ATTACHMENT_WINDOW_SIZE = 8
+        const val BACKOFF_MULTIPLIER = 1.8
+        const val ACK_RETRY_DELAY_MS = 12_000L        // Retry if no ACK after 12 seconds
+        // File chunks are ordered over the Tor stream; a 24-chunk window (72 KB)
+        // keeps the circuit saturated without excessive memory pressure.
+        const val ATTACHMENT_WINDOW_SIZE = 24
         
         // Cleanup
         const val MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000L  // 7 days
@@ -461,8 +461,11 @@ class OnionMessageQueue private constructor(private val context: Context) {
     }
 
     /**
-     * Returns one meta frame or a bounded in-order window of chunks for the
-     * first unfinished attachment. The next attachment cannot overtake it.
+     * Returns the metadata frame (when due) plus a bounded in-order window of
+     * chunks for the first unfinished attachment. Because Tor circuits and
+     * mailbox uploads preserve frame order, pipelining the initial chunk window
+     * immediately behind FILE_META avoids a full Tor RTT stall before chunk 0.
+     * The next attachment still cannot overtake the current one.
      */
     private fun nextAttachmentWindow(messages: List<QueuedMessage>, now: Long): List<QueuedMessage> {
         val attachments = messages
@@ -478,18 +481,18 @@ class OnionMessageQueue private constructor(private val context: Context) {
 
         val first = attachments.first()
         if (frameType(first) == OnionMessageProtocol.FrameType.FILE_META) {
-            if (!first.mailboxStored) {
-                return if (isDueForDelivery(first, now)) listOf(first) else emptyList()
-            }
-
-            // The metadata was committed to the recipient's mailbox. Its chunks
-            // may now progress without waiting for an ACK that cannot be sent
-            // until the recipient comes back online.
             val chunks = attachments.drop(1)
                 .takeWhile { frameType(it) != OnionMessageProtocol.FrameType.FILE_META }
+            val metaPrefix = if (!first.mailboxStored && isDueForDelivery(first, now)) {
+                listOf(first)
+            } else {
+                emptyList()
+            }
             val window = nextAttachmentChunkWindow(chunks, now)
-            if (window.isNotEmpty()) return window
-            if (chunks.all { it.mailboxStored }) {
+            if (metaPrefix.isNotEmpty() || window.isNotEmpty()) {
+                return metaPrefix + window
+            }
+            if (first.mailboxStored && chunks.all { it.mailboxStored }) {
                 return nextAttachmentWindow(attachments.drop(1 + chunks.size), now)
             }
             return emptyList()

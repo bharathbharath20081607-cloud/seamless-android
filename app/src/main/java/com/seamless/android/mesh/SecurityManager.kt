@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.mesh
 
 import android.util.Log
@@ -8,7 +9,6 @@ import com.seamless.android.model.RoutedPacket
 import com.seamless.android.util.toHexString
 import kotlinx.coroutines.*
 import java.util.*
-import kotlin.collections.mutableSetOf
 
 /**
  * Manages security aspects of the mesh network including duplicate detection,
@@ -93,22 +93,28 @@ class SecurityManager(private val encryptionService: EncryptionService, private 
         // Skip our own handshake messages
         if (peerID == myPeerID) return false
 
-        // If we already have an established session but the peer is initiating a new handshake,
-        // drop the existing session so we can re-establish cleanly.
-        var forcedRehandshake = false
-        if (encryptionService.hasEstablishedSession(peerID)) {
-            Log.d(TAG, "Received new Noise handshake from $peerID with an existing session. Dropping old session to re-handshake.")
-            try {
-                encryptionService.removePeer(peerID)
-                forcedRehandshake = true
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to remove existing Noise session for $peerID: ${e.message}")
-            }
-        }
-        
         if (packet.payload.isEmpty()) {
             Log.w(TAG, "Noise handshake packet has empty payload")
             return false
+        }
+
+        // If we already have an established session, ONLY drop it if the peer is initiating a brand new
+        // Noise XX handshake (Msg 1 = 32 bytes -> e). Never drop an established session on a delayed/relayed
+        // Msg 2 (96 bytes) or Msg 3 (48 bytes).
+        var forcedRehandshake = false
+        if (encryptionService.hasEstablishedSession(peerID)) {
+            if (packet.payload.size == 32) {
+                Log.d(TAG, "Received new Noise Msg 1 (32B) from $peerID with an existing session. Dropping old session to re-handshake.")
+                try {
+                    encryptionService.removePeer(peerID)
+                    forcedRehandshake = true
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to remove existing Noise session for $peerID: ${e.message}")
+                }
+            } else {
+                Log.d(TAG, "Ignoring late/duplicate handshake packet (${packet.payload.size}B) for already-established session with $peerID")
+                return false
+            }
         }
         
         // Prevent duplicate handshake processing

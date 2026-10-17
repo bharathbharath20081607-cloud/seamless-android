@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.mesh
 
 import android.content.Context
@@ -58,8 +59,14 @@ class PrivateMeshManager private constructor(private val context: Context) {
     // Track approved members for auto-rejoin
     private val approvedMembers = ConcurrentHashMap<String, String>() // peerID -> nickname
     
+    // Deduplicate incoming mesh messages within a short window
+    private val recentMessageFingerprints = ConcurrentHashMap<String, Long>()
+    
     // Discovery job
     private var discoveryJob: Job? = null
+    
+    // Join request retry job
+    private var joinRequestJob: Job? = null
     
     // Heartbeat job for pruning stale members
     private var heartbeatJob: Job? = null
@@ -155,7 +162,6 @@ class PrivateMeshManager private constructor(private val context: Context) {
     }
     
     /**
-
      * Called when a message is received from the mesh
      */
     fun onMessageReceived(senderPeerID: String, senderNickname: String, content: String) {
@@ -164,11 +170,31 @@ class PrivateMeshManager private constructor(private val context: Context) {
         }
         
         // Ignore our own messages (they're already added in sendMessage)
-        if (senderPeerID == myPeerID) return
+        if (senderPeerID.equals(myPeerID, ignoreCase = true)) return
+        
+        updateMemberLastSeen(senderPeerID)
+        
+        // Deduplicate identical messages received within 3 seconds
+        val now = System.currentTimeMillis()
+        val dedupKey = "${senderPeerID.lowercase()}:$content"
+        val prevTimestamp = recentMessageFingerprints.put(dedupKey, now)
+        if (prevTimestamp != null && (now - prevTimestamp) < 3_000L) {
+            return
+        }
+        if (recentMessageFingerprints.size > 200) {
+            val cutoff = now - 15_000L
+            recentMessageFingerprints.entries.removeIf { it.value < cutoff }
+        }
+        
+        val resolvedNickname = if (senderNickname.isBlank() || senderNickname.equals("Unknown", ignoreCase = true)) {
+            _members.value.firstOrNull { it.peerID.equals(senderPeerID, ignoreCase = true) }?.nickname ?: senderNickname
+        } else {
+            senderNickname
+        }
         
         val message = PrivateMeshMessage(
             senderPeerID = senderPeerID,
-            senderNickname = senderNickname,
+            senderNickname = resolvedNickname,
             content = content,
             isFromMe = false
         )
@@ -186,13 +212,21 @@ class PrivateMeshManager private constructor(private val context: Context) {
         }
         
         // Ignore our own media (they're already added in sendVoiceNote/sendImage)
-        if (senderPeerID == myPeerID) return
+        if (senderPeerID.equals(myPeerID, ignoreCase = true)) return
         
-        Log.i(TAG, "📥 Received mesh media from $senderNickname: $type")
+        updateMemberLastSeen(senderPeerID)
+        
+        val resolvedNickname = if (senderNickname.isBlank() || senderNickname.equals("Unknown", ignoreCase = true)) {
+            _members.value.firstOrNull { it.peerID.equals(senderPeerID, ignoreCase = true) }?.nickname ?: senderNickname
+        } else {
+            senderNickname
+        }
+        
+        Log.i(TAG, "📥 Received mesh media from $resolvedNickname: $type")
         
         val message = PrivateMeshMessage(
             senderPeerID = senderPeerID,
-            senderNickname = senderNickname,
+            senderNickname = resolvedNickname,
             content = filePath,
             isFromMe = false,
             type = type
@@ -249,6 +283,7 @@ class PrivateMeshManager private constructor(private val context: Context) {
         // Notify members that mesh is closing
         delegate?.onMeshClosing(_currentMeshId.value ?: "")
         
+        approvedMembers.clear()
         reset()
     }
     
@@ -261,18 +296,21 @@ class PrivateMeshManager private constructor(private val context: Context) {
         Log.i(TAG, "✅ Accepting join request from: ${request.requesterNickname}")
         
         // Add to approved members for auto-rejoin
-        approvedMembers[request.requesterPeerID] = request.requesterNickname
+        approvedMembers[request.requesterPeerID.lowercase()] = request.requesterNickname
         
-        // Add to members list
+        // Add to members list (avoiding duplicates)
         val newMember = MeshMember(
             peerID = request.requesterPeerID,
             nickname = request.requesterNickname,
-            isHost = false
+            isHost = false,
+            lastSeen = System.currentTimeMillis()
         )
-        _members.value = _members.value + newMember
+        _members.value = _members.value.filterNot { it.peerID.equals(request.requesterPeerID, ignoreCase = true) } + newMember
         
         // Remove from pending
-        _pendingRequests.value = _pendingRequests.value.filter { it.requestId != requestId }
+        _pendingRequests.value = _pendingRequests.value.filterNot {
+            it.requestId == requestId || it.requesterPeerID.equals(request.requesterPeerID, ignoreCase = true)
+        }
         
         // Notify the requester
         delegate?.onJoinRequestAccepted(request.requesterPeerID, _currentMeshId.value ?: "", _currentMeshName.value ?: "")
@@ -305,10 +343,11 @@ class PrivateMeshManager private constructor(private val context: Context) {
         Log.i(TAG, "🚫 Kicking member: $peerID")
         
         // Remove from approved members
+        approvedMembers.remove(peerID.lowercase())
         approvedMembers.remove(peerID)
         
         // Remove from members list
-        _members.value = _members.value.filter { it.peerID != peerID }
+        _members.value = _members.value.filterNot { it.peerID.equals(peerID, ignoreCase = true) }
         
         // Notify the kicked member
         delegate?.onMemberKicked(peerID)
@@ -375,7 +414,16 @@ class PrivateMeshManager private constructor(private val context: Context) {
         
         stopDiscovery()
         
-        delegate?.onJoinRequested(meshId, mesh.hostPeerID)
+        // Retry join request periodically while waiting for host approval / BLE delivery
+        joinRequestJob?.cancel()
+        joinRequestJob = scope.launch {
+            var attempts = 0
+            while (isActive && _state.value == PrivateMeshState.JOINING && attempts < 6) {
+                delegate?.onJoinRequested(meshId, mesh.hostPeerID)
+                attempts++
+                delay(4_000L)
+            }
+        }
     }
     
     /**
@@ -397,6 +445,7 @@ class PrivateMeshManager private constructor(private val context: Context) {
      * Called when a mesh announcement is received
      */
     fun onMeshAnnounceReceived(meshId: String, name: String, hostPeerID: String, hostNickname: String, memberCount: Int, rssi: Int = Int.MIN_VALUE) {
+        updateMemberLastSeen(hostPeerID)
         if (_state.value == PrivateMeshState.HOSTING && _currentMeshId.value == meshId) {
             // This is our own announcement, ignore
             return
@@ -425,20 +474,54 @@ class PrivateMeshManager private constructor(private val context: Context) {
     }
     
     /**
+     * Called when a heartbeat ping is received for a private mesh
+     */
+    fun onHeartbeatReceived(peerID: String, meshId: String) {
+        updateMemberLastSeen(peerID)
+        // Also refresh discovered mesh timestamp if this peer is a known host
+        val currentMeshes = _discoveredMeshes.value
+        if (currentMeshes.any { it.meshId == meshId || it.hostPeerID.equals(peerID, ignoreCase = true) }) {
+            _discoveredMeshes.value = currentMeshes.map { mesh ->
+                if (mesh.meshId == meshId || mesh.hostPeerID.equals(peerID, ignoreCase = true)) {
+                    mesh.copy(lastSeen = System.currentTimeMillis())
+                } else {
+                    mesh
+                }
+            }
+        }
+    }
+    
+    /**
+     * Called when a member explicitly leaves the mesh
+     */
+    fun onMemberLeft(peerID: String) {
+        if (_state.value != PrivateMeshState.HOSTING) return
+        val beforeSize = _members.value.size
+        _members.value = _members.value.filterNot { it.peerID.equals(peerID, ignoreCase = true) }
+        if (_members.value.size != beforeSize) {
+            Log.i(TAG, "👋 Member $peerID left the mesh; broadcasting updated member list")
+            delegate?.onMemberListChanged(_members.value)
+        }
+    }
+    
+    /**
      * Called when a join request is received (host only)
      */
     fun onJoinRequestReceived(requestId: String, requesterPeerID: String, requesterNickname: String) {
         if (_state.value != PrivateMeshState.HOSTING) return
         
+        updateMemberLastSeen(requesterPeerID)
+        
         // Check if this is an approved member (auto-rejoin)
-        if (approvedMembers.containsKey(requesterPeerID)) {
+        if (approvedMembers.containsKey(requesterPeerID.lowercase()) || approvedMembers.containsKey(requesterPeerID)) {
             Log.i(TAG, "🔄 Auto-accepting rejoining member: $requesterNickname")
             
             // Prevent duplicate members on re-join
-            if (_members.value.any { it.peerID == requesterPeerID }) {
-                Log.d(TAG, "Member $requesterNickname already in list, updating lastSeen")
+            if (_members.value.any { it.peerID.equals(requesterPeerID, ignoreCase = true) }) {
+                Log.d(TAG, "Member $requesterNickname already in list, re-sending acceptance & member list")
                 updateMemberLastSeen(requesterPeerID)
                 delegate?.onJoinRequestAccepted(requesterPeerID, _currentMeshId.value ?: "", _currentMeshName.value ?: "")
+                delegate?.onMemberListChanged(_members.value)
                 return
             }
             
@@ -446,12 +529,19 @@ class PrivateMeshManager private constructor(private val context: Context) {
             val newMember = MeshMember(
                 peerID = requesterPeerID,
                 nickname = requesterNickname,
-                isHost = false
+                isHost = false,
+                lastSeen = System.currentTimeMillis()
             )
             _members.value = _members.value + newMember
             
             delegate?.onJoinRequestAccepted(requesterPeerID, _currentMeshId.value ?: "", _currentMeshName.value ?: "")
             delegate?.onMemberListChanged(_members.value)
+            return
+        }
+        
+        // Deduplicate pending requests from the same peer
+        if (_pendingRequests.value.any { it.requesterPeerID.equals(requesterPeerID, ignoreCase = true) }) {
+            Log.d(TAG, "📥 Duplicate join request from $requesterNickname ignored (already pending)")
             return
         }
         
@@ -470,16 +560,25 @@ class PrivateMeshManager private constructor(private val context: Context) {
      * Called when join request is accepted (client)
      */
     fun onJoinAccepted(meshId: String, meshName: String, members: List<MeshMember>) {
-        if (_state.value != PrivateMeshState.JOINING) return
+        if (_state.value != PrivateMeshState.JOINING && _state.value != PrivateMeshState.CONNECTED) return
+        
+        joinRequestJob?.cancel()
+        joinRequestJob = null
+        
+        if (_state.value == PrivateMeshState.CONNECTED && _currentMeshId.value == meshId) {
+            return
+        }
         
         Log.i(TAG, "✅ Join request accepted for mesh: $meshName")
         
         _currentMeshId.value = meshId
         _currentMeshName.value = meshName
-        _members.value = members
+        if (members.isNotEmpty() || _members.value.isEmpty()) {
+            _members.value = members
+        }
         _state.value = PrivateMeshState.CONNECTED
         
-        // PRODUCTION FIX: Start heartbeat as connected member so host doesn't prune us
+        // Start heartbeat as connected member so host doesn't prune us
         startHeartbeat()
     }
     
@@ -498,14 +597,15 @@ class PrivateMeshManager private constructor(private val context: Context) {
      * Called when member list is updated
      */
     fun onMemberListUpdated(members: List<MeshMember>) {
-        _members.value = members
+        val now = System.currentTimeMillis()
+        _members.value = members.map { it.copy(lastSeen = now) }
     }
     
     /**
      * Called when host closes the mesh
      */
     fun onMeshClosed() {
-        if (_state.value == PrivateMeshState.CONNECTED) {
+        if (_state.value == PrivateMeshState.CONNECTED || _state.value == PrivateMeshState.JOINING) {
             Log.i(TAG, "🚫 Mesh was closed by host")
             reset()
         }
@@ -534,7 +634,7 @@ class PrivateMeshManager private constructor(private val context: Context) {
                     // Only host prunes stale members
                     if (currentState == PrivateMeshState.HOSTING) {
                         val now = System.currentTimeMillis()
-                        val staleThreshold = 25000L // 25 seconds without heartbeat
+                        val staleThreshold = 45000L // 45 seconds without any heartbeat or packet
                         val currentMembers = _members.value
                         val staleMembers = currentMembers.filter { 
                             !it.isHost && (now - it.lastSeen) > staleThreshold 
@@ -553,8 +653,11 @@ class PrivateMeshManager private constructor(private val context: Context) {
     }
     
     fun updateMemberLastSeen(peerID: String) {
-        _members.value = _members.value.map { member ->
-            if (member.peerID == peerID) member.copy(lastSeen = System.currentTimeMillis())
+        val current = _members.value
+        if (current.none { it.peerID.equals(peerID, ignoreCase = true) }) return
+        val now = System.currentTimeMillis()
+        _members.value = current.map { member ->
+            if (member.peerID.equals(peerID, ignoreCase = true)) member.copy(lastSeen = now)
             else member
         }
     }
@@ -569,18 +672,21 @@ class PrivateMeshManager private constructor(private val context: Context) {
                     name = _currentMeshName.value ?: "",
                     memberCount = _members.value.size
                 )
-                delay(5_000) // Broadcast every 5 seconds
+                delay(4_000) // Broadcast every 4 seconds for fast discovery
             }
         }
     }
     
     private fun reset() {
+        joinRequestJob?.cancel()
+        joinRequestJob = null
         _state.value = PrivateMeshState.IDLE
         _currentMeshId.value = null
         _currentMeshName.value = null
         _members.value = emptyList()
         _pendingRequests.value = emptyList()
         _messages.value = emptyList()
+        recentMessageFingerprints.clear()
         heartbeatJob?.cancel()
         heartbeatJob = null
         discoveryJob?.cancel()

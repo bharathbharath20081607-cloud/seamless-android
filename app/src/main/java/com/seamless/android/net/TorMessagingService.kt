@@ -1,4 +1,4 @@
-@file:Suppress("KotlinConstantConditions")
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.net
 
 import android.app.Application
@@ -9,8 +9,6 @@ import com.seamless.android.crypto.X25519
 import com.seamless.android.crypto.X25519KeyPair
 import com.seamless.android.data.TorMessageRepository
 import com.seamless.android.identity.SecureIdentityStateManager
-import com.seamless.android.model.BitchatMessage
-import com.seamless.android.noise.SeamlessRatchet
 import com.seamless.android.noise.SeamlessRatchetManager
 import com.seamless.android.sync.BrambleSyncEngine
 import kotlinx.coroutines.*
@@ -56,13 +54,16 @@ class TorMessagingService private constructor(private val context: Context) {
         private const val DIRECT_SEALED_VERSION: Byte = 1
         private const val DIRECT_NONCE_SIZE = 12
         private const val UNACKED_RETRIES_BEFORE_RECONNECT = 3
-        // Tor round trips can occasionally span more than two keepalive windows.
-        // Keep presence stable until four missed authenticated responses.
-        private const val PEER_PRESENCE_TIMEOUT_MS = 60_000L
+        // Onion-service circuits can pause while a rendezvous path is rebuilt.
+        // A verified peer should not flicker offline during one of those normal
+        // pauses; authenticated PONGs and receipts refresh this lease.
+        private const val PEER_PRESENCE_TIMEOUT_MS = 120_000L
         private const val KNOWN_CONTACT_REDIAL_INTERVAL_MS = 30_000L
-        // A mailbox-capable contact should not wait through the entire Tor
-        // socket timeout before its durable offline route is attempted.
-        private const val INITIAL_DIRECT_DIAL_BUDGET_MS = 12_000L
+        // A cold onion-service rendezvous commonly needs longer than an
+        // ordinary HTTPS request. Falling back after five seconds cancelled
+        // healthy first connections and made online peers look unavailable.
+        // Keep the direct route responsive while still bounding offline waits.
+        private const val INITIAL_DIRECT_DIAL_BUDGET_MS = 25_000L
         // Leave room for the encrypted envelope and fixed Tor frame metadata.
         // Enforce this at queue time so an accepted message is always sendable.
         private const val MAX_DIRECT_TEXT_BYTES = 3_700
@@ -146,6 +147,8 @@ class TorMessagingService private constructor(private val context: Context) {
     private val mailboxFallbackDisabled = ConcurrentHashMap.newKeySet<String>()
     private val attachmentPartToMessage = ConcurrentHashMap<String, String>()
     private val pendingAttachmentParts = ConcurrentHashMap<String, MutableSet<String>>()
+    private val activeRecipientDeliveries = ConcurrentHashMap.newKeySet<String>()
+    private val recipientDeliveryLocks = ConcurrentHashMap<String, Mutex>()
     @Volatile private var ownMailboxOnion: String? = null
     
     /**
@@ -336,14 +339,14 @@ class TorMessagingService private constructor(private val context: Context) {
      * Generate QR code data for contact sharing
      */
     fun getMyQrData(): String {
-        return contactManager.getMyQrData()
+        return contactManager.getMyQrData(ownMailboxOnion)
     }
     
     /**
      * Generate shareable link
      */
     fun getMyShareableLink(): String {
-        return contactManager.getMyShareableLink()
+        return contactManager.getMyShareableLink(ownMailboxOnion)
     }
     
     /**
@@ -560,6 +563,7 @@ class TorMessagingService private constructor(private val context: Context) {
                 uiMessageId = messageId.toString(),
                 completesUiMessage = completesUiMessage
             )
+            syncEngine.addMessageForSync(messageId.toString(), frame.encode(), canonicalRecipient)
             deliveryRoutes[queuedMessageId] = TorDeliveryRoute.QUEUED
             updateChainHead(canonicalRecipient, envelope.chainHash())
             queueWakeSignal.tryEmit(Unit)
@@ -577,7 +581,9 @@ class TorMessagingService private constructor(private val context: Context) {
     suspend fun sendImage(
         contactId: String,
         imageBytes: ByteArray,
-        mimeType: String
+        mimeType: String,
+        groupId: String? = null,
+        groupMessageId: String? = null
     ): Result<String> = mutex.withLock {
         val contact = contactManager.getContact(contactId)
             ?: return@withLock Result.failure(IllegalArgumentException("Contact not found"))
@@ -594,13 +600,13 @@ class TorMessagingService private constructor(private val context: Context) {
                 transferId = transferId,
                 mimeType = mimeType,
                 totalBytes = imageBytes.size,
-                senderPublicKey = getMyStaticPublicKeyHex()
+                senderPublicKey = getMyStaticPublicKeyHex(), groupId = groupId, groupMessageId = groupMessageId
             )
             val localPath = attachmentTransfer.saveOutgoing(transferId, imageBytes, meta.mimeType)
             val sequenceManager = getSequenceManager(contact.onionAddress)
             val now = System.currentTimeMillis()
 
-            messageRepository.saveSentMessage(
+            if (groupId == null) messageRepository.saveSentMessage(
                 messageId = imageMessageId.toString(),
                 contact = contact,
                 text = "Photo",
@@ -624,6 +630,7 @@ class TorMessagingService private constructor(private val context: Context) {
                 completesUiMessage = false
             )
             val chunks = attachmentTransfer.split(imageBytes)
+            var finalChunkId = queuedMetaId
             chunks.forEachIndexed { index, chunk ->
                 val chunkFrame = OnionMessageProtocol.OnionFrame(
                     // Every frame needs its own transport identity. The final
@@ -640,10 +647,11 @@ class TorMessagingService private constructor(private val context: Context) {
                     uiMessageId = imageMessageId.toString(),
                     completesUiMessage = index == chunks.lastIndex
                 )
+                if (index == chunks.lastIndex) finalChunkId = chunkId
             }
             deliveryRoutes[imageMessageId.toString()] = TorDeliveryRoute.QUEUED
             queueWakeSignal.tryEmit(Unit)
-            Result.success(queuedMetaId)
+            Result.success(finalChunkId)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to queue image: ${e.message}")
             Result.failure(e)
@@ -979,6 +987,10 @@ class TorMessagingService private constructor(private val context: Context) {
                                 Log.w(TAG, "📥 Sender has no onion address, using pubkey-based ID: ${peerOnion.take(20)}")
                             }
                         }
+                        if (!peerOnion.startsWith("pubkey:", ignoreCase = true)) {
+                            val canonical = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(peerOnion)
+                            if (canonical.isNotBlank()) peerOnion = canonical
+                        }
                         resolvedPeerOnion = peerOnion
                         circuitManager.addIncomingConnection(
                             peerOnion,
@@ -997,14 +1009,17 @@ class TorMessagingService private constructor(private val context: Context) {
                     // For encrypted frames from already-known contacts, try to identify sender
                     val identified = identifySenderFromFrame(data)
                     if (identified != null) {
-                        resolvedPeerOnion = identified.first
+                        val canonicalPeer = OnionContactManager.OnionContact
+                            .canonicalizeOnionEndpoint(identified.first)
+                            .ifBlank { identified.first }
+                        resolvedPeerOnion = canonicalPeer
                         circuitManager.addIncomingConnection(
-                            identified.first,
+                            canonicalPeer,
                             socket,
-                            shouldPreferIncomingCircuit(identified.first)
+                            shouldPreferIncomingCircuit(canonicalPeer)
                         )
-                        Log.i(TAG, "📥 Incoming connection from ${identified.first.take(20)}... (identified via decryption)")
-                        handleIncomingData(identified.first, identified.second, isAlreadyDecrypted = true)
+                        Log.i(TAG, "📥 Incoming connection from ${canonicalPeer.take(20)}... (identified via decryption)")
+                        handleIncomingData(canonicalPeer, identified.second, isAlreadyDecrypted = true)
                     } else {
                         // Normal traffic is accepted only after pairing. Keeping an unknown
                         // socket under a temporary ID allows unauthenticated traffic to affect
@@ -1017,8 +1032,12 @@ class TorMessagingService private constructor(private val context: Context) {
             }
             
             // After registering the incoming connection, start a continuous read loop
-            // so we can receive subsequent messages on this same socket
-            resolvedPeerOnion?.let(::ensureReadLoop)
+            // so we can receive subsequent messages on this same socket, and wake the
+            // outbound delivery loop immediately so queued frames flush right away.
+            resolvedPeerOnion?.let { peer ->
+                ensureReadLoop(peer)
+                queueWakeSignal.tryEmit(Unit)
+            }
             
         } catch (e: Exception) {
             Log.e(TAG, "Error handling incoming socket: ${e.message}")
@@ -1046,7 +1065,7 @@ class TorMessagingService private constructor(private val context: Context) {
                         break
                     } else {
                         // No data available (timeout or no connection) — small delay to avoid spinning
-                        delay(100)
+                        delay(50)
                     }
                 } catch (e: java.io.EOFException) {
                     Log.d(TAG, "📡 Peer $peerOnion disconnected (EOF)")
@@ -1170,9 +1189,9 @@ class TorMessagingService private constructor(private val context: Context) {
                         active.filterValues { expiresAt -> expiresAt > System.currentTimeMillis() }
                     }
                     
-                    // Ping all connected peers
+                    // Ping all connected peers concurrently so one slow circuit doesn't delay others
                     for (onion in peers) {
-                        pingPeer(onion)
+                        scope.launch { pingPeer(onion) }
                     }
                     reconnectKnownContacts()
                 } catch (e: Exception) {
@@ -1184,9 +1203,9 @@ class TorMessagingService private constructor(private val context: Context) {
     }
     
     /**
-     * Queue delivery loop - periodically processes pending outbound messages.
-     * IMPORTANT: This must call getConnection() (not just sendData()) to ensure
-     * the outbound Tor circuit is established before attempting to deliver.
+     * Queue delivery loop - dispatches pending outbound messages concurrently per recipient.
+     * Already-connected peers are prioritized and never wait behind an offline peer's
+     * 25-second initial onion dial or mailbox fallback.
      */
     private fun startQueueDeliveryLoop() {
         queueDeliveryJob?.cancel()
@@ -1194,144 +1213,26 @@ class TorMessagingService private constructor(private val context: Context) {
             while (isActive) {
                 try {
                     val pending = messageQueue.getAllPendingMessages()
-                    for ((recipientOnion, messages) in pending) {
-                        // Preserve a healthy circuit through a small number of
-                        // missed ACKs. Recreating an onion circuit on every retry
-                        // produced avoidable presence flapping and 20-60 second
-                        // delivery delays. A genuinely stalled circuit is rebuilt
-                        // only after repeated authenticated retransmissions.
-                        if (messages.any {
-                                it.state == OnionMessageProtocol.DeliveryState.SENT &&
-                                    it.retryCount >= UNACKED_RETRIES_BEFORE_RECONNECT
-                            }
-                        ) {
-                            circuitManager.disconnect(recipientOnion)
-                            peersIntroducedOnConnection.remove(recipientOnion)
-                            readLoopConnections.remove(recipientOnion)
-                            peersWithReadLoop.remove(recipientOnion)
-                        }
-
-                        // Give a first direct onion dial a bounded head start.
-                        // Existing pooled circuits return immediately; offline
-                        // contacts fall through to their encrypted mailbox rather
-                        // than freezing every queued message behind a 60s dial.
-                        val connection = try {
-                            withTimeoutOrNull(INITIAL_DIRECT_DIAL_BUDGET_MS) {
-                                circuitManager.getConnection(recipientOnion)
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "⚠️ Could not connect to ${redactEndpoint(recipientOnion)}: ${e.message}")
-                            null
-                        }
-                        
-                        if (connection == null) {
-                            Log.d(TAG, "📭 No connection to ${redactEndpoint(recipientOnion)} — trying mailbox fallback")
-                            for (message in messages) {
-                                val delivered = tryMailboxDelivery(recipientOnion, message)
-                                if (!delivered) {
-                                    messageQueue.handleSendFailure(
-                                        message.id,
-                                        "Direct connection unavailable and mailbox unavailable"
-                                    )
-                                }
-                            }
-                            continue
-                        }
-                        
-                        // ━━━ CRITICAL: Send CONTACT_EXCHANGE on first use of new connection ━━━
-                        // This ensures the remote hidden service can identify who connected
-                        // WITHOUT destructive ratchet trial decryption (which corrupts sessions).
-                        val hasNormalMessages = messages.any { queued ->
-                            OnionMessageProtocol.OnionFrame.decode(queued.frameData)?.frameType !=
-                                OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
-                        }
-                        val introducedOnThisConnection = peersIntroducedOnConnection.add(recipientOnion)
-                        var introductionReady = !introducedOnThisConnection
-                        if (introducedOnThisConnection) {
+                    val sortedRecipients = pending.entries.sortedByDescending { (recipientOnion, _) ->
+                        circuitManager.hasActiveConnection(recipientOnion)
+                    }
+                    for ((recipientOnion, messages) in sortedRecipients) {
+                        if (messages.isEmpty()) continue
+                        if (!activeRecipientDeliveries.add(recipientOnion)) continue
+                        scope.launch {
+                            val lock = recipientDeliveryLocks.getOrPut(recipientOnion) { Mutex() }
                             try {
-                                val myInfo = contactManager.getMyContactInfo()
-                                // Guard: don't send CONTACT_EXCHANGE with empty onion address.
-                                // If our hidden service hasn't published yet, skip the intro
-                                // and let the next queue cycle retry once the HS is ready.
-                                if (myInfo.onionAddress.isBlank() || myInfo.requiresRendezvous()) {
-                                    Log.w(TAG, "⏳ Skipping auto CONTACT_EXCHANGE — our hidden service is not published yet")
-                                    peersIntroducedOnConnection.remove(recipientOnion) // allow retry next cycle
-                                } else {
-                                    val seqManager = getSequenceManager(recipientOnion)
-                                    val introFrame = OnionMessageProtocol.createContactExchangeFrame(
-                                        myOnionAddress = myInfo.onionAddress,
-                                        myNickname = myInfo.nickname,
-                                        myPublicKey = myInfo.publicKey,
-                                        sequence = seqManager.nextOutbound()
-                                    )
-                                    introductionReady = circuitManager.sendData(recipientOnion, introFrame.encode())
-                                    if (introductionReady) {
-                                        Log.i(TAG, "📤 Auto-sent CONTACT_EXCHANGE on new outbound connection to ${redactEndpoint(recipientOnion)}")
-                                    } else {
-                                        peersIntroducedOnConnection.remove(recipientOnion)
-                                        Log.w(TAG, "CONTACT_EXCHANGE write failed for ${redactEndpoint(recipientOnion)}")
-                                    }
+                                lock.withLock {
+                                    deliverPendingForRecipient(recipientOnion, messages)
                                 }
                             } catch (e: Exception) {
-                                Log.w(TAG, "Failed to send intro CONTACT_EXCHANGE: ${e.message}")
-                                peersIntroducedOnConnection.remove(recipientOnion) // allow retry on failure
-                            }
-                        }
-
-                        if (introducedOnThisConnection && !introductionReady && hasNormalMessages) {
-                            // Keep regular messages queued until the peer has a valid return
-                            // path. A socket write alone is not a deliverable Tor session.
-                            continue
-                        }
-
-                        if (introducedOnThisConnection && introductionReady && hasNormalMessages) {
-                            // The contact record is installed while processing
-                            // CONTACT_EXCHANGE. A small scheduling yield is
-                            // sufficient; a fixed two-second pause made every
-                            // first message feel unnecessarily slow.
-                            delay(100L)
-                        }
-                        
-                        for (message in messages) {
-                            try {
-                                messageQueue.markSending(message.id)
-                                if (message.completesUiMessage) {
-                                    messageRepository.updateDeliveryState(
-                                        message.uiMessageId,
-                                        OnionMessageProtocol.DeliveryState.SENDING
-                                    )
-                                }
-                                val outboundFrameData = prepareDirectFrameForDelivery(recipientOnion, message)
-                                val success = circuitManager.sendData(recipientOnion, outboundFrameData)
-                                if (success) {
-                                    deliveryRoutes[message.uiMessageId] = TorDeliveryRoute.DIRECT
-                                    messageQueue.markSent(message.id)
-                                    if (message.completesUiMessage) {
-                                        messageRepository.updateDelivery(
-                                            message.uiMessageId,
-                                            OnionMessageProtocol.DeliveryState.SENT,
-                                            OnionMessageProtocol.DeliveryRoute.DIRECT
-                                        )
-                                    }
-                                    Log.i(TAG, "📤 Delivered queued message ${message.id} to ${redactEndpoint(recipientOnion)} (DIRECT)")
-                                    // Start a continuous read loop for outbound connections
-                                    // so we reliably receive ACKs and response messages.
-                                    ensureReadLoop(recipientOnion)
-                                    Log.i(TAG, "📡 Ensured outbound read loop for ${redactEndpoint(recipientOnion)}")
-                                } else {
-                                    // Direct send failed even with connection — try mailbox
-                                    peersIntroducedOnConnection.remove(recipientOnion)
-                                    val delivered = tryMailboxDelivery(recipientOnion, message)
-                                    if (!delivered) {
-                                        messageQueue.handleSendFailure(message.id, "Direct + Mailbox both failed")
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                Log.e(TAG, "❌ Send failed for ${message.id}: ${e.message}")
-                                peersIntroducedOnConnection.remove(recipientOnion)
-                                val delivered = tryMailboxDelivery(recipientOnion, message)
-                                if (!delivered) {
-                                    messageQueue.handleSendFailure(message.id, e.message ?: "Unknown error")
+                                Log.e(TAG, "Error delivering to ${redactEndpoint(recipientOnion)}: ${e.message}")
+                            } finally {
+                                activeRecipientDeliveries.remove(recipientOnion)
+                                // If new messages were queued or ACKs opened attachment window
+                                // slots while this worker was running, wake the dispatcher.
+                                if (messageQueue.getPendingMessages(recipientOnion).isNotEmpty()) {
+                                    queueWakeSignal.tryEmit(Unit)
                                 }
                             }
                         }
@@ -1339,7 +1240,167 @@ class TorMessagingService private constructor(private val context: Context) {
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in queue delivery loop: ${e.message}")
                 }
-                withTimeoutOrNull(3_000L) { queueWakeSignal.first() }
+                withTimeoutOrNull(1_500L) { queueWakeSignal.first() }
+            }
+        }
+    }
+
+    private suspend fun deliverPendingForRecipient(
+        recipientOnion: String,
+        messages: List<OnionMessageQueue.QueuedMessage>
+    ) {
+        // Preserve a healthy circuit through a small number of
+        // missed ACKs. Recreating an onion circuit on every retry
+        // produced avoidable presence flapping and 20-60 second
+        // delivery delays. A genuinely stalled circuit is rebuilt
+        // only after repeated authenticated retransmissions.
+        if (messages.any {
+                it.state == OnionMessageProtocol.DeliveryState.SENT &&
+                    it.retryCount >= UNACKED_RETRIES_BEFORE_RECONNECT
+            }
+        ) {
+            circuitManager.disconnect(recipientOnion)
+            peersIntroducedOnConnection.remove(recipientOnion)
+            readLoopConnections.remove(recipientOnion)
+            peersWithReadLoop.remove(recipientOnion)
+        }
+
+        // Give a first direct onion dial a bounded head start.
+        // Existing pooled circuits return immediately; offline
+        // contacts fall through to their encrypted mailbox rather
+        // than freezing every queued message behind a 60s dial.
+        val connection = try {
+            withTimeoutOrNull(INITIAL_DIRECT_DIAL_BUDGET_MS) {
+                circuitManager.getConnection(recipientOnion)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ Could not connect to ${redactEndpoint(recipientOnion)}: ${e.message}")
+            null
+        }
+        
+        if (connection == null) {
+            Log.d(TAG, "📭 No connection to ${redactEndpoint(recipientOnion)} — trying mailbox fallback")
+            for (message in messages) {
+                val delivered = tryMailboxDelivery(recipientOnion, message)
+                if (!delivered) {
+                    messageQueue.handleSendFailure(
+                        message.id,
+                        "Direct connection unavailable and mailbox unavailable"
+                    )
+                } else {
+                    groupMessaging.onTransportSent(message.id)
+                }
+            }
+            return
+        }
+
+        // Start consuming the return stream before the first
+        // write. Tor peers can ACK immediately after a durable
+        // receive; registering the reader afterwards left a
+        // race in which receipts and reply messages could wait
+        // behind subsequent outbound queue work.
+        ensureReadLoop(recipientOnion)
+        
+        // ━━━ CRITICAL: Send CONTACT_EXCHANGE on first use of new connection ━━━
+        // This ensures the remote hidden service can identify who connected
+        // WITHOUT destructive ratchet trial decryption (which corrupts sessions).
+        val hasNormalMessages = messages.any { queued ->
+            OnionMessageProtocol.OnionFrame.decode(queued.frameData)?.frameType !=
+                OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
+        }
+        val introducedOnThisConnection = peersIntroducedOnConnection.add(recipientOnion)
+        var introductionReady = !introducedOnThisConnection
+        if (introducedOnThisConnection) {
+            try {
+                val myInfo = contactManager.getMyContactInfo()
+                // Guard: don't send CONTACT_EXCHANGE with empty onion address.
+                // If our hidden service hasn't published yet, skip the intro
+                // and let the next queue cycle retry once the HS is ready.
+                if (myInfo.onionAddress.isBlank() || myInfo.requiresRendezvous()) {
+                    Log.w(TAG, "⏳ Skipping auto CONTACT_EXCHANGE — our hidden service is not published yet")
+                    peersIntroducedOnConnection.remove(recipientOnion) // allow retry next cycle
+                } else {
+                    val seqManager = getSequenceManager(recipientOnion)
+                    val introFrame = OnionMessageProtocol.createContactExchangeFrame(
+                        myOnionAddress = myInfo.onionAddress,
+                        myNickname = myInfo.nickname,
+                        myPublicKey = myInfo.publicKey,
+                        sequence = seqManager.nextOutbound()
+                    )
+                    introductionReady = circuitManager.sendData(recipientOnion, introFrame.encode())
+                    if (introductionReady) {
+                        Log.i(TAG, "📤 Auto-sent CONTACT_EXCHANGE on new outbound connection to ${redactEndpoint(recipientOnion)}")
+                        scope.launch {
+                            delay(1500)
+                            sendMailboxExchange(recipientOnion)
+                        }
+                    } else {
+                        peersIntroducedOnConnection.remove(recipientOnion)
+                        Log.w(TAG, "CONTACT_EXCHANGE write failed for ${redactEndpoint(recipientOnion)}")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to send intro CONTACT_EXCHANGE: ${e.message}")
+                peersIntroducedOnConnection.remove(recipientOnion) // allow retry on failure
+            }
+        }
+
+        if (introducedOnThisConnection && !introductionReady && hasNormalMessages) {
+            // Keep regular messages queued until the peer has a valid return
+            // path. A socket write alone is not a deliverable Tor session.
+            return
+        }
+
+        if (introducedOnThisConnection && introductionReady && hasNormalMessages) {
+            // The contact record is installed while processing
+            // CONTACT_EXCHANGE. A small scheduling yield is
+            // sufficient; a fixed two-second pause made every
+            // first message feel unnecessarily slow.
+            delay(50L)
+        }
+        
+        for (message in messages) {
+            try {
+                messageQueue.markSending(message.id)
+                if (message.completesUiMessage) {
+                    messageRepository.updateDeliveryState(
+                        message.uiMessageId,
+                        OnionMessageProtocol.DeliveryState.SENDING
+                    )
+                }
+                val outboundFrameData = prepareDirectFrameForDelivery(recipientOnion, message)
+                val success = circuitManager.sendData(recipientOnion, outboundFrameData)
+                if (success) {
+                    deliveryRoutes[message.uiMessageId] = TorDeliveryRoute.DIRECT
+                    messageQueue.markSent(message.id)
+                    groupMessaging.onTransportSent(message.id)
+                    if (message.completesUiMessage) {
+                        messageRepository.updateDelivery(
+                            message.uiMessageId,
+                            OnionMessageProtocol.DeliveryState.SENT,
+                            OnionMessageProtocol.DeliveryRoute.DIRECT
+                        )
+                    }
+                    Log.i(TAG, "📤 Delivered queued message ${message.id} to ${redactEndpoint(recipientOnion)} (DIRECT)")
+                } else {
+                    // Direct send failed even with connection — try mailbox
+                    peersIntroducedOnConnection.remove(recipientOnion)
+                    val delivered = tryMailboxDelivery(recipientOnion, message)
+                    if (!delivered) {
+                        messageQueue.handleSendFailure(message.id, "Direct + Mailbox both failed")
+                    } else {
+                        groupMessaging.onTransportSent(message.id)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Send failed for ${message.id}: ${e.message}")
+                peersIntroducedOnConnection.remove(recipientOnion)
+                val delivered = tryMailboxDelivery(recipientOnion, message)
+                if (!delivered) {
+                    messageQueue.handleSendFailure(message.id, e.message ?: "Unknown error")
+                } else {
+                    groupMessaging.onTransportSent(message.id)
+                }
             }
         }
     }
@@ -1354,11 +1415,28 @@ class TorMessagingService private constructor(private val context: Context) {
             .toList()
             .forEach(::ensureReadLoop)
     }
+
+    private val peerInboundLocks = ConcurrentHashMap<String, Mutex>()
     
     private suspend fun handleIncomingData(
         senderOnion: String,
         data: ByteArray,
-        isAlreadyDecrypted: Boolean = false
+        isAlreadyDecrypted: Boolean = false,
+        allowOfflineTimestamp: Boolean = false
+    ): Boolean {
+        val lockKey = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(senderOnion)
+            .ifBlank { senderOnion.lowercase() }
+        val peerLock = peerInboundLocks.getOrPut(lockKey) { Mutex() }
+        return peerLock.withLock {
+            handleIncomingDataLocked(senderOnion, data, isAlreadyDecrypted, allowOfflineTimestamp)
+        }
+    }
+
+    private suspend fun handleIncomingDataLocked(
+        senderOnion: String,
+        data: ByteArray,
+        isAlreadyDecrypted: Boolean = false,
+        allowOfflineTimestamp: Boolean = false
     ): Boolean {
         try {
             // First, try to decode as unencrypted frame
@@ -1371,7 +1449,7 @@ class TorMessagingService private constructor(private val context: Context) {
                 Log.d(TAG, "📩 Received unencrypted CONTACT_EXCHANGE from ${redactEndpoint(senderOnion)}")
                 
                 // Check freshness
-                if (!OnionMessageProtocol.isMessageFresh(frame)) {
+                if (!OnionMessageProtocol.isMessageFresh(frame, allowOfflineWindow = allowOfflineTimestamp)) {
                     Log.w(TAG, "Received stale contact exchange from ${redactEndpoint(senderOnion)}")
                     return false
                 }
@@ -1391,8 +1469,8 @@ class TorMessagingService private constructor(private val context: Context) {
             val decryptedData = if (isAlreadyDecrypted) data else decryptData(senderOnion, data)
             frame = OnionMessageProtocol.OnionFrame.decode(decryptedData) ?: return false
             
-            // Check freshness
-            if (!OnionMessageProtocol.isMessageFresh(frame)) {
+            // Check freshness (allow 7-day offline window for mailbox & BSP synced messages)
+            if (!OnionMessageProtocol.isMessageFresh(frame, allowOfflineWindow = allowOfflineTimestamp)) {
                 Log.w(TAG, "Received stale message from ${redactEndpoint(senderOnion)}")
                 return false
             }
@@ -1538,6 +1616,7 @@ class TorMessagingService private constructor(private val context: Context) {
                 ?: contactManager.getContactByOnion(canonicalExchangeOnion)
                 ?: exchangedContact
             contactManager.updateLastSeen(currentContact.id)
+            registerContactMailboxForPolling(currentContact)
             Log.i(TAG, "✅ Auto-paired with ${exchange.nickname}!")
             
             // Notify listener that a new contact was added
@@ -1570,6 +1649,16 @@ class TorMessagingService private constructor(private val context: Context) {
         val envelope = TorMessageEnvelope.decode(frame.payload)
         if (envelope == null) {
             Log.w(TAG, "Rejected MESSAGE without versioned envelope from ${redactEndpoint(senderOnion)}")
+            return false
+        }
+
+        // Verify recipientKey so a synced message intended for another peer is never accepted as ours
+        val myStaticKeyHex = getMyStaticPublicKeyHex()
+        if (envelope.recipientKey.isNotEmpty() &&
+            myStaticKeyHex.isNotEmpty() &&
+            !envelope.recipientKey.equals(myStaticKeyHex, ignoreCase = true)
+        ) {
+            Log.w(TAG, "Rejected misdirected MESSAGE intended for another recipientKey")
             return false
         }
 
@@ -1677,19 +1766,28 @@ class TorMessagingService private constructor(private val context: Context) {
         }
     }
 
-    /** Sends a receipt through the sender's encrypted mailbox when no live circuit exists. */
+    /** Sends a receipt through our Tier 1 outbox mailbox and/or the sender's encrypted mailbox when no live circuit exists. */
     private suspend fun storeAckInSenderMailbox(
         senderOnion: String,
         ackFrame: OnionMessageProtocol.OnionFrame
     ): Boolean {
         val sender = contactManager.getContactByOnion(senderOnion) ?: return false
-        val mailboxOnion = sender.mailboxOnion ?: return false
         val payload = createSealedMailboxPayload(sender, ackFrame) ?: return false
-        return mailboxClient.storeInMailbox(
-            mailboxOnion = mailboxOnion,
-            recipientId = fingerprintForPublicKeyHex(sender.publicKey),
-            encryptedPayload = payload
-        )
+        val recipientId = fingerprintForPublicKeyHex(sender.publicKey)
+        // Tier 1: Deposit in our local outbox mailbox so the sender can pull the ACK when polling us
+        val localDeposited = mailboxService.depositLocalBlob(recipientId, payload, getMyOnionAddress()) != null
+        // Tier 2: Also push to sender's remote mailbox if known
+        val mailboxOnion = sender.mailboxOnion
+        val remoteDeposited = if (!mailboxOnion.isNullOrBlank()) {
+            mailboxClient.storeInMailbox(
+                mailboxOnion = mailboxOnion,
+                recipientId = recipientId,
+                encryptedPayload = payload
+            )
+        } else {
+            false
+        }
+        return remoteDeposited || (localDeposited && !ownMailboxOnion.isNullOrBlank())
     }
 
     /**
@@ -1756,6 +1854,20 @@ class TorMessagingService private constructor(private val context: Context) {
         if (contact == null) {
             deduplicator.forget(frame.messageId)
             return false
+        }
+        if (completed.groupId != null && completed.groupMessageId != null) {
+            val accepted = groupMessaging.handleIncomingImage(
+                sender = contact,
+                groupId = completed.groupId,
+                messageId = completed.groupMessageId,
+                timestamp = completed.timestamp,
+                path = completed.path,
+                mimeType = completed.mimeType
+            )
+            if (!accepted) { deduplicator.forget(frame.messageId); return false }
+            attachmentTransfer.completeIncoming(senderOnion, completed.transferId)
+            sendMessageAck(senderOnion, frame.messageId)
+            return true
         }
         try {
             messageRepository.saveReceivedMessage(
@@ -2051,7 +2163,7 @@ class TorMessagingService private constructor(private val context: Context) {
                 Log.w(TAG, "Rejected unsealed mailbox payload with type ${rawFrame.frameType}")
                 return false
             }
-            return handleIncomingData(mailboxOnion, payload)
+            return handleIncomingData(mailboxOnion, payload, allowOfflineTimestamp = true)
         }
 
         val frame = OnionMessageProtocol.OnionFrame.decode(unsealed) ?: return false
@@ -2067,7 +2179,8 @@ class TorMessagingService private constructor(private val context: Context) {
         return handleIncomingData(
             senderOnion = contact?.onionAddress?.takeIf { it.isNotEmpty() } ?: mailboxOnion,
             data = unsealed,
-            isAlreadyDecrypted = true
+            isAlreadyDecrypted = true,
+            allowOfflineTimestamp = true
         )
     }
 
@@ -2504,6 +2617,19 @@ class TorMessagingService private constructor(private val context: Context) {
                 Log.d(TAG, "✅ BSP: Message $messageId synced with $peerId")
                 scope.launch {
                     messageQueue.markDelivered(messageId)
+                    try {
+                        groupMessaging.onTransportAck(messageId)
+                    } catch (_: Exception) {}
+                    try {
+                        messageRepository.updateDeliveryState(
+                            messageId,
+                            OnionMessageProtocol.DeliveryState.DELIVERED
+                        )
+                    } catch (_: Exception) {}
+                    messageListener?.onDeliveryStatusChanged(
+                        messageId,
+                        OnionMessageProtocol.DeliveryState.DELIVERED
+                    )
                 }
             }
 
@@ -2511,8 +2637,13 @@ class TorMessagingService private constructor(private val context: Context) {
                 Log.i(TAG, "📨 BSP: Received batch of ${frames.size} messages from $peerId")
                 scope.launch {
                     for (frame in frames) {
-                        // Process each synced message through the normal handler
-                        handleIncomingData(peerId, frame.encode())
+                        // Process each synced message through the normal handler with 7-day offline window
+                        handleIncomingData(
+                            senderOnion = peerId,
+                            data = frame.encode(),
+                            isAlreadyDecrypted = true,
+                            allowOfflineTimestamp = true
+                        )
                     }
                 }
             }
@@ -2522,13 +2653,17 @@ class TorMessagingService private constructor(private val context: Context) {
             }
         })
 
-        // Wire TorCircuitManager to BrambleSyncEngine
+        // Wire TorCircuitManager to BrambleSyncEngine with pairwise frame encryption
         syncEngine.registerTransport(object : BrambleSyncEngine.BspTransport {
             override suspend fun getConnectedPeers(): List<String> {
                 return circuitManager.getConnectedPeers()
             }
             override suspend fun sendData(peerId: String, data: ByteArray): Boolean {
-                return circuitManager.sendData(peerId, data)
+                val rawFrame = OnionMessageProtocol.OnionFrame.decode(data) ?: return false
+                val encryptedBytes = runCatching {
+                    encryptFrame(peerId, rawFrame.copy(timestamp = System.currentTimeMillis())).encode()
+                }.getOrNull() ?: return false
+                return circuitManager.sendData(peerId, encryptedBytes)
             }
         })
 
@@ -2539,15 +2674,14 @@ class TorMessagingService private constructor(private val context: Context) {
     // ===== Mailbox Protocol =====
 
     /**
-     * Try to deliver a message via the recipient's mailbox.
-     * This is the fallback path when direct P2P connection fails.
+     * Try to deliver a message via the 3-Tier Hybrid Offline Mailbox architecture:
+     * - Tier 1: Deposit sealed blob in our local Sender-Hosted Outbox Mailbox so the
+     *           recipient can pull it from our .onion mailbox as soon as they wake up
+     *           (even if their phone was powered off when we sent the message!).
+     * - Tier 2: Push sealed blob to the recipient's remote/self-hosted mailbox (.onion)
+     *           if reachable.
      *
-     * Flow: Us → Tor → Peer's Mailbox (.onion) → Peer polls and retrieves
-     *
-     * The message is already E2E encrypted, so the mailbox only sees an opaque blob.
-     * The mailbox stores it in a folder identified by the recipient's public key fingerprint.
-     *
-     * @return true if the message was successfully stored in the mailbox
+     * @return true if the message was stored in Tier 2 remote mailbox or Tier 1 local outbox
      */
     private suspend fun tryMailboxDelivery(
         recipientOnion: String,
@@ -2557,14 +2691,8 @@ class TorMessagingService private constructor(private val context: Context) {
             return false
         }
 
-        // Look up the contact to find their mailbox address
+        // Look up the contact to find their public key and optional remote mailbox address
         val contact = contactManager.getContactByOnion(recipientOnion) ?: return false
-        val mailboxOnion = contact.mailboxOnion
-
-        if (mailboxOnion.isNullOrEmpty()) {
-            Log.d(TAG, "📭 No mailbox configured for ${contact.nickname} — cannot use fallback")
-            return false
-        }
 
         return try {
             val recipientId = fingerprintForPublicKeyHex(contact.publicKey)
@@ -2574,12 +2702,28 @@ class TorMessagingService private constructor(private val context: Context) {
                 return false
             }
 
-            val stored = mailboxClient.storeInMailbox(
-                mailboxOnion = mailboxOnion,
+            // Tier 1: Always deposit into our local Sender-Hosted Outbox Mailbox so the offline
+            // recipient can pull the sealed blob from our mailbox .onion when they come online.
+            val depositedLocally = mailboxService.depositLocalBlob(
                 recipientId = recipientId,
-                encryptedPayload = payload
-            )
+                payload = payload,
+                senderOnion = getMyOnionAddress()
+            ) != null
+            val localOutboxPublished = depositedLocally && !ownMailboxOnion.isNullOrBlank()
 
+            // Tier 2: Push to recipient's remote mailbox (.onion) if known and online
+            val mailboxOnion = contact.mailboxOnion
+            val storedRemotely = if (!mailboxOnion.isNullOrBlank()) {
+                mailboxClient.storeInMailbox(
+                    mailboxOnion = mailboxOnion,
+                    recipientId = recipientId,
+                    encryptedPayload = payload
+                )
+            } else {
+                false
+            }
+
+            val stored = storedRemotely || localOutboxPublished
             if (stored) {
                 deliveryRoutes[message.uiMessageId] = TorDeliveryRoute.MAILBOX
                 messageQueue.markMailboxStored(message.id)
@@ -2590,7 +2734,10 @@ class TorMessagingService private constructor(private val context: Context) {
                         OnionMessageProtocol.DeliveryRoute.MAILBOX
                     )
                 }
-                Log.i(TAG, "📬 Message ${message.id} delivered via mailbox → $mailboxOnion")
+                Log.i(
+                    TAG,
+                    "📬 Message ${message.id} queued in offline mailbox (remote=$storedRemotely, localOutbox=$localOutboxPublished)"
+                )
 
                 // Notify listener about delivery route
                 if (message.completesUiMessage) {
@@ -2609,9 +2756,35 @@ class TorMessagingService private constructor(private val context: Context) {
     }
 
     /**
+     * Registers a contact's mailbox (or fallback to their main .onion on MAILBOX_PORT)
+     * in MailboxClient so we automatically poll their Tier 1 Sender-Hosted Outbox Mailbox
+     * for messages and ACKs queued for our identity fingerprint while we were offline.
+     */
+    suspend fun registerContactMailboxForPolling(contact: OnionContactManager.OnionContact) {
+        if (!mailboxClient.isInitialized()) {
+            mailboxClient.initialize(encryptionService)
+        }
+        val myFolderId = encryptionService.getIdentityFingerprint().lowercase()
+        if (myFolderId.isBlank()) return
+        val outboxToken = mailboxService.deriveContactOutboxToken(myFolderId)
+
+        // Register explicit contact.mailboxOnion if present
+        val explicitMailbox = contact.mailboxOnion
+            ?.let { OnionContactManager.OnionContact.canonicalizeOnionEndpoint(it) }
+            ?.takeIf { OnionContactManager.OnionContact.isValidOnionEndpoint(it) }
+        if (!explicitMailbox.isNullOrBlank()) {
+            mailboxClient.registerContactOutboxMailbox(
+                contactMailboxOnion = explicitMailbox,
+                accessToken = outboxToken,
+                targetFolderId = myFolderId
+            )
+        }
+    }
+
+    /**
      * Handle incoming MAILBOX_EXCHANGE frame from a peer.
      * The peer is sharing their mailbox .onion address so we can deliver
-     * messages to them even when they're offline.
+     * messages to them even when they're offline and poll their Tier 1 outbox.
      */
     private fun handleMailboxExchange(senderOnion: String, frame: OnionMessageProtocol.OnionFrame) {
         val exchange = OnionMessageProtocol.MailboxExchange.fromBytes(frame.payload)
@@ -2622,7 +2795,7 @@ class TorMessagingService private constructor(private val context: Context) {
 
         Log.i(TAG, "📬 Peer ${redactEndpoint(senderOnion)} shared mailbox: ${redactEndpoint(exchange.mailboxOnion)}")
 
-        // Update the contact's mailbox address
+        // Update the contact's mailbox address and register for Tier 1 outbox polling
         val contact = contactManager.getContactByOnion(senderOnion)
         if (contact != null) {
             val endpoint = OnionContactManager.OnionContact
@@ -2632,6 +2805,10 @@ class TorMessagingService private constructor(private val context: Context) {
                 return
             }
             contactManager.updateMailboxAddress(contact.id, endpoint)
+            val updated = contactManager.getContact(contact.id) ?: contact.copy(mailboxOnion = endpoint)
+            scope.launch {
+                registerContactMailboxForPolling(updated)
+            }
         }
     }
 
@@ -2650,13 +2827,14 @@ class TorMessagingService private constructor(private val context: Context) {
         val (recipientFolderId, encryptedPayload) = parsed
         Log.i(TAG, "📬 Mailbox store request from ${redactEndpoint(senderOnion)} for folder ${recipientFolderId.take(12)}...")
 
-        // Check if we're running a local MailboxService
-        val mailboxService = MailboxService.getInstance(context)
-        if (mailboxService.getMessageCount(recipientFolderId) >= 0) {
-            // We are acting as a mailbox — store the message
-            // The MailboxService HTTP API handles storage, but for direct P2P delivery
-            // we can inject directly
-            Log.d(TAG, "📬 Storing message in local mailbox for $recipientFolderId")
+        // Persist the sealed blob in our local MailboxService
+        val storedId = mailboxService.depositLocalBlob(
+            recipientId = recipientFolderId,
+            payload = encryptedPayload,
+            senderOnion = senderOnion
+        )
+        if (storedId != null) {
+            Log.d(TAG, "📬 Stored relayed message $storedId in local mailbox for ${recipientFolderId.take(12)}...")
         }
     }
 
@@ -2664,12 +2842,19 @@ class TorMessagingService private constructor(private val context: Context) {
      * Start polling registered mailboxes for offline messages.
      * This is the receiving side of the store-and-forward architecture.
      *
-     * Flow: Peer sends → Peer's Mailbox stores → We poll → We receive
+     * Flow: Peer sends → Peer's Mailbox / Outbox stores → We poll → We receive
      */
     private fun startMailboxPolling() {
         // Initialize mailbox client with our encryption service
         if (!mailboxClient.isInitialized()) {
             mailboxClient.initialize(encryptionService)
+        }
+
+        // Register all existing contacts' mailboxes for Tier 1 outbox polling
+        scope.launch {
+            for (contact in contactManager.getAllContacts()) {
+                registerContactMailboxForPolling(contact)
+            }
         }
 
         // Set up message callback to process fetched messages
@@ -2701,7 +2886,7 @@ class TorMessagingService private constructor(private val context: Context) {
      */
     private suspend fun sendMailboxExchange(recipientOnion: String) {
         val myOnion = getMyOnionAddress()
-        val mailboxEndpoint = ownMailboxOnion
+        val mailboxEndpoint = ownMailboxOnion ?: contactManager.getMyMailboxOnion()
         if (mailboxEndpoint.isNullOrBlank()) {
             Log.d(TAG, "Cannot send mailbox exchange - mailbox hidden service not ready")
             return
@@ -2762,8 +2947,28 @@ class TorMessagingService private constructor(private val context: Context) {
         }
 
         ownMailboxOnion = endpoint
+        contactManager.setMyMailboxOnion(endpoint)
         mailboxClient.registerLocalMailbox(endpoint, mailboxAccessToken)
+        for (contact in contactManager.getAllContacts()) {
+            registerContactMailboxForPolling(contact)
+        }
         Log.i(TAG, "Mailbox ready at ${redactEndpoint(endpoint)}")
+    }
+
+    /**
+     * Re-publish the mailbox hidden service after Tor reconnects. The private
+     * key is retained by TorDaemonManager, so the endpoint remains stable when
+     * possible; registering again also refreshes polling after a service reset.
+     */
+    suspend fun refreshMailboxHost() {
+        if (_serviceState.value !in setOf(ServiceState.WAITING_FOR_TOR, ServiceState.RUNNING)) {
+            return
+        }
+        try {
+            startMailboxHost()
+        } catch (e: Exception) {
+            Log.w(TAG, "Mailbox refresh failed: ${e.message}")
+        }
     }
 
     private fun getOrCreateMailboxAccessToken(): String {

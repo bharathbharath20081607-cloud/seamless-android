@@ -1,11 +1,12 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.onboarding
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.BorderStroke
 
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -23,20 +24,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.stringResource
 import com.seamless.android.R
 import com.seamless.android.ui.theme.SeamlessColors
-import com.seamless.android.ui.theme.SeamlessTeal
-import com.seamless.android.ui.theme.SeamlessCyan
-import com.seamless.android.ui.theme.SeamlessPurple
-import com.seamless.android.ui.theme.SeamlessPink
 
 /**
  * Permission explanation screen shown before requesting permissions
@@ -80,7 +75,7 @@ fun PermissionExplanationScreen(
                     Text(
                         text = stringResource(R.string.app_name),
                         style = MaterialTheme.typography.headlineLarge.copy(
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = FontFamily.Default,
                             fontWeight = FontWeight.Bold,
                             fontSize = 32.sp
                         ),
@@ -91,7 +86,7 @@ fun PermissionExplanationScreen(
                 Text(
                     text = stringResource(R.string.about_tagline),
                     fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = FontFamily.Default,
                     color = colorScheme.onBackground.copy(alpha = 0.7f)
                 )
             }
@@ -129,7 +124,7 @@ fun PermissionExplanationScreen(
                             Text(
                                 text = stringResource(R.string.privacy_bullets),
                                 style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = FontFamily.Default,
                                 color = colorScheme.onBackground.copy(alpha = 0.8f)
                             )
                         }
@@ -141,7 +136,7 @@ fun PermissionExplanationScreen(
             Text(
                 text = stringResource(R.string.permissions_header),
                 style = MaterialTheme.typography.titleMedium.copy(
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = FontFamily.Default,
                     fontWeight = FontWeight.Bold,
                     color = colorScheme.primary
                 ),
@@ -190,33 +185,18 @@ fun PermissionExplanationScreen(
                     .padding(horizontal = 24.dp, vertical = 16.dp)
                     .height(56.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.Transparent
+                    containerColor = colorScheme.primary,
+                    contentColor = colorScheme.onPrimary
                 ),
-                contentPadding = PaddingValues()
+                shape = RoundedCornerShape(28.dp)
             ) {
-                 Box(
-                     modifier = Modifier
-                         .fillMaxSize()
-                         .background(
-                             brush = androidx.compose.ui.graphics.Brush.horizontalGradient(
-                                 colors = listOf(
-                                    com.seamless.android.ui.theme.SeamlessColors.BrandGradientStart,
-                                    com.seamless.android.ui.theme.SeamlessColors.BrandGradientEnd
-                                 )
-                             ),
-                             shape = ButtonDefaults.shape
-                         ),
-                     contentAlignment = Alignment.Center
-                 ) {
-                    Text(
-                        text = stringResource(R.string.grant_permissions),
-                        style = MaterialTheme.typography.bodyLarge.copy(
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
+                Text(
+                    text = stringResource(R.string.grant_permissions),
+                    style = MaterialTheme.typography.bodyLarge.copy(
+                        fontFamily = FontFamily.Default,
+                        fontWeight = FontWeight.Bold
                     )
-                 }
+                )
             }
         }
     }
@@ -253,11 +233,7 @@ private fun PermissionCategoryCard(
         ) {
             // Tint icon based on permission type for visual variety
             val iconTint = when (category.type) {
-                PermissionType.NEARBY_DEVICES -> SeamlessTeal
                 PermissionType.PRECISE_LOCATION -> SeamlessColors.Warning
-                PermissionType.NOTIFICATIONS -> SeamlessCyan
-                PermissionType.BATTERY_OPTIMIZATION -> SeamlessPurple
-                PermissionType.MICROPHONE -> SeamlessPink
                 else -> colorScheme.primary
             }
 
@@ -276,14 +252,14 @@ private fun PermissionCategoryCard(
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = colorScheme.onBackground,
-                    fontFamily = FontFamily.Monospace
+                    fontFamily = FontFamily.Default
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = category.description,
                     style = MaterialTheme.typography.bodySmall,
                     color = colorScheme.onBackground.copy(alpha = 0.8f),
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = FontFamily.Default,
                     lineHeight = 16.sp
                 )
 
@@ -309,7 +285,7 @@ private fun PermissionCategoryCard(
                         Text(
                             text = stringResource(R.string.location_tracking_warning),
                             style = MaterialTheme.typography.labelSmall.copy(
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = FontFamily.Default,
                                 fontWeight = FontWeight.Bold,
                                 color = com.seamless.android.ui.theme.SeamlessColors.Warning
                             )

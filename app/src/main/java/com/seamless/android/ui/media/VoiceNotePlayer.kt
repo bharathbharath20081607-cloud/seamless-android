@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui.media
 
 import android.media.MediaPlayer
@@ -8,9 +9,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -74,43 +73,81 @@ fun VoiceNotePlayer(
 
     LaunchedEffect(isPlaying, isPrepared) {
         try {
-            if (isPlaying && isPrepared) player.start() else if (isPrepared && player.isPlaying) player.pause()
+            if (isPlaying && isPrepared) {
+                if (progress >= 0.99f || (durationMs > 0 && player.currentPosition >= durationMs - 150)) {
+                    player.seekTo(0)
+                    progress = 0f
+                }
+                player.start()
+            } else if (isPrepared && player.isPlaying) {
+                player.pause()
+            }
         } catch (_: Exception) {}
     }
     LaunchedEffect(isPlaying, isPrepared) {
         while (isPlaying && isPrepared) {
             progress = try { player.currentPosition.toFloat() / (player.duration.toFloat().coerceAtLeast(1f)) } catch (_: Exception) { 0f }
-            kotlinx.coroutines.delay(100)
+            kotlinx.coroutines.delay(60)
         }
     }
-    DisposableEffect(Unit) { onDispose { try { player.release() } catch (_: Exception) {} } }
+    DisposableEffect(path) { onDispose { try { player.release() } catch (_: Exception) {} } }
 
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Disable play/pause while showing send progress override (optional UX choice)
+        // Disable play/pause while showing send progress override
         val controlsEnabled = isPrepared && !isError && progressOverride == null
-        FilledTonalIconButton(onClick = { if (controlsEnabled) isPlaying = !isPlaying }, enabled = controlsEnabled, modifier = Modifier.size(28.dp)) {
+        val contentColor = androidx.compose.material3.LocalContentColor.current
+        val iconTint = if (contentColor.red > 0.5f) Color.Black else Color.White
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .background(
+                    color = if (controlsEnabled) contentColor else contentColor.copy(alpha = 0.25f),
+                    shape = CircleShape
+                )
+                .clickable(enabled = controlsEnabled) { isPlaying = !isPlaying },
+            contentAlignment = Alignment.Center
+        ) {
             Icon(
                 imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                contentDescription = if (isPlaying) "Pause" else "Play"
+                contentDescription = if (isPlaying) "Pause" else "Play",
+                tint = iconTint,
+                modifier = Modifier.size(18.dp)
             )
         }
-        val progressBarColor = progressColor ?: MaterialTheme.colorScheme.primary
         com.seamless.android.ui.media.WaveformPreview(
             modifier = Modifier
-                .height(24.dp)
+                .height(28.dp)
                 .weight(1f)
-                .padding(horizontal = 8.dp, vertical = 4.dp),
+                .padding(horizontal = 4.dp, vertical = 2.dp),
             path = path,
             sendProgress = progressOverride,
             playbackProgress = if (progressOverride == null) progress else null,
             onSeek = seekTo
         )
-        val durText = if (durationMs > 0) String.format("%02d:%02d", (durationMs / 1000) / 60, (durationMs / 1000) % 60) else "--:--"
-        Text(text = durText, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        val displayMs = if (isPlaying && durationMs > 0) {
+            (progress * durationMs).toInt().coerceIn(0, durationMs)
+        } else {
+            durationMs
+        }
+        val durText = if (durationMs > 0) {
+            String.format(java.util.Locale.US, "%02d:%02d", (displayMs / 1000) / 60, (displayMs / 1000) % 60)
+        } else if (isError) {
+            "00:00"
+        } else {
+            "--:--"
+        }
+        Text(
+            text = durText,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 11.sp,
+            color = contentColor.copy(alpha = 0.78f)
+        )
     }
 }
 

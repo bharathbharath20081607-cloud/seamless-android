@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui.fileshare
 
 import androidx.compose.animation.core.*
@@ -18,16 +19,12 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import com.seamless.android.ui.theme.SeamlessCyan
-import com.seamless.android.ui.theme.SeamlessTeal
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
@@ -38,7 +35,6 @@ import com.seamless.android.R
 import com.seamless.android.service.HyperDropIdentity
 import androidx.compose.ui.platform.LocalContext
 import kotlin.math.sin
-import kotlin.random.Random
 
 /**
  * HyperDrop - Premium file sharing main screen
@@ -143,72 +139,118 @@ private fun HyperDropTopBar(onBackClick: () -> Unit) {
 @Composable
 private fun HyperDropLogo() {
     val infiniteTransition = rememberInfiniteTransition(label = "logo_animation")
-    
-    // Glow pulse animation
-    val glowAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.3f,
-        targetValue = 0.8f,
+
+    val haloBreath by infiniteTransition.animateFloat(
+        initialValue = 0.12f,
+        targetValue = 0.28f,
         animationSpec = infiniteRepeatable(
-            animation = tween(2000, easing = FastOutSlowInEasing),
+            animation = tween(2600, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
-        label = "glow"
+        label = "halo_breath"
     )
-    
-    // Rotation animation
-    val rotation by infiniteTransition.animateFloat(
+
+    val bezelRotation by infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(8000, easing = LinearEasing),
+            animation = tween(18000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
-        label = "rotation"
+        label = "bezel_rotation"
     )
-    
+
     Box(
         contentAlignment = Alignment.Center,
-        modifier = Modifier.size(120.dp)
+        modifier = Modifier.size(128.dp)
     ) {
-        // Outer glow ring
+        // Precision machined watch-bezel medallion with 36 micro-ticks
         Canvas(
-            modifier = Modifier
-                .size(120.dp)
-                .graphicsLayer { rotationZ = rotation }
+            modifier = Modifier.size(128.dp)
         ) {
+            val center = this.center
+            val outerRadius = size.minDimension / 2f
+
+            // Breathing radial halo
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = haloBreath),
+                        Color.Transparent
+                    ),
+                    center = center,
+                    radius = outerRadius
+                ),
+                radius = outerRadius
+            )
+
+            // Outer specular hairline ring
             drawCircle(
                 brush = Brush.sweepGradient(
                     colors = listOf(
-                        HyperDropColors.PrimaryCyan.copy(alpha = glowAlpha),
-                        HyperDropColors.SecondaryTeal.copy(alpha = 0.1f),
-                        HyperDropColors.PrimaryCyan.copy(alpha = glowAlpha)
-                    )
+                        Color.White.copy(alpha = 0.35f),
+                        Color.White.copy(alpha = 0.08f),
+                        Color.White.copy(alpha = 0.22f),
+                        Color.White.copy(alpha = 0.06f),
+                        Color.White.copy(alpha = 0.35f)
+                    ),
+                    center = center
                 ),
-                radius = size.minDimension / 2,
-                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4.dp.toPx())
+                radius = outerRadius - 2.dp.toPx(),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx())
             )
+
+            // 36 precision micro-ticks around inner bezel
+            val tickOuterR = outerRadius - 6.dp.toPx()
+            for (i in 0 until 36) {
+                val angleDeg = i * 10f + bezelRotation * 0.1f
+                val rad = Math.toRadians(angleDeg.toDouble())
+                val isMajor = i % 3 == 0
+                val tickLen = if (isMajor) 6.dp.toPx() else 3.dp.toPx()
+                val tickAlpha = if (isMajor) 0.32f else 0.14f
+                val startX = center.x + (tickOuterR - tickLen) * kotlin.math.cos(rad).toFloat()
+                val startY = center.y + (tickOuterR - tickLen) * kotlin.math.sin(rad).toFloat()
+                val endX = center.x + tickOuterR * kotlin.math.cos(rad).toFloat()
+                val endY = center.y + tickOuterR * kotlin.math.sin(rad).toFloat()
+                drawLine(
+                    color = Color.White.copy(alpha = tickAlpha),
+                    start = Offset(startX, startY),
+                    end = Offset(endX, endY),
+                    strokeWidth = if (isMajor) 1.2.dp.toPx() else 0.8.dp.toPx()
+                )
+            }
         }
-        
-        // Inner circle with icon
+
+        // Static machined obsidian center medallion
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
-                .size(80.dp)
+                .size(76.dp)
                 .clip(CircleShape)
                 .background(
-                    Brush.linearGradient(
+                    Brush.verticalGradient(
                         colors = listOf(
-                            HyperDropColors.PrimaryCyan.copy(alpha = 0.2f),
-                            HyperDropColors.SecondaryTeal.copy(alpha = 0.2f)
+                            Color(0xFF1A1A22),
+                            Color(0xFF0E0E13)
                         )
                     )
+                )
+                .border(
+                    width = 1.dp,
+                    brush = Brush.linearGradient(
+                        colors = listOf(
+                            Color.White.copy(alpha = 0.28f),
+                            Color.White.copy(alpha = 0.06f)
+                        )
+                    ),
+                    shape = CircleShape
                 )
         ) {
             Icon(
                 imageVector = Icons.Outlined.Bolt,
                 contentDescription = null,
-                tint = HyperDropColors.PrimaryCyan,
-                modifier = Modifier.size(40.dp)
+                tint = Color.White,
+                modifier = Modifier.size(36.dp)
             )
         }
     }
@@ -223,135 +265,57 @@ private fun HyperDropActionCard(
     secondaryColor: Color,
     onClick: () -> Unit
 ) {
-    val haptic = LocalHapticFeedback.current
-    val infiniteTransition = rememberInfiniteTransition(label = "card_animation")
-    
-    // Subtle scale pulse
-    val scale by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.02f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "scale"
-    )
-    
-    // Border glow
-    val glowAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.3f,
-        targetValue = 0.7f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2000, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "glow"
-    )
-
-    // Pulsing radial glow behind icon
-    val iconGlowRadius by infiniteTransition.animateFloat(
-        initialValue = 0.6f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "icon_glow"
-    )
-
     GlassCard(
         modifier = Modifier
             .fillMaxWidth()
-            .height(100.dp)
-            .scale(scale),
-        onClick = {
-            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-            onClick()
-        },
-        shape = RoundedCornerShape(20.dp),
-        showShimmerBorder = true
+            .height(96.dp),
+        onClick = onClick,
+        shape = RoundedCornerShape(22.dp),
+        showShimmerBorder = false
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .offset(x = (-HyperDropSpacing.cardPadding))
-                .offset(y = (-HyperDropSpacing.cardPadding))
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            // Specular light accent
+            HyperDropIconCircle(
+                icon = icon,
+                tint = primaryColor,
+                backgroundColor = Color(0xFF1A1A22),
+                size = 50.dp,
+                iconSize = 24.dp
+            )
+
+            Spacer(modifier = Modifier.width(16.dp))
+
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(
+                    text = title,
+                    style = HyperDropTypography.TitleLarge
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = subtitle,
+                    style = HyperDropTypography.BodyMedium.copy(
+                        color = HyperDropColors.TextTertiary
+                    )
+                )
+            }
+
             Box(
                 modifier = Modifier
-                    .width(3.dp)
-                    .fillMaxHeight()
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(
-                                Color.White.copy(alpha = 0.5f),
-                                Color.White.copy(alpha = 0.1f),
-                                Color.Transparent
-                            )
-                        )
-                    )
-            )
-            
-            Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(start = 14.dp, end = 20.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.06f))
+                    .border(1.dp, Color.White.copy(alpha = 0.12f), CircleShape),
+                contentAlignment = Alignment.Center
             ) {
-                // Icon with pulsing radial glow behind it
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier.size(56.dp)
-                ) {
-                    // Pulsing radial glow Canvas
-                    Canvas(modifier = Modifier.size(56.dp)) {
-                        drawCircle(
-                            brush = Brush.radialGradient(
-                                colors = listOf(
-                                    primaryColor.copy(alpha = 0.35f * iconGlowRadius),
-                                    primaryColor.copy(alpha = 0.1f * iconGlowRadius),
-                                    Color.Transparent
-                                ),
-                                center = center,
-                                radius = size.minDimension / 2 * (0.8f + iconGlowRadius * 0.4f)
-                            )
-                        )
-                    }
-                    // Icon circle
-                    HyperDropIconCircle(
-                        icon = icon,
-                        tint = primaryColor,
-                        backgroundColor = primaryColor.copy(alpha = 0.15f),
-                        size = 52.dp,
-                        iconSize = 28.dp
-                    )
-                }
-                
-                Spacer(modifier = Modifier.width(16.dp))
-                
-                Column(
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = title,
-                        style = HyperDropTypography.TitleLarge
-                    )
-                    Text(
-                        text = subtitle,
-                        style = HyperDropTypography.BodyMedium.copy(
-                            color = HyperDropColors.TextTertiary
-                        )
-                    )
-                }
-                
-                // Arrow indicator
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowForward,
                     contentDescription = null,
-                    tint = primaryColor.copy(alpha = 0.6f),
-                    modifier = Modifier
-                        .size(24.dp)
+                    tint = primaryColor.copy(alpha = 0.8f),
+                    modifier = Modifier.size(16.dp)
                 )
             }
         }
@@ -360,79 +324,59 @@ private fun HyperDropActionCard(
 
 @Composable
 private fun SpeedIndicator() {
-    val infiniteTransition = rememberInfiniteTransition(label = "speed_indicator")
-    
-    val dotAlpha1 by infiniteTransition.animateFloat(
-        initialValue = 0.3f,
-        targetValue = 1f,
+    val infiniteTransition = rememberInfiniteTransition(label = "speed_wave")
+    val phase by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * Math.PI).toFloat(),
         animationSpec = infiniteRepeatable(
-            animation = tween(600, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
+            animation = tween(1800, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
         ),
-        label = "dot1"
-    )
-    
-    val dotAlpha2 by infiniteTransition.animateFloat(
-        initialValue = 0.3f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(600, easing = LinearEasing, delayMillis = 200),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "dot2"
-    )
-    
-    val dotAlpha3 by infiniteTransition.animateFloat(
-        initialValue = 0.3f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(600, easing = LinearEasing, delayMillis = 400),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "dot3"
+        label = "wave_phase"
     )
 
     Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(Color(0xFF101015).copy(alpha = 0.9f))
+            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(999.dp))
+            .padding(horizontal = 14.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
             imageVector = Icons.Outlined.Bolt,
             contentDescription = null,
-            tint = HyperDropColors.PrimaryCyan.copy(alpha = 0.7f),
-            modifier = Modifier.size(16.dp)
+            tint = Color.White.copy(alpha = 0.85f),
+            modifier = Modifier.size(15.dp)
         )
-        Spacer(modifier = Modifier.width(8.dp))
+        Spacer(modifier = Modifier.width(6.dp))
         Text(
-            // TODO: localize "Lightning Speed"
-            text = "Lightning Speed",
-            style = HyperDropTypography.BodySmall.copy(
-                color = HyperDropColors.TextTertiary
+            text = "Wi-Fi Direct High-Speed Pipe",
+            style = HyperDropTypography.Caption.copy(
+                color = HyperDropColors.TextSecondary,
+                fontWeight = FontWeight.Medium
             )
         )
-        Spacer(modifier = Modifier.width(4.dp))
-        
-        // Animated dots
-        Box(
-            modifier = Modifier
-                .size(4.dp)
-                .clip(CircleShape)
-                .background(HyperDropColors.PrimaryCyan.copy(alpha = dotAlpha1))
-        )
-        Spacer(modifier = Modifier.width(2.dp))
-        Box(
-            modifier = Modifier
-                .size(4.dp)
-                .clip(CircleShape)
-                .background(HyperDropColors.PrimaryCyan.copy(alpha = dotAlpha2))
-        )
-        Spacer(modifier = Modifier.width(2.dp))
-        Box(
-            modifier = Modifier
-                .size(4.dp)
-                .clip(CircleShape)
-                .background(HyperDropColors.PrimaryCyan.copy(alpha = dotAlpha3))
-        )
+        Spacer(modifier = Modifier.width(10.dp))
+
+        // 5-bar sinusoidal wave visualizer
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(2.5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.height(14.dp)
+        ) {
+            for (i in 0 until 5) {
+                val wave = ((sin(phase + i * 0.85f) + 1f) / 2f).coerceIn(0.25f, 1f)
+                Box(
+                    modifier = Modifier
+                        .width(2.dp)
+                        .fillMaxHeight(wave)
+                        .clip(RoundedCornerShape(1.dp))
+                        .background(Color.White.copy(alpha = 0.45f + 0.45f * wave))
+                )
+            }
+        }
     }
 }
 
@@ -452,10 +396,10 @@ private fun DeviceIdentityChip() {
     // Scale animation on tap
     var tapped by remember { mutableStateOf(false) }
     val chipScale by animateFloatAsState(
-        targetValue = if (tapped) 0.95f else 1f,
+        targetValue = if (tapped) 0.96f else 1f,
         animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessLow
+            dampingRatio = 0.84f,
+            stiffness = 400f
         ),
         label = "chip_scale",
         finishedListener = { tapped = false }

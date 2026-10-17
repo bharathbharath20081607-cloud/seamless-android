@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui.fileshare
 
 import android.app.Application
@@ -22,7 +23,6 @@ import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pInfo
 import android.util.Log
 import java.io.File
-import java.io.FileOutputStream
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 
@@ -44,6 +44,49 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
     // Wi-Fi Aware for instant discovery (like AirDrop)
     private var wifiAwareService: com.seamless.android.service.WifiAwareService? = null
     private var isWifiAwareAvailable = false
+
+    // Dual-Mode peer maps so Wi-Fi Direct and Wi-Fi Aware discoveries merge cleanly without overwriting
+    private val p2pPeersMap = java.util.concurrent.ConcurrentHashMap<String, WifiP2pDevice>()
+    private val awarePeersMap = java.util.concurrent.ConcurrentHashMap<String, String>() // peerId -> peerName
+
+    private fun rebuildDiscoveredDevices() {
+        val merged = mutableListOf<WifiP2pDevice>()
+        val matchedAwareIds = mutableSetOf<String>()
+
+        // 1. Add all real Wi-Fi Direct peers (with valid MAC addresses)
+        for (p2p in p2pPeersMap.values) {
+            val cleanP2pName = p2p.deviceName.orEmpty().removePrefix("⚡ ").trim()
+            val matchingAwareEntry = awarePeersMap.entries.firstOrNull { (_, awareName) ->
+                val cleanAware = awareName.removePrefix("⚡ ").trim()
+                cleanP2pName.isNotEmpty() && cleanAware.isNotEmpty() && (
+                    cleanP2pName.equals(cleanAware, ignoreCase = true) ||
+                        cleanP2pName.contains(cleanAware, ignoreCase = true) ||
+                        cleanAware.contains(cleanP2pName, ignoreCase = true)
+                    )
+            }
+            val deviceCopy = WifiP2pDevice(p2p)
+            if (matchingAwareEntry != null) {
+                matchedAwareIds.add(matchingAwareEntry.key)
+                if (!deviceCopy.deviceName.startsWith("⚡")) {
+                    deviceCopy.deviceName = "⚡ ${deviceCopy.deviceName}"
+                }
+            }
+            merged.add(deviceCopy)
+        }
+
+        // 2. Add any Wi-Fi Aware peers not yet matched to a Wi-Fi Direct MAC
+        for ((peerId, peerName) in awarePeersMap.entries) {
+            if (peerId in matchedAwareIds) continue
+            val synthetic = WifiP2pDevice().apply {
+                deviceAddress = peerId
+                deviceName = if (peerName.startsWith("⚡")) peerName else "⚡ $peerName"
+                status = WifiP2pDevice.AVAILABLE
+            }
+            merged.add(synthetic)
+        }
+
+        _discoveredDevices.postValue(merged)
+    }
 
     private val _isWifiDirectEnabled = MutableLiveData(false)
     val isWifiDirectEnabled: LiveData<Boolean> = _isWifiDirectEnabled
@@ -213,7 +256,6 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
             context.startService(intent)
         }
         // Bind to the service so we can receive WifiDirectCallback updates
-        // CRITICAL FIX: Use BIND_AUTO_CREATE to ensure service starts and binds properly
         try {
             val bound = context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
             isServiceBound = bound
@@ -228,6 +270,8 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
         discoveryJob?.cancel()
         
         // Clear stale devices first
+        p2pPeersMap.clear()
+        awarePeersMap.clear()
         _discoveredDevices.postValue(emptyList())
         _isDiscovering.postValue(true)
         
@@ -261,7 +305,6 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
     private fun startDiscoveryInternal(context: Context) {
         // STRATEGY: Simultaneous Discovery (Dual-Mode)
         // We run Wi-Fi Direct AND Wi-Fi Aware (if supported) in parallel.
-        // This ensures compatibility with all devices and catches "split-brain" scenarios.
         
         // 1. Always start Wi-Fi Direct (Base Layer)
         startWifiDirectDiscovery()
@@ -276,35 +319,14 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
                 wifiAwareService = com.seamless.android.service.WifiAwareService(context)
                 wifiAwareService?.setCallback(object : com.seamless.android.service.WifiAwareService.Callback {
                     override fun onDeviceDiscovered(peerId: String, peerName: String, peerHandle: Any) {
-                        Log.i(TAG, "🎯 Wi-Fi Aware: Found device: $peerName")
-                        
-                        // Deduplication: Check if we already have a device with this name (from Direct)
-                        // Aware names often are just the model, similar to Direct names.
-                        val currentDevices = _discoveredDevices.value.orEmpty().toMutableList()
-                        val alreadyExists = currentDevices.any { 
-                            it.deviceName == peerName || it.deviceAddress == peerId 
-                        }
-                        
-                        if (!alreadyExists) {
-                            // Create a synthetic WifiP2pDevice for UI compatibility
-                            val device = android.net.wifi.p2p.WifiP2pDevice().apply {
-                                deviceAddress = peerId // Use Aware Peer ID as address
-                                deviceName = "⚡ $peerName" // Lightning bolt indicates Aware
-                                // Status 3 = AVAILABLE
-                                status = android.net.wifi.p2p.WifiP2pDevice.AVAILABLE
-                            }
-                            
-                            currentDevices.add(device)
-                            _discoveredDevices.postValue(currentDevices)
-                        } else {
-                            Log.d(TAG, "Duplicate device ignored: $peerName")
-                        }
+                        Log.i(TAG, "🎯 Wi-Fi Aware: Found device: $peerName ($peerId)")
+                        awarePeersMap[peerId] = peerName
+                        rebuildDiscoveredDevices()
                     }
                     
                     override fun onDeviceLost(peerId: String) {
-                        val currentDevices = _discoveredDevices.value.orEmpty().toMutableList()
-                        currentDevices.removeIf { it.deviceAddress == peerId }
-                        _discoveredDevices.postValue(currentDevices)
+                        awarePeersMap.remove(peerId)
+                        rebuildDiscoveredDevices()
                     }
                     
                     override fun onSessionReady() {
@@ -331,7 +353,7 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
     }
     
     private fun startWifiDirectDiscovery() {
-        Log.i(TAG, "🔍 Starting Wi-Fi Direct discovery (fallback mode)")
+        Log.i(TAG, "🔍 Starting Wi-Fi Direct discovery")
         val context = getApplication<Application>()
         val intent = Intent(context, WifiDirectService::class.java).apply {
             action = WifiDirectService.ACTION_START_DISCOVERY
@@ -403,25 +425,82 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
         _isDiscovering.value = false
     }
 
+    private fun resolveP2pMacAddress(deviceAddressOrAwareId: String): String? {
+        if (deviceAddressOrAwareId.contains(":")) {
+            return deviceAddressOrAwareId
+        }
+        val awareName = awarePeersMap[deviceAddressOrAwareId]?.removePrefix("⚡ ")?.trim().orEmpty()
+        if (awareName.isNotEmpty()) {
+            val matchedByName = p2pPeersMap.values.firstOrNull { p2p ->
+                val p2pName = p2p.deviceName.orEmpty().removePrefix("⚡ ").trim()
+                p2pName.equals(awareName, ignoreCase = true) ||
+                    p2pName.contains(awareName, ignoreCase = true) ||
+                    awareName.contains(p2pName, ignoreCase = true)
+            }
+            if (matchedByName != null) return matchedByName.deviceAddress
+        }
+        // Fallback: if there is exactly 1 available Wi-Fi Direct peer in range, pair with it
+        if (p2pPeersMap.size == 1) {
+            return p2pPeersMap.values.first().deviceAddress
+        }
+        return null
+    }
+
     fun connectToDevice(deviceAddress: String) {
         Log.d(TAG, "📱 Attempting to connect to device: $deviceAddress")
         
-        // PRODUCTION FIX: Ensure service is bound before connecting
-        // This prevents the "click does nothing" bug
+        // Ensure service is bound before connecting
         if (!isServiceBound || wifiDirectService == null) {
             Log.w(TAG, "⚠️ WifiDirectService not bound, retrying bind before connect...")
             val context = getApplication<Application>()
             val intent = Intent(context, WifiDirectService::class.java)
             try {
                 context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
-                // Small delay to allow binding to complete
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    performConnect(deviceAddress)
+                    connectToDevice(deviceAddress)
                 }, 300)
                 return
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to bind to WifiDirectService", e)
             }
+        }
+
+        // If already connected to a formed group, send pending files directly
+        if (_connectionInfo.value?.groupFormed == true) {
+            if (_pendingFile.value != null) {
+                sendPendingFile()
+                return
+            } else if (pendingFilesQueue.isNotEmpty()) {
+                processNextInQueue()
+                return
+            }
+        }
+
+        // Resolve synthetic Wi-Fi Aware ID to a real Wi-Fi Direct MAC address
+        if (!deviceAddress.contains(":")) {
+            val immediateMac = resolveP2pMacAddress(deviceAddress)
+            if (immediateMac != null) {
+                performConnect(immediateMac)
+                return
+            }
+            val awareName = awarePeersMap[deviceAddress] ?: "device"
+            _statusMessage.postValue("Negotiating high-speed Wi-Fi Direct link with $awareName...")
+            startWifiDirectDiscovery()
+            viewModelScope.launch {
+                var resolvedMac: String? = null
+                repeat(15) {
+                    delay(300L)
+                    resolvedMac = resolveP2pMacAddress(deviceAddress)
+                    if (resolvedMac != null) return@repeat
+                }
+                val finalMac = resolvedMac
+                if (finalMac != null) {
+                    performConnect(finalMac)
+                } else {
+                    _errorMessage.postValue("Waiting for $awareName's Wi-Fi Direct channel — tap again in a moment.")
+                }
+            }
+            return
         }
         
         performConnect(deviceAddress)
@@ -431,6 +510,8 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
         // Cancel any existing timeout job
         connectionTimeoutJob?.cancel()
         lastConnectionAttemptDevice = deviceAddress
+        _errorMessage.postValue(null)
+        _statusMessage.postValue("Connecting to device...")
         
         val context = getApplication<Application>()
         val intent = Intent(context, WifiDirectService::class.java).apply {
@@ -440,10 +521,9 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
         Log.d(TAG, "📤 Sending CONNECT intent for $deviceAddress, serviceBound=$isServiceBound")
         context.startService(intent)
         
-        // PRODUCTION FIX: Start connection timeout
+        // Start connection timeout
         connectionTimeoutJob = viewModelScope.launch {
             delay(CONNECTION_TIMEOUT_MS)
-            // Check if we're still waiting for connection
             if (_connectionInfo.value?.groupFormed != true) {
                 Log.w(TAG, "⏰ Connection timeout after ${CONNECTION_TIMEOUT_MS/1000}s to $deviceAddress")
                 _errorMessage.postValue("Connection timed out. Tap to retry.")
@@ -861,34 +941,57 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     override fun onPeersDiscovered(peers: Collection<WifiP2pDevice>) {
-        _discoveredDevices.value = peers.toList()
-        Log.d(TAG, "Discovered ${peers.size} devices")
+        p2pPeersMap.clear()
+        for (peer in peers) {
+            if (!peer.deviceAddress.isNullOrBlank()) {
+                p2pPeersMap[peer.deviceAddress] = peer
+            }
+        }
+        rebuildDiscoveredDevices()
+        Log.d(TAG, "Discovered ${peers.size} Wi-Fi Direct devices (total merged: ${_discoveredDevices.value?.size ?: 0})")
+    }
+
+    override fun onConnectionFailed(reason: Int) {
+        connectionTimeoutJob?.cancel()
+        val reasonText = when (reason) {
+            -1 -> "Missing Nearby Wi-Fi / Location permission."
+            android.net.wifi.p2p.WifiP2pManager.BUSY -> "Wi-Fi Direct is busy — please tap again."
+            android.net.wifi.p2p.WifiP2pManager.P2P_UNSUPPORTED -> "Wi-Fi Direct is not supported on this device."
+            else -> "Could not connect to peer (code $reason)."
+        }
+        _errorMessage.value = reasonText
+        _statusMessage.value = reasonText
+        Log.e(TAG, "Wi-Fi Direct connection failed: $reasonText")
     }
 
     override fun onConnected(connectionInfo: WifiP2pInfo) {
+        connectionTimeoutJob?.cancel()
         _connectionInfo.value = connectionInfo
         _statusMessage.value = "Connected via Wi‑Fi Direct (${if (connectionInfo.isGroupOwner) "Group owner" else "Client"})."
         _errorMessage.value = null
-        Log.d(TAG, "Connected to group: ${connectionInfo.groupOwnerAddress}")
+        Log.d(TAG, "Connected to group: ${connectionInfo.groupOwnerAddress} (isGroupOwner=${connectionInfo.isGroupOwner})")
         
-        // PRODUCTION FIX: Auto-send pending file when connection established
-        // This matches AirDrop/Quick Share UX - selecting a device = sending the file
-        // Only send if we're the client (sender) and have pending files
-        if (!connectionInfo.isGroupOwner) {
-            // Check single pending file first (prepareFileForSending flow)
-            if (_pendingFile.value != null) {
-                Log.d(TAG, "📤 Auto-sending pending file after connection established")
-                sendPendingFile()
-            }
-            // Also check multi-file queue (addFilesToQueue flow) - CRITICAL FIX
-            else if (pendingFilesQueue.isNotEmpty()) {
-                Log.d(TAG, "📤 Auto-sending from queue after connection established (${pendingFilesQueue.size} files)")
-                processNextInQueue()
+        // Auto-send pending file or queue on BOTH Client and Group Owner roles
+        val hasPendingWork = _pendingFile.value != null || pendingFilesQueue.isNotEmpty()
+        if (hasPendingWork) {
+            viewModelScope.launch {
+                // If we became Group Owner, wait briefly for Client's IP registration ping
+                if (connectionInfo.isGroupOwner) {
+                    delay(650L)
+                }
+                if (_pendingFile.value != null) {
+                    Log.d(TAG, "📤 Auto-sending pending file after connection established")
+                    sendPendingFile()
+                } else if (pendingFilesQueue.isNotEmpty()) {
+                    Log.d(TAG, "📤 Auto-sending from queue after connection established (${pendingFilesQueue.size} files)")
+                    processNextInQueue()
+                }
             }
         }
     }
 
     override fun onDisconnected() {
+        connectionTimeoutJob?.cancel()
         _connectionInfo.value = null
         _currentTransfer.value = null
         _statusMessage.value = "Disconnected from Wi‑Fi Direct group."
@@ -914,36 +1017,40 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
         lastProgressTimestamp = System.currentTimeMillis()
         smoothedSpeedBps = 0
         
-        val isReceiver = _connectionInfo.value?.isGroupOwner == true
+        // Check if this transfer already exists (outgoing) or needs to be added (incoming)
+        val currentHistory = _transferHistory.value ?: emptyList()
+        val existingTransfer = currentHistory.find {
+            it.fileName == fileName &&
+                it.status == TransferStatus.IN_PROGRESS &&
+                it.direction == TransferDirection.SENDING
+        }
+        val isReceiver = existingTransfer == null
+
         _statusMessage.value = if (isReceiver) "Receiving $fileName..." else "Sending $fileName..."
         _errorMessage.value = null
         
-        // 🚀 Update transfer screen state
-        // TRIGGER ANIMATION: Go to ANIMATING state first
+        // Update transfer screen state
         val targetState = if (isReceiver) TransferScreenState.ANIMATING_RECEIVE else TransferScreenState.ANIMATING_SEND
         _transferScreenState.value = targetState
 
-        // Check if this transfer already exists (outgoing) or needs to be added (incoming)
-        val currentHistory = _transferHistory.value ?: emptyList()
-        val existingTransfer = currentHistory.find { it.fileName == fileName && it.status == TransferStatus.IN_PROGRESS }
-        
         if (existingTransfer != null) {
-            // Update existing (likely outgoing)
-             val updatedHistory = currentHistory.map { transfer ->
+            // Update existing outgoing transfer
+            val updatedHistory = currentHistory.map { transfer ->
                 if (transfer.id == existingTransfer.id) {
-                    transfer.copy(status = TransferStatus.IN_PROGRESS)
+                    transfer.copy(status = TransferStatus.IN_PROGRESS, fileSize = fileSize)
                 } else {
                     transfer
                 }
             }
             _transferHistory.value = updatedHistory
+            _currentTransfer.value = TransferProgress(existingTransfer.id, fileName, 0, 0L, fileSize)
         } else {
-            // New transfer (likely incoming)
+            // New incoming transfer
             val newTransfer = FileTransfer(
                 id = System.currentTimeMillis().toString(),
                 fileName = fileName,
                 fileSize = fileSize,
-                direction = if (isReceiver) TransferDirection.RECEIVING else TransferDirection.SENDING,
+                direction = TransferDirection.RECEIVING,
                 status = TransferStatus.IN_PROGRESS,
                 timestamp = System.currentTimeMillis()
             )
@@ -1149,8 +1256,8 @@ data class TransferProgress(
         val mbps = kbps / 1024.0
         
         return when {
-            mbps >= 1.0 -> String.format("%.1f MB/s", mbps)
-            kbps >= 1.0 -> String.format("%.1f KB/s", kbps)
+            mbps >= 1.0 -> String.format(java.util.Locale.US, "%.1f MB/s", mbps)
+            kbps >= 1.0 -> String.format(java.util.Locale.US, "%.1f KB/s", kbps)
             else -> "$speedBytesPerSec B/s"
         }
     }

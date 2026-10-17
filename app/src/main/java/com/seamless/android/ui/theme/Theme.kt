@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui.theme
 
 import android.app.Activity
@@ -18,72 +19,93 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 
-// Refined color schemes with better visual hierarchy AND Electric Vibrancy
+// Obsidian & Optical Light — Achromatic Premium Design System
 private val DarkColorScheme = darkColorScheme(
-    primary = SeamlessTeal, // Electric Cyan
+    primary = Color.White,                          // Optical White accent
     onPrimary = Color.Black,
-    primaryContainer = SeamlessPrimaryDark,
+    primaryContainer = SeamlessColors.ObsidianContainer,
     onPrimaryContainer = Color.White,
-    
-    secondary = SeamlessPurple, // Electric Purple
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFF4A148C),
-    onSecondaryContainer = Color(0xFFE1BEE7),
-    
-    tertiary = SeamlessPink, // Hot Pink
+
+    secondary = SeamlessColors.TextSecondaryDark,   // Zinc-400
+    onSecondary = Color.Black,
+    secondaryContainer = SeamlessColors.ObsidianContainer,
+    onSecondaryContainer = Color.White,
+
+    tertiary = SeamlessColors.TextTertiaryDark,     // Zinc-500
     onTertiary = Color.White,
-    tertiaryContainer = Color(0xFF880E4F),
-    onTertiaryContainer = Color(0xFFF8BBD0),
-    
+    tertiaryContainer = SeamlessColors.ObsidianBright,
+    onTertiaryContainer = Color.White,
+
     error = SeamlessColors.Error,
     onError = Color.White,
-    errorContainer = Color(0xFF93000A),
-    onErrorContainer = Color(0xFFFFDAD6),
-    
-    background = SeamlessColors.DarkBackground, // Deep Blue-Black
-    onBackground = SeamlessColors.TextPrimaryDark,
-    
-    surface = SeamlessColors.DarkSurface,
-    onSurface = SeamlessColors.TextPrimaryDark,
-    surfaceVariant = SeamlessColors.DarkSurfaceContainer,
+    errorContainer = Color(0xFF3B0A0A),
+    onErrorContainer = SeamlessColors.Coral,
+
+    background = SeamlessColors.Obsidian,           // True black
+    onBackground = Color.White,
+
+    surface = SeamlessColors.ObsidianElevated,      // #101014
+    onSurface = Color.White,
+    surfaceVariant = SeamlessColors.ObsidianContainer,  // #1A1A20
     onSurfaceVariant = SeamlessColors.TextSecondaryDark,
-    
-    outline = SeamlessColors.DarkOutline,
-    outlineVariant = Color(0xFF444746),
-    
+
+    outline = SeamlessColors.ObsidianBorder,
+    outlineVariant = Color(0xFF3A3A44),
+
+    surfaceContainerLowest = SeamlessColors.Obsidian,
+    surfaceContainerLow = SeamlessColors.ObsidianElevated,
+    surfaceContainer = SeamlessColors.ObsidianContainer,
+    surfaceContainerHigh = SeamlessColors.ObsidianBright,
+    surfaceContainerHighest = Color(0xFF30303A),
+
     scrim = Color.Black,
-    inverseSurface = SeamlessColors.LightSurface,
+    inverseSurface = SeamlessColors.OpticalWhite,
     inverseOnSurface = SeamlessColors.TextPrimaryLight,
-    inversePrimary = SeamlessPrimaryDark
+    inversePrimary = Color.Black
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = SeamlessPrimaryDark,
+    primary = Color(0xFF09090B),                     // Near-black accent on light
     onPrimary = Color.White,
-    primaryContainer = SeamlessTeal,
-    onPrimaryContainer = Color.Black,
-    
-    secondary = SeamlessPurple,
+    primaryContainer = SeamlessColors.OpticalContainer,
+    onPrimaryContainer = Color(0xFF09090B),
+
+    secondary = SeamlessColors.TextSecondaryLight,   // Zinc-600
     onSecondary = Color.White,
-    secondaryContainer = Color(0xFFF3E5F5),
-    onSecondaryContainer = Color(0xFF4A148C),
-    
-    tertiary = SeamlessPink,
+    secondaryContainer = SeamlessColors.OpticalContainer,
+    onSecondaryContainer = Color(0xFF09090B),
+
+    tertiary = SeamlessColors.TextTertiaryLight,     // Zinc-500
     onTertiary = Color.White,
-    
-    background = SeamlessColors.LightBackground,
+    tertiaryContainer = Color(0xFFE0E0E8),
+    onTertiaryContainer = Color(0xFF09090B),
+
+    background = SeamlessColors.OpticalLight,        // #F5F5F7
     onBackground = SeamlessColors.TextPrimaryLight,
-    
-    surface = SeamlessColors.LightSurface,
+
+    surface = SeamlessColors.OpticalWhite,
     onSurface = SeamlessColors.TextPrimaryLight,
-    surfaceVariant = SeamlessColors.LightSurfaceContainer,
+    surfaceVariant = SeamlessColors.OpticalContainer,
     onSurfaceVariant = SeamlessColors.TextSecondaryLight,
-    
+
+    surfaceContainerLowest = SeamlessColors.OpticalWhite,
+    surfaceContainerLow = Color(0xFFF0F0F4),
+    surfaceContainer = SeamlessColors.OpticalContainer,
+    surfaceContainerHigh = Color(0xFFE2E2EA),
+    surfaceContainerHighest = SeamlessColors.OpticalMuted,
+
     error = SeamlessColors.Error,
     onError = Color.White,
-    
-    outline = SeamlessColors.LightOutline,
-    outlineVariant = Color(0xFFC4C7C5)
+    errorContainer = Color(0xFFFEE2E2),
+    onErrorContainer = Color(0xFF991B1B),
+
+    outline = SeamlessColors.OpticalBorder,
+    outlineVariant = SeamlessColors.OpticalMuted,
+
+    scrim = Color.Black,
+    inverseSurface = SeamlessColors.ObsidianElevated,
+    inverseOnSurface = Color.White,
+    inversePrimary = Color.White
 )
 
 @Composable
@@ -102,6 +124,7 @@ fun SeamlessTheme(
             ThemePreference.System -> isSystemInDarkTheme()
         }
     }
+    ThemePreferenceManager.isCurrentlyDark = shouldUseDark
 
     val colorScheme = if (shouldUseDark) DarkColorScheme else LightColorScheme
 

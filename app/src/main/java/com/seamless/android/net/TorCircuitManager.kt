@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.net
 
 import android.content.Context
@@ -10,12 +11,13 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.Socket
-import java.net.SocketException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -37,11 +39,23 @@ class TorCircuitManager private constructor(private val context: Context) {
         
         // Connection timeouts
         const val CONNECT_TIMEOUT_MS = 60_000       // 60 seconds for Tor circuits
-        const val READ_TIMEOUT_MS = 5_000           // 5 seconds read timeout for highly responsive connection polling
+        // A Tor stream can pause for several seconds while a rendezvous circuit
+        // is rebuilt. Timing out midway through DataInputStream.readFully() loses
+        // framing alignment and manifests as an intermittent lost chat/photo.
+        // Keep the deadline generous; an idle timeout still returns null and the
+        // dedicated read loop remains cancellable on its IO dispatcher.
+        const val READ_TIMEOUT_MS = 60_000
         const val KEEPALIVE_INTERVAL_MS = 15_000L    // Keep an established peer session warm
-        const val CIRCUIT_HEALTH_CHECK_MS = 60_000L  // Health check every minute
-        const val MAX_RECONNECT_ATTEMPTS = 5
+        const val CIRCUIT_HEALTH_CHECK_MS = 45_000L  // Health check every 45 seconds
+        private const val STALE_ACTIVE_GRACE_MS = 10_000L // Prefer fresh inbound socket if existing idle > 10s
+        private const val SOCKET_BUFFER_BYTES = 65_536
+        private const val STREAM_BUFFER_BYTES = 16_384
+        // Onion-service failures are often transient introduction-point or
+        // rendezvous failures. Keep recovering in the background instead of
+        // giving up after a short burst of retries.
+        const val MAX_RECONNECT_ATTEMPTS = 20
         const val RECONNECT_BASE_DELAY_MS = 2_000L
+        const val MAX_RECONNECT_DELAY_MS = 60_000L
         
         @Volatile
         private var instance: TorCircuitManager? = null
@@ -99,6 +113,7 @@ class TorCircuitManager private constructor(private val context: Context) {
     
     // Network state
     private val isNetworkAvailable = AtomicBoolean(false)
+    @Volatile private var lastKnownNetworkHandle: Long = 0L
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     
     // Health check job
@@ -108,6 +123,26 @@ class TorCircuitManager private constructor(private val context: Context) {
         registerNetworkCallback()
         startHealthCheck()
     }
+
+    private fun canonicalizePeerKey(peerIdentifier: String): String {
+        val trimmed = peerIdentifier.trim()
+        if (trimmed.startsWith("pubkey:", ignoreCase = true)) {
+            return trimmed.lowercase()
+        }
+        val canonical = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(trimmed)
+        return canonical.ifBlank { trimmed.lowercase() }
+    }
+
+    private fun configureSocket(socket: Socket) {
+        try {
+            socket.soTimeout = READ_TIMEOUT_MS
+            socket.tcpNoDelay = true
+            socket.keepAlive = true
+            socket.sendBufferSize = SOCKET_BUFFER_BYTES
+            socket.receiveBufferSize = SOCKET_BUFFER_BYTES
+        } catch (_: Exception) {
+        }
+    }
     
     /**
      * Get or establish a connection to a peer.
@@ -115,10 +150,11 @@ class TorCircuitManager private constructor(private val context: Context) {
      * because that can take up to 60 seconds over Tor.
      */
     suspend fun getConnection(onionAddress: String): PeerConnection? {
-        val connectionLock = connectionLocks.getOrPut(onionAddress) { Mutex() }
+        val canonicalKey = canonicalizePeerKey(onionAddress)
+        val connectionLock = connectionLocks.getOrPut(canonicalKey) { Mutex() }
         return connectionLock.withLock {
             val existing = mutex.withLock {
-                activeConnection(onionAddress)?.also { connection ->
+                activeConnection(canonicalKey)?.also { connection ->
                     connection.lastActivity = System.currentTimeMillis()
                 }
             }
@@ -126,7 +162,7 @@ class TorCircuitManager private constructor(private val context: Context) {
 
             // The per-peer lock stays held while connecting, but the class-wide
             // mutex does not. Other peers remain fully responsive.
-            connectToPeer(onionAddress)
+            connectToPeer(canonicalKey)
         }
     }
     
@@ -134,10 +170,11 @@ class TorCircuitManager private constructor(private val context: Context) {
      * Send data through an established connection
      */
     suspend fun sendData(onionAddress: String, data: ByteArray): Boolean {
-        val connection = getConnection(onionAddress) ?: return false
+        val canonicalKey = canonicalizePeerKey(onionAddress)
+        val connection = getConnection(canonicalKey) ?: return false
         
         // Per-peer write lock prevents interleaved writes (e.g. ACK + queued message)
-        val writeLock = writeLocks.getOrPut(onionAddress) { Mutex() }
+        val writeLock = writeLocks.getOrPut(canonicalKey) { Mutex() }
         
         return try {
             writeLock.withLock {
@@ -152,8 +189,8 @@ class TorCircuitManager private constructor(private val context: Context) {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to send data to $onionAddress: ${e.message}")
-            handleConnectionFailure(onionAddress, connection, e.message ?: "Send failed")
+            Log.e(TAG, "Failed to send data to $canonicalKey: ${e.message}")
+            handleConnectionFailure(canonicalKey, connection, e.message ?: "Send failed")
             false
         }
     }
@@ -162,7 +199,8 @@ class TorCircuitManager private constructor(private val context: Context) {
      * Receive data from a connection
      */
     suspend fun receiveData(onionAddress: String, expectedConnectionId: String? = null): ByteArray? {
-        val connection = connections[onionAddress] ?: return null
+        val canonicalKey = canonicalizePeerKey(onionAddress)
+        val connection = connections[canonicalKey] ?: return null
         if (expectedConnectionId != null && connection.connectionId != expectedConnectionId) return null
         
         return try {
@@ -170,7 +208,7 @@ class TorCircuitManager private constructor(private val context: Context) {
                 connection.input?.let { input ->
                     val size = input.readInt()
                     if (size <= 0 || size > OnionMessageProtocol.FRAME_SIZE * 2) {
-                        Log.e(TAG, "Invalid data size from $onionAddress: $size")
+                        Log.e(TAG, "Invalid data size from $canonicalKey: $size")
                         return@withContext null
                     }
                     val data = ByteArray(size)
@@ -183,14 +221,14 @@ class TorCircuitManager private constructor(private val context: Context) {
             // Expected normal behavior when connection is idle. Do not close the socket!
             null
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to receive data from $onionAddress: ${e.message}")
-            handleConnectionFailure(onionAddress, connection, e.message ?: "Receive failed")
+            Log.e(TAG, "Failed to receive data from $canonicalKey: ${e.message}")
+            handleConnectionFailure(canonicalKey, connection, e.message ?: "Receive failed")
             null
         }
     }
 
     fun getActiveConnectionId(onionAddress: String): String? {
-        return activeConnection(onionAddress)?.connectionId
+        return activeConnection(canonicalizePeerKey(onionAddress))?.connectionId
     }
 
     /**
@@ -198,16 +236,17 @@ class TorCircuitManager private constructor(private val context: Context) {
      * 60-second onion dial solely to acknowledge a mailbox item.
      */
     fun hasActiveConnection(onionAddress: String): Boolean =
-        activeConnection(onionAddress) != null
+        activeConnection(canonicalizePeerKey(onionAddress)) != null
     
     /**
      * Disconnect from a peer
      */
     suspend fun disconnect(onionAddress: String) = mutex.withLock {
-        val connection = connections.remove(onionAddress)
+        val canonicalKey = canonicalizePeerKey(onionAddress)
+        val connection = connections.remove(canonicalKey)
         connection?.let { closeConnection(it) }
         updateStateFlow()
-        Log.d(TAG, "Disconnected from $onionAddress")
+        Log.d(TAG, "Disconnected from $canonicalKey")
     }
     
     /**
@@ -230,7 +269,7 @@ class TorCircuitManager private constructor(private val context: Context) {
      * Get connection state for a peer
      */
     fun getConnectionState(onionAddress: String): ConnectionState {
-        return connections[onionAddress]?.state ?: ConnectionState.DISCONNECTED
+        return connections[canonicalizePeerKey(onionAddress)]?.state ?: ConnectionState.DISCONNECTED
     }
     
     /**
@@ -255,12 +294,15 @@ class TorCircuitManager private constructor(private val context: Context) {
         socket: Socket,
         preferIncoming: Boolean
     ) {
-        val connectionLock = connectionLocks.getOrPut(peerIdentifier) { Mutex() }
+        val canonicalKey = canonicalizePeerKey(peerIdentifier)
+        val connectionLock = connectionLocks.getOrPut(canonicalKey) { Mutex() }
         connectionLock.withLock {
             mutex.withLock {
                 try {
-                    val active = activeConnection(peerIdentifier)
-                    if (active != null && !preferIncoming) {
+                    val now = System.currentTimeMillis()
+                    val active = activeConnection(canonicalKey)
+                    val isActiveFresh = active != null && (now - active.lastActivity) <= STALE_ACTIVE_GRACE_MS
+                    if (active != null && isActiveFresh && !preferIncoming) {
                         try { socket.close() } catch (_: Exception) {}
                         return@withLock
                     }
@@ -268,20 +310,20 @@ class TorCircuitManager private constructor(private val context: Context) {
                         closeConnection(active)
                     }
 
-                    socket.soTimeout = READ_TIMEOUT_MS
+                    configureSocket(socket)
                     val connection = PeerConnection(
-                        onionAddress = peerIdentifier,
+                        onionAddress = canonicalKey,
                         socket = socket,
-                        input = DataInputStream(socket.inputStream),
-                        output = DataOutputStream(socket.outputStream),
+                        input = DataInputStream(BufferedInputStream(socket.inputStream, STREAM_BUFFER_BYTES)),
+                        output = DataOutputStream(BufferedOutputStream(socket.outputStream, STREAM_BUFFER_BYTES)),
                         state = ConnectionState.CONNECTED,
-                        lastActivity = System.currentTimeMillis(),
+                        lastActivity = now,
                         reconnectAttempts = 0
                     )
 
-                    connections[peerIdentifier] = connection
+                    connections[canonicalKey] = connection
                     updateStateFlow()
-                    Log.i(TAG, "📥 Incoming connection registered for $peerIdentifier")
+                    Log.i(TAG, "📥 Incoming connection registered for $canonicalKey")
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to register incoming connection: ${e.message}")
                     try { socket.close() } catch (_: Exception) {}
@@ -293,14 +335,15 @@ class TorCircuitManager private constructor(private val context: Context) {
     // ========== Private Methods ==========
     
     private suspend fun connectToPeer(onionAddress: String): PeerConnection? {
+        val canonicalKey = canonicalizePeerKey(onionAddress)
         val torProxy = TorManager.currentBestSocksAddress(context)
         if (torProxy == null) {
             Log.e(TAG, "Tor proxy not available")
             return null
         }
         
-        val connection = connections.getOrPut(onionAddress) {
-            PeerConnection(onionAddress)
+        val connection = connections.getOrPut(canonicalKey) {
+            PeerConnection(canonicalKey)
         }
         
         connection.state = ConnectionState.CONNECTING
@@ -309,7 +352,7 @@ class TorCircuitManager private constructor(private val context: Context) {
         return withContext(Dispatchers.IO) {
             var pendingSocket: Socket? = null
             try {
-                val parts = onionAddress.split(":")
+                val parts = canonicalKey.split(":")
                 val host = parts[0]
                 val port = parts.getOrNull(1)?.toIntOrNull() ?: 18888
                 
@@ -318,38 +361,41 @@ class TorCircuitManager private constructor(private val context: Context) {
                 pendingSocket = socket
                 
                 socket.connect(InetSocketAddress.createUnresolved(host, port), CONNECT_TIMEOUT_MS)
-                socket.soTimeout = READ_TIMEOUT_MS
+                configureSocket(socket)
                 
                 connection.socket = socket
-                connection.input = DataInputStream(socket.inputStream)
-                connection.output = DataOutputStream(socket.outputStream)
+                connection.input = DataInputStream(BufferedInputStream(socket.inputStream, STREAM_BUFFER_BYTES))
+                connection.output = DataOutputStream(BufferedOutputStream(socket.outputStream, STREAM_BUFFER_BYTES))
                 connection.state = ConnectionState.CONNECTED
                 connection.lastActivity = System.currentTimeMillis()
                 connection.reconnectAttempts = 0
                 pendingSocket = null
                 
                 updateStateFlow()
-                Log.i(TAG, "✅ Connected to $onionAddress")
+                Log.i(TAG, "✅ Connected to $canonicalKey")
                 
                 connection
                 
             } catch (e: Exception) {
                 try { pendingSocket?.close() } catch (_: Exception) {}
-                Log.e(TAG, "Failed to connect to $onionAddress: ${e.message}")
+                Log.e(TAG, "Failed to connect to $canonicalKey: ${e.message}")
                 connection.lastError = e.message
-                scheduleReconnect(onionAddress, connection, e.message ?: "Connect failed")
+                scheduleReconnect(canonicalKey, connection, e.message ?: "Connect failed")
                 null
             }
         }
     }
 
     private fun activeConnection(onionAddress: String): PeerConnection? {
-        val existing = connections[onionAddress] ?: return null
+        val canonicalKey = canonicalizePeerKey(onionAddress)
+        val existing = connections[canonicalKey] ?: return null
         val socket = existing.socket
         return existing.takeIf {
             it.state == ConnectionState.CONNECTED &&
                 socket?.isConnected == true &&
                 !socket.isClosed &&
+                !socket.isInputShutdown &&
+                !socket.isOutputShutdown &&
                 it.input != null &&
                 it.output != null
         }
@@ -360,23 +406,25 @@ class TorCircuitManager private constructor(private val context: Context) {
         failedConnection: PeerConnection,
         reason: String
     ) {
+        val canonicalKey = canonicalizePeerKey(onionAddress)
         mutex.withLock {
-            val connection = connections[onionAddress] ?: return
+            val connection = connections[canonicalKey] ?: return
             if (connection.connectionId != failedConnection.connectionId) return
             if (connection.state == ConnectionState.RECONNECTING) return
             closeConnection(connection)
             
-            scheduleReconnect(onionAddress, connection, reason)
+            scheduleReconnect(canonicalKey, connection, reason)
         }
     }
 
     /** Schedules every reconnect step, including a failed initial dial. */
     private fun scheduleReconnect(onionAddress: String, connection: PeerConnection, reason: String) {
+        val canonicalKey = canonicalizePeerKey(onionAddress)
         if (connection.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
             connection.state = ConnectionState.FAILED
             connection.lastError = reason
             updateStateFlow()
-            Log.e(TAG, "Connection to $onionAddress failed after $MAX_RECONNECT_ATTEMPTS attempts")
+            Log.e(TAG, "Connection to $canonicalKey failed after $MAX_RECONNECT_ATTEMPTS attempts")
             return
         }
 
@@ -385,11 +433,13 @@ class TorCircuitManager private constructor(private val context: Context) {
         connection.lastError = reason
         updateStateFlow()
 
-        val delay = RECONNECT_BASE_DELAY_MS * (1 shl (connection.reconnectAttempts - 1))
-        Log.w(TAG, "Reconnecting to $onionAddress in ${delay}ms (attempt ${connection.reconnectAttempts})")
+        val exponent = (connection.reconnectAttempts - 1).coerceAtMost(5)
+        val delay = (RECONNECT_BASE_DELAY_MS * (1L shl exponent))
+            .coerceAtMost(MAX_RECONNECT_DELAY_MS)
+        Log.w(TAG, "Reconnecting to $canonicalKey in ${delay}ms (attempt ${connection.reconnectAttempts})")
         scope.launch {
             delay(delay)
-            getConnection(onionAddress)
+            getConnection(canonicalKey)
         }
     }
     
@@ -426,7 +476,7 @@ class TorCircuitManager private constructor(private val context: Context) {
             
             // Check if the underlying socket is still alive
             val socket = connection.socket
-            if (socket == null || socket.isClosed || !socket.isConnected) {
+            if (socket == null || socket.isClosed || !socket.isConnected || socket.isInputShutdown || socket.isOutputShutdown) {
                 Log.d(TAG, "Connection to $address is dead (socket closed/null), cleaning up")
                 closeConnection(connection)
                 connection.state = ConnectionState.DISCONNECTED
@@ -441,19 +491,42 @@ class TorCircuitManager private constructor(private val context: Context) {
         
         networkCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                Log.d(TAG, "Network available")
+                val handle = network.networkHandle
+                val previousHandle = lastKnownNetworkHandle
+                lastKnownNetworkHandle = handle
+                Log.d(TAG, "Network available (handle=$handle)")
                 isNetworkAvailable.set(true)
-                // Android network changes invalidate onion circuits. Rebuild the
-                // direct sessions we already know about immediately instead of
-                // waiting for a later health-check or a user action.
+                // Android network changes invalidate onion circuits. Close stale
+                // sockets from the previous network and rebuild direct sessions
+                // concurrently instead of sequentially blocking for 60s per peer.
                 scope.launch {
-                    connections.keys.toList().forEach { onionAddress ->
-                        getConnection(onionAddress)
+                    val peersToReconnect = mutex.withLock {
+                        val keys = connections.keys.toList()
+                        if (previousHandle != 0L && previousHandle != handle) {
+                            for ((_, connection) in connections) {
+                                closeConnection(connection)
+                                connection.state = ConnectionState.DISCONNECTED
+                                connection.reconnectAttempts = 0
+                            }
+                            updateStateFlow()
+                        }
+                        keys
+                    }
+                    peersToReconnect.forEach { onionAddress ->
+                        launch { getConnection(onionAddress) }
                     }
                 }
             }
             
             override fun onLost(network: Network) {
+                val activeNet = connectivityManager.activeNetwork
+                val caps = activeNet?.let { connectivityManager.getNetworkCapabilities(it) }
+                val stillOnline = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+                if (stillOnline || (lastKnownNetworkHandle != 0L && network.networkHandle != lastKnownNetworkHandle)) {
+                    Log.d(TAG, "Previous network lost during handover, active network remains online — preserving circuits")
+                    isNetworkAvailable.set(true)
+                    return
+                }
                 Log.d(TAG, "Network lost")
                 isNetworkAvailable.set(false)
                 

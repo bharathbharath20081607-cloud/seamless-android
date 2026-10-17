@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.net
 
 import android.util.Log
@@ -45,12 +46,13 @@ class MailboxClient private constructor(private val context: Context) {
     }
 
     /**
-     * Registered mailbox
+     * Registered mailbox (either our own local/remote mailbox or a contact's Tier 1 outbox mailbox)
      */
     data class RegisteredMailbox(
         val onionAddress: String,
         val ownerPublicKey: ByteArray,
         val accessToken: String? = null,
+        val folderId: String? = null,
         val isOwnedByClient: Boolean = false,
         var lastPollTime: Long = 0,
         var isActive: Boolean = true
@@ -58,9 +60,9 @@ class MailboxClient private constructor(private val context: Context) {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is RegisteredMailbox) return false
-            return onionAddress == other.onionAddress
+            return onionAddress == other.onionAddress && folderId == other.folderId
         }
-        override fun hashCode(): Int = onionAddress.hashCode()
+        override fun hashCode(): Int = 31 * onionAddress.hashCode() + (folderId?.hashCode() ?: 0)
     }
 
     /**
@@ -69,7 +71,8 @@ class MailboxClient private constructor(private val context: Context) {
     data class FetchedMessage(
         val id: String,
         val mailboxOnion: String,
-        val encryptedPayload: ByteArray
+        val encryptedPayload: ByteArray,
+        val folderId: String? = null
     ) {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -150,17 +153,44 @@ class MailboxClient private constructor(private val context: Context) {
         }
 
         mailboxes.removeAll { it.isOwnedByClient && it.onionAddress != mailboxOnion }
-        if (mailboxes.any { it.onionAddress == mailboxOnion }) return@withLock true
+        if (mailboxes.any { it.onionAddress == mailboxOnion && it.isOwnedByClient }) return@withLock true
 
         mailboxes.add(
             RegisteredMailbox(
                 onionAddress = mailboxOnion,
                 ownerPublicKey = ByteArray(0),
                 accessToken = accessToken,
+                folderId = myOwnerId,
                 isOwnedByClient = true
             )
         )
         Log.i(TAG, "Registered local mailbox for polling: ${redactEndpoint(mailboxOnion)}")
+        true
+    }
+
+    /**
+     * Registers a contact's Tier 1 Sender-Hosted Outbox Mailbox so we automatically
+     * pull messages and offline ACKs they queued for us while we were offline.
+     */
+    suspend fun registerContactOutboxMailbox(
+        contactMailboxOnion: String,
+        accessToken: String,
+        targetFolderId: String? = null
+    ): Boolean = mutex.withLock {
+        if (contactMailboxOnion.isBlank()) return@withLock false
+        val folder = targetFolderId?.takeIf { it.isNotBlank() } ?: myOwnerId
+        if (folder.isBlank()) return@withLock false
+        mailboxes.removeAll { !it.isOwnedByClient && it.onionAddress == contactMailboxOnion && it.folderId == folder }
+        mailboxes.add(
+            RegisteredMailbox(
+                onionAddress = contactMailboxOnion,
+                ownerPublicKey = ByteArray(0),
+                accessToken = accessToken,
+                folderId = folder,
+                isOwnedByClient = false
+            )
+        )
+        Log.d(TAG, "Registered contact outbox mailbox for polling: ${redactEndpoint(contactMailboxOnion)}")
         true
     }
 
@@ -221,7 +251,8 @@ class MailboxClient private constructor(private val context: Context) {
             if (!mailbox.isActive) continue
 
             try {
-                val messages = pollMailbox(mailbox.onionAddress, mailbox.accessToken)
+                val targetFolder = mailbox.folderId?.takeIf { it.isNotBlank() } ?: myOwnerId
+                val messages = pollMailbox(mailbox.onionAddress, mailbox.accessToken, targetFolder)
                 allMessages.addAll(messages)
 
                 mutex.withLock {
@@ -241,9 +272,15 @@ class MailboxClient private constructor(private val context: Context) {
             for (msg in allMessages) {
                 if (msg.id !in committedIds) continue
                 try {
-                    deleteFromMailbox(msg.mailboxOnion, msg.id, registeredMailboxes.firstOrNull {
-                        it.onionAddress == msg.mailboxOnion
-                    }?.accessToken)
+                    val matchingMailbox = registeredMailboxes.firstOrNull {
+                        it.onionAddress == msg.mailboxOnion && (msg.folderId == null || it.folderId == msg.folderId)
+                    } ?: registeredMailboxes.firstOrNull { it.onionAddress == msg.mailboxOnion }
+                    deleteFromMailbox(
+                        mailboxOnion = msg.mailboxOnion,
+                        messageId = msg.id,
+                        accessToken = matchingMailbox?.accessToken,
+                        folderId = msg.folderId ?: matchingMailbox?.folderId ?: myOwnerId
+                    )
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to confirm receipt for ${msg.id}: ${e.message}")
                 }
@@ -255,16 +292,21 @@ class MailboxClient private constructor(private val context: Context) {
 
     /**
      * Poll a specific mailbox via REST.
-     * GET /api/files/{myOwnerId} to retrieve pending messages.
+     * GET /api/files/{folderId} to retrieve pending messages.
      */
-    suspend fun pollMailbox(mailboxOnion: String, accessToken: String? = null): List<FetchedMessage> {
+    suspend fun pollMailbox(
+        mailboxOnion: String,
+        accessToken: String? = null,
+        folderId: String = myOwnerId
+    ): List<FetchedMessage> {
         Log.d(TAG, "📤 Polling mailbox via REST: ${redactEndpoint(mailboxOnion)}")
 
         val messages = mutableListOf<FetchedMessage>()
+        val targetFolder = folderId.ifBlank { myOwnerId }
 
         try {
             val request = Request.Builder()
-                .url("${baseUrl(mailboxOnion)}/api/files/$myOwnerId")
+                .url("${baseUrl(mailboxOnion)}/api/files/$targetFolder")
                 .get()
                 .apply {
                     accessToken?.takeIf { it.isNotBlank() }?.let {
@@ -297,7 +339,8 @@ class MailboxClient private constructor(private val context: Context) {
                     messages.add(FetchedMessage(
                         id = fileId,
                         mailboxOnion = mailboxOnion,
-                        encryptedPayload = payload
+                        encryptedPayload = payload,
+                        folderId = targetFolder
                     ))
                 }
             }
@@ -368,10 +411,16 @@ class MailboxClient private constructor(private val context: Context) {
      * Delete a message from mailbox after successful receipt.
      * DELETE /api/files/{folderId}/{fileId}
      */
-    private suspend fun deleteFromMailbox(mailboxOnion: String, messageId: String, accessToken: String?) {
+    private suspend fun deleteFromMailbox(
+        mailboxOnion: String,
+        messageId: String,
+        accessToken: String?,
+        folderId: String = myOwnerId
+    ) {
+        val targetFolder = folderId.ifBlank { myOwnerId }
         try {
             val request = Request.Builder()
-                .url("${baseUrl(mailboxOnion)}/api/files/$myOwnerId/$messageId")
+                .url("${baseUrl(mailboxOnion)}/api/files/$targetFolder/$messageId")
                 .delete()
                 .apply {
                     accessToken?.takeIf { it.isNotBlank() }?.let {

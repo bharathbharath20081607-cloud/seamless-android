@@ -1,3 +1,4 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.net
 
 import android.content.Context
@@ -27,7 +28,8 @@ class TorAttachmentTransfer(private val context: Context) {
         const val MAX_IMAGE_BYTES = 512 * 1_024
         const val CHUNK_BYTES = 3_000
         private const val RECEIPT_TTL_MS = 7 * 24 * 60 * 60 * 1000L
-        private const val META_VERSION: Byte = 2
+        private const val META_VERSION: Byte = 3
+        private const val PREVIOUS_META_VERSION: Byte = 2
         private const val LEGACY_META_VERSION: Byte = 1
         private const val CHUNK_HEADER_BYTES = 16 + 4 + 4
         private val SUPPORTED_IMAGE_MIME_TYPES = setOf("image/jpeg", "image/png", "image/webp")
@@ -39,7 +41,9 @@ class TorAttachmentTransfer(private val context: Context) {
         val mimeType: String,
         val totalBytes: Int,
         val chunkCount: Int,
-        val senderPublicKey: String = ""
+        val senderPublicKey: String = "",
+        val groupId: String? = null,
+        val groupMessageId: String? = null
     )
 
     data class CompletedAttachment(
@@ -48,7 +52,9 @@ class TorAttachmentTransfer(private val context: Context) {
         val mimeType: String,
         val messageId: UUID,
         val timestamp: Long,
-        val senderPublicKey: String
+        val senderPublicKey: String,
+        val groupId: String? = null,
+        val groupMessageId: String? = null
     )
 
     sealed class ChunkResult {
@@ -87,7 +93,9 @@ class TorAttachmentTransfer(private val context: Context) {
         transferId: UUID,
         mimeType: String,
         totalBytes: Int,
-        senderPublicKey: String = ""
+        senderPublicKey: String = "",
+        groupId: String? = null,
+        groupMessageId: String? = null
     ): Meta {
         require(totalBytes in 1..MAX_IMAGE_BYTES) { "Image must be at most 512 KB" }
         val normalizedMimeType = mimeType.lowercase().ifBlank { "image/jpeg" }
@@ -95,21 +103,25 @@ class TorAttachmentTransfer(private val context: Context) {
         require(senderPublicKey.isBlank() || senderPublicKey.matches(HEX_PUBLIC_KEY)) {
             "Invalid sender identity"
         }
+        require((groupId == null) == (groupMessageId == null)) { "Incomplete group attachment context" }
         return Meta(
             transferId = transferId,
             mimeType = normalizedMimeType,
             totalBytes = totalBytes,
             chunkCount = (totalBytes + CHUNK_BYTES - 1) / CHUNK_BYTES,
-            senderPublicKey = senderPublicKey.lowercase()
+            senderPublicKey = senderPublicKey.lowercase(), groupId = groupId, groupMessageId = groupMessageId
         )
     }
 
     fun encodeMeta(meta: Meta): ByteArray {
         val mime = meta.mimeType.toByteArray(Charsets.UTF_8)
         val senderKey = meta.senderPublicKey.toByteArray(Charsets.UTF_8)
+        val group = meta.groupId.orEmpty().toByteArray(Charsets.UTF_8)
+        val groupMessage = meta.groupMessageId.orEmpty().toByteArray(Charsets.UTF_8)
         require(mime.size <= 255) { "Invalid MIME type" }
         require(senderKey.size <= 255) { "Invalid sender identity" }
-        return ByteBuffer.allocate(1 + 16 + 1 + mime.size + 4 + 4 + 1 + senderKey.size)
+        require(group.size <= 64 && groupMessage.size <= 64) { "Invalid group attachment context" }
+        return ByteBuffer.allocate(1 + 16 + 1 + mime.size + 4 + 4 + 1 + senderKey.size + 1 + group.size + 1 + groupMessage.size)
             .put(META_VERSION)
             .putLong(meta.transferId.mostSignificantBits)
             .putLong(meta.transferId.leastSignificantBits)
@@ -119,13 +131,15 @@ class TorAttachmentTransfer(private val context: Context) {
             .putInt(meta.chunkCount)
             .put(senderKey.size.toByte())
             .put(senderKey)
+            .put(group.size.toByte()).put(group)
+            .put(groupMessage.size.toByte()).put(groupMessage)
             .array()
     }
 
     fun decodeMeta(data: ByteArray): Meta? = runCatching {
         val buffer = ByteBuffer.wrap(data)
         val version = buffer.get()
-        if (version != META_VERSION && version != LEGACY_META_VERSION) return null
+        if (version != META_VERSION && version != PREVIOUS_META_VERSION && version != LEGACY_META_VERSION) return null
         val id = UUID(buffer.getLong(), buffer.getLong())
         val mimeLength = buffer.get().toInt() and 0xFF
         if (mimeLength == 0 || mimeLength > buffer.remaining()) return null
@@ -139,7 +153,7 @@ class TorAttachmentTransfer(private val context: Context) {
             chunkCount != expectedChunkCount ||
             mimeType !in SUPPORTED_IMAGE_MIME_TYPES
         ) return null
-        val senderPublicKey = if (version == META_VERSION) {
+        val senderPublicKey = if (version >= PREVIOUS_META_VERSION) {
             if (buffer.remaining() < 1) return null
             val keyLength = buffer.get().toInt() and 0xFF
             if (keyLength > buffer.remaining()) return null
@@ -147,9 +161,12 @@ class TorAttachmentTransfer(private val context: Context) {
         } else {
             ""
         }
+        val groupId = if (version == META_VERSION) readSmallString(buffer) else ""
+        val groupMessageId = if (version == META_VERSION) readSmallString(buffer) else ""
         if (senderPublicKey.isNotBlank() && !senderPublicKey.matches(HEX_PUBLIC_KEY)) return null
+        if ((groupId.isBlank()) != (groupMessageId.isBlank())) return null
         if (buffer.hasRemaining()) return null
-        Meta(id, mimeType, totalBytes, chunkCount, senderPublicKey)
+        Meta(id, mimeType, totalBytes, chunkCount, senderPublicKey, groupId.ifBlank { null }, groupMessageId.ifBlank { null })
     }.getOrNull()
 
     fun encodeChunk(transferId: UUID, index: Int, chunk: ByteArray): ByteArray {
@@ -163,30 +180,37 @@ class TorAttachmentTransfer(private val context: Context) {
             .array()
     }
 
+    private fun canonicalSender(sender: String): String {
+        return OnionContactManager.OnionContact.canonicalizeOnionEndpoint(sender)
+            .ifBlank { sender.trim().lowercase() }
+    }
+
     fun beginIncoming(sender: String, messageId: UUID, timestamp: Long, meta: Meta): Boolean = runCatching {
-        val key = transferKey(sender, meta.transferId)
-        val transfer = incoming.putIfAbsent(key, IncomingTransfer(sender, meta, messageId, timestamp))
+        val normSender = canonicalSender(sender)
+        val key = transferKey(normSender, meta.transferId)
+        val transfer = incoming.putIfAbsent(key, IncomingTransfer(normSender, meta, messageId, timestamp))
             ?: incoming[key]
             ?: return false
-        val file = tempFile(sender, meta.transferId)
+        val file = tempFile(normSender, meta.transferId)
         if (!file.exists() || file.length() != meta.totalBytes.toLong()) {
             RandomAccessFile(file, "rw").use { it.setLength(meta.totalBytes.toLong()) }
         }
-        persistIncoming(transfer) && persistTransferSender(meta.transferId, meta.senderPublicKey)
+        persistIncoming(transfer, synchronous = true) && persistTransferSender(meta.transferId, meta.senderPublicKey)
     }.onFailure { Log.w(TAG, "Could not prepare incoming attachment: ${it.message}") }.getOrDefault(false)
 
     fun acceptChunk(sender: String, data: ByteArray): ChunkResult = runCatching {
+        val normSender = canonicalSender(sender)
         if (data.size <= CHUNK_HEADER_BYTES) return ChunkResult.Rejected
         val buffer = ByteBuffer.wrap(data)
         val transferId = UUID(buffer.getLong(), buffer.getLong())
         val index = buffer.getInt()
         val length = buffer.getInt()
         if (length !in 1..CHUNK_BYTES || length != buffer.remaining()) return ChunkResult.Rejected
-        val key = transferKey(sender, transferId)
-        if (wasRecentlyCompleted(sender, transferId)) return ChunkResult.AlreadyCompleted
+        val key = transferKey(normSender, transferId)
+        if (wasRecentlyCompleted(normSender, transferId)) return ChunkResult.AlreadyCompleted
         completedIncoming[key]?.let { return ChunkResult.Accepted(it) }
         val transfer = incoming[key]
-            ?: restoreIncoming(sender, transferId)
+            ?: restoreIncoming(normSender, transferId)
             ?: return ChunkResult.Rejected
         if (index !in 0 until transfer.meta.chunkCount) return ChunkResult.Rejected
         val expectedLength = minOf(
@@ -198,18 +222,19 @@ class TorAttachmentTransfer(private val context: Context) {
         val chunk = ByteArray(length)
         buffer.get(chunk)
         synchronized(transfer) {
-            val finalFile = finalFile(sender, transferId, transfer.meta.mimeType)
+            val finalFile = finalFile(normSender, transferId, transfer.meta.mimeType)
             if (transfer.receivedCount == transfer.meta.chunkCount && finalFile.exists()) {
                 return ChunkResult.Accepted(completedAttachment(transfer, transferId, finalFile))
             }
             if (!transfer.received.get(index)) {
-                RandomAccessFile(tempFile(sender, transferId), "rw").use { file ->
+                RandomAccessFile(tempFile(normSender, transferId), "rw").use { file ->
                     file.seek(index.toLong() * CHUNK_BYTES)
                     file.write(chunk)
                 }
                 transfer.received.set(index)
                 transfer.receivedCount++
-                if (!persistIncoming(transfer)) {
+                val isFinalChunk = transfer.receivedCount == transfer.meta.chunkCount
+                if (!persistIncoming(transfer, synchronous = isFinalChunk)) {
                     transfer.received.clear(index)
                     transfer.receivedCount--
                     return ChunkResult.Rejected
@@ -217,8 +242,16 @@ class TorAttachmentTransfer(private val context: Context) {
             }
             if (transfer.receivedCount != transfer.meta.chunkCount) return ChunkResult.Accepted()
 
-            val temp = tempFile(sender, transferId)
-            if (!temp.renameTo(finalFile)) return ChunkResult.Rejected
+            val temp = tempFile(normSender, transferId)
+            if (finalFile.exists()) {
+                finalFile.delete()
+            }
+            if (!temp.renameTo(finalFile)) {
+                runCatching {
+                    temp.copyTo(finalFile, overwrite = true)
+                    temp.delete()
+                }.onFailure { return ChunkResult.Rejected }
+            }
             val completed = completedAttachment(transfer, transferId, finalFile)
             completedIncoming[key] = completed
             ChunkResult.Accepted(completed)
@@ -242,13 +275,14 @@ class TorAttachmentTransfer(private val context: Context) {
 
     /** Clears resumable transfer state only after the chat row is durable. */
     fun completeIncoming(sender: String, transferId: UUID) {
-        val key = transferKey(sender, transferId)
+        val normSender = canonicalSender(sender)
+        val key = transferKey(normSender, transferId)
         completedIncoming.remove(key)
         incoming.remove(key)
         transferPrefs.edit()
-            .remove(transferPrefsKey(sender, transferId))
+            .remove(transferPrefsKey(normSender, transferId))
             .remove(transferSenderPrefsKey(transferId))
-            .putLong(receiptPrefsKey(sender, transferId), System.currentTimeMillis())
+            .putLong(receiptPrefsKey(normSender, transferId), System.currentTimeMillis())
             .commit()
     }
 
@@ -263,15 +297,15 @@ class TorAttachmentTransfer(private val context: Context) {
         .chunked(CHUNK_BYTES)
         .map { chunk -> chunk.toByteArray() }
 
-    private fun transferKey(sender: String, transferId: UUID) = "$sender:$transferId"
+    private fun transferKey(sender: String, transferId: UUID) = "${canonicalSender(sender)}:$transferId"
 
     private fun transferPrefsKey(sender: String, transferId: UUID): String {
-        val bytes = "$sender:$transferId".toByteArray(Charsets.UTF_8)
+        val bytes = "${canonicalSender(sender)}:$transferId".toByteArray(Charsets.UTF_8)
         return "incoming_${Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.URL_SAFE)}"
     }
 
     private fun receiptPrefsKey(sender: String, transferId: UUID): String {
-        val bytes = "$sender:$transferId".toByteArray(Charsets.UTF_8)
+        val bytes = "${canonicalSender(sender)}:$transferId".toByteArray(Charsets.UTF_8)
         return "receipt_${Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.URL_SAFE)}"
     }
 
@@ -303,10 +337,12 @@ class TorAttachmentTransfer(private val context: Context) {
         mimeType = transfer.meta.mimeType,
         messageId = transfer.messageId,
         timestamp = transfer.timestamp,
-        senderPublicKey = transfer.meta.senderPublicKey
+        senderPublicKey = transfer.meta.senderPublicKey,
+        groupId = transfer.meta.groupId,
+        groupMessageId = transfer.meta.groupMessageId
     )
 
-    private fun persistIncoming(transfer: IncomingTransfer): Boolean {
+    private fun persistIncoming(transfer: IncomingTransfer, synchronous: Boolean = false): Boolean {
         val mime = Base64.encodeToString(transfer.meta.mimeType.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
         val received = Base64.encodeToString(transfer.received.toByteArray(), Base64.NO_WRAP)
         val senderKey = Base64.encodeToString(transfer.meta.senderPublicKey.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
@@ -317,17 +353,24 @@ class TorAttachmentTransfer(private val context: Context) {
             transfer.meta.totalBytes.toString(),
             transfer.meta.chunkCount.toString(),
             received,
-            senderKey
+            senderKey,
+            Base64.encodeToString(transfer.meta.groupId.orEmpty().toByteArray(Charsets.UTF_8), Base64.NO_WRAP),
+            Base64.encodeToString(transfer.meta.groupMessageId.orEmpty().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
         ).joinToString("|")
-        return transferPrefs.edit()
+        val editor = transferPrefs.edit()
             .putString(transferPrefsKey(transfer.sender, transfer.meta.transferId), value)
-            .commit()
+        return if (synchronous) {
+            editor.commit()
+        } else {
+            editor.apply()
+            true
+        }
     }
 
     private fun restoreIncoming(sender: String, transferId: UUID): IncomingTransfer? = runCatching {
         val value = transferPrefs.getString(transferPrefsKey(sender, transferId), null) ?: return null
         val parts = value.split('|')
-        if (parts.size !in 6..7) return null
+        if (parts.size !in 6..9) return null
         val messageId = UUID.fromString(parts[0])
         val timestamp = parts[1].toLong()
         val mime = String(Base64.decode(parts[2], Base64.NO_WRAP), Charsets.UTF_8).lowercase()
@@ -336,16 +379,19 @@ class TorAttachmentTransfer(private val context: Context) {
         val senderPublicKey = parts.getOrNull(6)
             ?.let { String(Base64.decode(it, Base64.NO_WRAP), Charsets.UTF_8).lowercase() }
             .orEmpty()
+        val groupId = parts.getOrNull(7)?.let { String(Base64.decode(it, Base64.NO_WRAP), Charsets.UTF_8) }.orEmpty()
+        val groupMessageId = parts.getOrNull(8)?.let { String(Base64.decode(it, Base64.NO_WRAP), Charsets.UTF_8) }.orEmpty()
         if (totalBytes !in 1..MAX_IMAGE_BYTES ||
             chunkCount != (totalBytes + CHUNK_BYTES - 1) / CHUNK_BYTES ||
             mime !in SUPPORTED_IMAGE_MIME_TYPES ||
-            (senderPublicKey.isNotBlank() && !senderPublicKey.matches(HEX_PUBLIC_KEY))
+            (senderPublicKey.isNotBlank() && !senderPublicKey.matches(HEX_PUBLIC_KEY)) ||
+            ((groupId.isBlank()) != (groupMessageId.isBlank()))
         ) return null
         val received = BitSet.valueOf(Base64.decode(parts[5], Base64.NO_WRAP))
         if (received.length() > chunkCount) return null
         val transfer = IncomingTransfer(
             sender = sender,
-            meta = Meta(transferId, mime, totalBytes, chunkCount, senderPublicKey),
+            meta = Meta(transferId, mime, totalBytes, chunkCount, senderPublicKey, groupId.ifBlank { null }, groupMessageId.ifBlank { null }),
             messageId = messageId,
             timestamp = timestamp,
             received = received,
@@ -366,5 +412,12 @@ class TorAttachmentTransfer(private val context: Context) {
             else -> "jpg"
         }
         return File(attachmentDirectory, "${sender.hashCode()}_${transferId}.$extension")
+    }
+
+    private fun readSmallString(buffer: ByteBuffer): String {
+        if (!buffer.hasRemaining()) return ""
+        val length = buffer.get().toInt() and 0xFF
+        if (length > buffer.remaining()) throw IllegalArgumentException("Invalid metadata string")
+        return String(ByteArray(length).also { buffer.get(it) }, Charsets.UTF_8)
     }
 }

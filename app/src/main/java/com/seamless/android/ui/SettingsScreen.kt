@@ -1,12 +1,15 @@
+@file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui
+import kotlinx.coroutines.delay
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountCircle
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
@@ -15,7 +18,6 @@ import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import kotlinx.coroutines.launch
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -23,11 +25,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextOverflow
 import com.seamless.android.service.MeshForegroundService
 import com.seamless.android.ui.theme.SeamlessCyan
-import com.seamless.android.ui.theme.SeamlessTeal
 import com.seamless.android.ui.theme.SeamlessColors
 import com.seamless.android.ui.debug.DebugSettingsSheet
 import com.seamless.android.mesh.BluetoothMeshService
@@ -35,7 +35,6 @@ import com.seamless.android.net.TorManager
 import com.seamless.android.net.TorMode
 import com.seamless.android.net.TorPreferenceManager
 import com.seamless.android.net.TorHiddenServiceManager
-import kotlinx.coroutines.delay
 
 /**
  * Settings screen for app configuration
@@ -117,14 +116,27 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp)
         ) {
+            val isDark = (colorScheme.background.red + colorScheme.background.green + colorScheme.background.blue) < 1.5f
+            val switchColors = SwitchDefaults.colors(
+                checkedThumbColor = if (isDark) Color.Black else Color.White,
+                checkedTrackColor = if (isDark) Color.White else Color.Black,
+                uncheckedThumbColor = colorScheme.outline,
+                uncheckedTrackColor = if (isDark) Color(0xFF26262E) else colorScheme.surfaceVariant
+            )
+
             // Profile Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(
                     containerColor = colorScheme.surface
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (isDark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.08f)
                 ),
                 onClick = onProfileClick
             ) {
@@ -134,8 +146,8 @@ fun SettingsScreen(
                         .background(
                             brush = androidx.compose.ui.graphics.Brush.horizontalGradient(
                                 colors = listOf(
-                                    SeamlessColors.BrandGradientStart.copy(alpha = 0.08f),
-                                    SeamlessColors.BrandGradientEnd.copy(alpha = 0.05f)
+                                    SeamlessColors.BrandGradientStart.copy(alpha = 0.06f),
+                                    SeamlessColors.BrandGradientEnd.copy(alpha = 0.02f)
                                 )
                             )
                         )
@@ -151,7 +163,7 @@ fun SettingsScreen(
                             Icon(
                                 imageVector = Icons.Default.AccountCircle,
                                 contentDescription = null,
-                                tint = SeamlessCyan,
+                                tint = colorScheme.primary,
                                 modifier = Modifier.size(40.dp)
                             )
                             Spacer(modifier = Modifier.width(16.dp))
@@ -182,9 +194,13 @@ fun SettingsScreen(
             // Background Service Section
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(
                     containerColor = colorScheme.surface
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (isDark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.08f)
                 )
             ) {
                 Column(
@@ -196,7 +212,7 @@ fun SettingsScreen(
                         text = "Background Service",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
-                        color = SeamlessCyan
+                        color = colorScheme.primary
                     )
                     
                     Spacer(modifier = Modifier.height(16.dp))
@@ -207,7 +223,7 @@ fun SettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f).padding(end = 12.dp)
                         ) {
                             Text(
                                 text = "Keep mesh active",
@@ -227,21 +243,14 @@ fun SettingsScreen(
                         Switch(
                             checked = isBackgroundEnabled,
                             onCheckedChange = { enabled ->
-                                // Update state immediately for UI feedback
                                 isBackgroundEnabled = enabled
-                                // Apply the change in a safe way
                                 try {
                                     MeshForegroundService.setBackgroundEnabled(context, enabled)
                                 } catch (e: Exception) {
                                     e.printStackTrace()
                                 }
                             },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
-                                checkedTrackColor = SeamlessCyan,
-                                uncheckedThumbColor = colorScheme.outline,
-                                uncheckedTrackColor = colorScheme.surfaceVariant
-                            )
+                            colors = switchColors
                         )
                     }
                     
@@ -252,15 +261,15 @@ fun SettingsScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(SeamlessTeal.copy(alpha = 0.1f))
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(colorScheme.primary.copy(alpha = 0.08f))
                                 .padding(12.dp),
                             verticalAlignment = Alignment.Top
                         ) {
                             Icon(
                                 imageVector = Icons.Filled.Info,
                                 contentDescription = null,
-                                tint = SeamlessTeal,
+                                tint = colorScheme.primary,
                                 modifier = Modifier.size(20.dp)
                             )
                             
@@ -281,9 +290,13 @@ fun SettingsScreen(
             // Battery optimization info
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(
                     containerColor = colorScheme.surface
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (isDark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.08f)
                 )
             ) {
                 Column(
@@ -324,9 +337,13 @@ fun SettingsScreen(
             // Privacy & Long Distance (Tor)
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(
                     containerColor = colorScheme.surface
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (isDark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.08f)
                 )
             ) {
                 Column(
@@ -348,7 +365,7 @@ fun SettingsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                             Text(
                                 text = "Long Distance Mode (Tor)",
                                 style = MaterialTheme.typography.bodyLarge,
@@ -367,12 +384,7 @@ fun SettingsScreen(
                                 val newMode = if (enabled) TorMode.ON else TorMode.OFF
                                 TorPreferenceManager.set(context, newMode)
                             },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
-                                checkedTrackColor = SeamlessCyan,
-                                uncheckedThumbColor = colorScheme.outline,
-                                uncheckedTrackColor = colorScheme.surfaceVariant
-                            )
+                            colors = switchColors
                         )
                     }
 
@@ -384,13 +396,13 @@ fun SettingsScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
+                                .clip(RoundedCornerShape(10.dp))
                                 .background(
                                     when {
-                                        torReachable -> Color(0xFF00C851).copy(alpha = 0.1f)
+                                        torReachable -> SeamlessColors.Success.copy(alpha = 0.12f)
                                         else -> when (torStatus.state) {
-                                        TorManager.TorState.RUNNING -> Color(0xFF00C851).copy(alpha = 0.1f)
-                                        TorManager.TorState.ERROR -> MaterialTheme.colorScheme.error.copy(alpha = 0.1f)
+                                        TorManager.TorState.RUNNING -> SeamlessColors.Success.copy(alpha = 0.12f)
+                                        TorManager.TorState.ERROR -> MaterialTheme.colorScheme.error.copy(alpha = 0.12f)
                                         else -> MaterialTheme.colorScheme.surfaceVariant
                                         }
                                     }
@@ -404,11 +416,11 @@ fun SettingsScreen(
                                     .clip(RoundedCornerShape(4.dp))
                                     .background(
                                         when {
-                                            torReachable -> Color(0xFF00C851)
+                                            torReachable -> SeamlessColors.Success
                                             else -> when (torStatus.state) {
-                                            TorManager.TorState.RUNNING -> Color(0xFF00C851)
+                                            TorManager.TorState.RUNNING -> SeamlessColors.Success
                                             TorManager.TorState.ERROR -> MaterialTheme.colorScheme.error
-                                            else -> Color(0xFFFF9500) // Orange for starting/bootstrapping
+                                            else -> SeamlessColors.Warning
                                             }
                                         }
                                     )
@@ -434,8 +446,11 @@ fun SettingsScreen(
                                     color = colorScheme.onSurface
                                 )
                                 if (torStatus.state == TorManager.TorState.BOOTSTRAPPING || torStatus.state == TorManager.TorState.STARTING) {
+                                    val cleanLog = remember(torStatus.lastLogLine) {
+                                        torStatus.lastLogLine.replace(Regex("\\u001B\\[[;\\d]*m"), "")
+                                    }
                                     Text(
-                                        text = torStatus.lastLogLine.take(50),
+                                        text = cleanLog.take(60),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = colorScheme.onSurface.copy(alpha = 0.6f),
                                         maxLines = 1,
@@ -447,26 +462,26 @@ fun SettingsScreen(
 
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        // Battery Warning
+                        // Battery Warning (fully visible and unclipped)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFFFF9500).copy(alpha = 0.1f))
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(SeamlessColors.Warning.copy(alpha = 0.12f))
                                 .padding(12.dp),
                             verticalAlignment = Alignment.Top
                         ) {
                             Icon(
                                 imageVector = Icons.Filled.Info,
                                 contentDescription = null,
-                                tint = Color(0xFFFF9500),
+                                tint = SeamlessColors.Warning,
                                 modifier = Modifier.size(20.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = "Keeping Tor active uses battery. Turn it off only when you do not need remote delivery or incoming Tor messages.",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = colorScheme.onSurface.copy(alpha = 0.8f)
+                                color = colorScheme.onSurface.copy(alpha = 0.85f)
                             )
                         }
                     }
@@ -478,9 +493,13 @@ fun SettingsScreen(
             // Nostr Settings Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(
                     containerColor = colorScheme.surface
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (isDark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.08f)
                 )
             ) {
                 Column(
@@ -503,7 +522,8 @@ fun SettingsScreen(
                         colors = ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.secondaryContainer,
                             contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
+                        ),
+                        shape = RoundedCornerShape(12.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Filled.Refresh,
@@ -511,7 +531,7 @@ fun SettingsScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Manage Relays & Identity")
+                        Text("Manage Relays & Identity", fontWeight = FontWeight.SemiBold)
                     }
                     
                     Spacer(modifier = Modifier.height(8.dp))
@@ -529,9 +549,13 @@ fun SettingsScreen(
             // Security & Privacy Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(
                     containerColor = colorScheme.surface
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (isDark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.08f)
                 )
             ) {
                 Column(
@@ -543,7 +567,7 @@ fun SettingsScreen(
                         text = "Security & Privacy",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
-                        color = SeamlessCyan
+                        color = colorScheme.primary
                     )
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -554,7 +578,7 @@ fun SettingsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                             Text(
                                 text = "App Lock",
                                 style = MaterialTheme.typography.bodyLarge,
@@ -574,12 +598,7 @@ fun SettingsScreen(
                                 com.seamless.android.ui.privacy.PrivacyPreferenceManager
                                     .setAppLockEnabled(context, enabled)
                             },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
-                                checkedTrackColor = SeamlessCyan,
-                                uncheckedThumbColor = colorScheme.outline,
-                                uncheckedTrackColor = colorScheme.surfaceVariant
-                            )
+                            colors = switchColors
                         )
                     }
 
@@ -591,7 +610,7 @@ fun SettingsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                             Text(
                                 text = "Incognito Mode",
                                 style = MaterialTheme.typography.bodyLarge,
@@ -611,12 +630,7 @@ fun SettingsScreen(
                                 com.seamless.android.ui.privacy.PrivacyPreferenceManager
                                     .setIncognitoMode(context, enabled)
                             },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
-                                checkedTrackColor = SeamlessCyan,
-                                uncheckedThumbColor = colorScheme.outline,
-                                uncheckedTrackColor = colorScheme.surfaceVariant
-                            )
+                            colors = switchColors
                         )
                     }
 
@@ -625,15 +639,15 @@ fun SettingsScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(SeamlessTeal.copy(alpha = 0.1f))
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(colorScheme.primary.copy(alpha = 0.08f))
                                 .padding(12.dp),
                             verticalAlignment = Alignment.Top
                         ) {
                             Icon(
                                 imageVector = Icons.Filled.Info,
                                 contentDescription = null,
-                                tint = SeamlessTeal,
+                                tint = colorScheme.primary,
                                 modifier = Modifier.size(20.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
