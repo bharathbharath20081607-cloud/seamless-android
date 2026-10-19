@@ -47,10 +47,19 @@ class OnionMessageQueue private constructor(private val context: Context) {
         const val MAX_RETRY_DELAY_MS = 300_000L       // 5 minutes
         const val MAX_RETRY_ATTEMPTS = 50             // ~4 hours of retries
         const val BACKOFF_MULTIPLIER = 1.8
-        const val ACK_RETRY_DELAY_MS = 12_000L        // Retry if no ACK after 12 seconds
-        // File chunks are ordered over the Tor stream; a 24-chunk window (72 KB)
-        // keeps the circuit saturated without excessive memory pressure.
-        const val ATTACHMENT_WINDOW_SIZE = 24
+        // Unacknowledged frames are retransmitted on an escalating schedule
+        // (10s, 15s, 22s, 34s ... capped) so a slow circuit is not flooded
+        // with duplicates while a dead one is still detected quickly.
+        const val ACK_RETRY_DELAY_MS = 10_000L
+        const val MAX_ACK_RETRY_DELAY_MS = 90_000L
+        const val ACK_RETRY_GROWTH = 1.5
+        // Persisting the whole queue (every photo chunk) through encrypted
+        // preferences is expensive. Writes are coalesced into one snapshot
+        // per debounce window instead of one per state transition.
+        const val SAVE_DEBOUNCE_MS = 250L
+        // File chunks are ordered over the Tor stream; a 40-chunk window (~160 KB
+        // of 4 KB frames) keeps the circuit saturated without memory pressure.
+        const val ATTACHMENT_WINDOW_SIZE = 40
         
         // Cleanup
         const val MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000L  // 7 days
@@ -69,6 +78,8 @@ class OnionMessageQueue private constructor(private val context: Context) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val gson = Gson()
     private val mutex = Mutex()
+    private val persistMutex = Mutex()
+    private val saveRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     @Suppress("DEPRECATION")
     private val persistencePrefs by lazy {
         val masterKey = MasterKey.Builder(context)
@@ -541,12 +552,17 @@ class OnionMessageQueue private constructor(private val context: Context) {
         return null
     }
 
+    private fun ackRetryDelay(retryCount: Int): Long {
+        val delay = ACK_RETRY_DELAY_MS * ACK_RETRY_GROWTH.pow(retryCount.coerceIn(0, 12).toDouble())
+        return min(delay.toLong(), MAX_ACK_RETRY_DELAY_MS)
+    }
+
     private fun isDueForDelivery(message: QueuedMessage, now: Long): Boolean {
         return when (message.state) {
             OnionMessageProtocol.DeliveryState.PENDING -> message.nextRetryAt <= now
             OnionMessageProtocol.DeliveryState.SENT -> {
                 message.lastAttemptAt > 0L &&
-                    now - message.lastAttemptAt >= ACK_RETRY_DELAY_MS &&
+                    now - message.lastAttemptAt >= ackRetryDelay(message.retryCount) &&
                     message.retryCount < MAX_RETRY_ATTEMPTS
             }
             else -> false
@@ -679,21 +695,52 @@ class OnionMessageQueue private constructor(private val context: Context) {
         }
     }
     
+    /**
+     * Requests a durable snapshot of the queue. Every state transition used to
+     * serialise and fsync the *entire* queue (all photo chunks) through
+     * encrypted preferences, which made a single photo cost hundreds of
+     * megabytes of writes while holding the queue lock. Requests are now
+     * coalesced: at most one snapshot per [SAVE_DEBOUNCE_MS].
+     */
     private fun saveToDisk() {
-        try {
-            val queueData = queues.mapValues { (_, messages) ->
-                messages.map { it.toSerializable() }
-            }
-            val committed = persistencePrefs.edit()
-                .putString(QUEUE_DATA_KEY, gson.toJson(queueData))
-                .putString(DELIVERY_DATA_KEY, gson.toJson(deliveryStatus.toMap()))
-                .commit()
-            if (!committed) throw IllegalStateException("Secure queue commit failed")
-            File(context.filesDir, QUEUE_FILE).delete()
-            File(context.filesDir, DELIVERY_STATUS_FILE).delete()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to save secure queue: ${e.message}")
+        if (!saveRequested.compareAndSet(false, true)) return
+        scope.launch {
+            delay(SAVE_DEBOUNCE_MS)
+            saveRequested.set(false)
+            persistSnapshot()
         }
+    }
+
+    private suspend fun persistSnapshot() {
+        persistMutex.withLock {
+            try {
+                // Snapshot under the queue lock so concurrent mutations cannot
+                // produce a torn view; commit outside it so delivery never
+                // waits on disk or encryption.
+                val (queueJson, statusJson) = mutex.withLock {
+                    val queueData = queues.mapValues { (_, messages) ->
+                        messages.map { it.toSerializable() }
+                    }
+                    gson.toJson(queueData) to gson.toJson(deliveryStatus.toMap())
+                }
+                val committed = withContext(Dispatchers.IO) {
+                    persistencePrefs.edit()
+                        .putString(QUEUE_DATA_KEY, queueJson)
+                        .putString(DELIVERY_DATA_KEY, statusJson)
+                        .commit()
+                }
+                if (!committed) throw IllegalStateException("Secure queue commit failed")
+                File(context.filesDir, QUEUE_FILE).delete()
+                File(context.filesDir, DELIVERY_STATUS_FILE).delete()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to save secure queue: ${e.message}")
+            }
+        }
+    }
+
+    /** Forces any pending snapshot to disk (used before shutdown). */
+    suspend fun flush() {
+        persistSnapshot()
     }
     
     /**

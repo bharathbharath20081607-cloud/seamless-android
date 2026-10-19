@@ -107,6 +107,7 @@ import com.seamless.android.net.TorHiddenServiceManager
 import com.seamless.android.net.TorManager
 import com.seamless.android.net.TorMessagingService
 import com.seamless.android.net.TorGroupMessaging
+import com.seamless.android.service.TorForegroundService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -146,6 +147,7 @@ fun OnionContactsScreen(
 
     LaunchedEffect(Unit) {
         if (serviceState == TorMessagingService.ServiceState.STOPPED) {
+            TorForegroundService.start(context.applicationContext)
             messagingService.start()
         }
     }

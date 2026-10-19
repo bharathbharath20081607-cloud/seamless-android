@@ -54,6 +54,7 @@ import com.seamless.android.net.OnionMessageProtocol
 import com.seamless.android.net.TorManager
 import com.seamless.android.net.TorContactTrustState
 import com.seamless.android.net.TorMessagingService
+import com.seamless.android.service.TorForegroundService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -138,10 +139,18 @@ fun OnionChatScreen(
     // offline or rapidly restarting a blocked Tor process.
     LaunchedEffect(serviceState) {
         when {
-            serviceState == TorMessagingService.ServiceState.STOPPED -> messagingService.start()
+            serviceState == TorMessagingService.ServiceState.STOPPED -> {
+                // This call happens from a visible screen, which is the safe
+                // Android lifecycle point to acquire the persistent Tor session.
+                // The foreground service owns sockets, mailbox hosting, and
+                // recovery after the app itself moves to the background.
+                TorForegroundService.start(context.applicationContext)
+                messagingService.start()
+            }
             serviceState == TorMessagingService.ServiceState.ERROR && !startupRecoveryAttempted -> {
                 startupRecoveryAttempted = true
                 kotlinx.coroutines.delay(5_000L)
+                TorForegroundService.start(context.applicationContext)
                 messagingService.start()
             }
         }

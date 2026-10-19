@@ -53,17 +53,16 @@ class TorMessagingService private constructor(private val context: Context) {
         private val MAILBOX_SEALED_MAGIC = byteArrayOf(0x53, 0x54, 0x4D, 0x42) // STMB
         private const val DIRECT_SEALED_VERSION: Byte = 1
         private const val DIRECT_NONCE_SIZE = 12
-        private const val UNACKED_RETRIES_BEFORE_RECONNECT = 3
+        private const val UNACKED_RETRIES_BEFORE_RECONNECT = 2
         // Onion-service circuits can pause while a rendezvous path is rebuilt.
         // A verified peer should not flicker offline during one of those normal
         // pauses; authenticated PONGs and receipts refresh this lease.
         private const val PEER_PRESENCE_TIMEOUT_MS = 120_000L
         private const val KNOWN_CONTACT_REDIAL_INTERVAL_MS = 30_000L
-        // A cold onion-service rendezvous commonly needs longer than an
-        // ordinary HTTPS request. Falling back after five seconds cancelled
-        // healthy first connections and made online peers look unavailable.
-        // Keep the direct route responsive while still bounding offline waits.
-        private const val INITIAL_DIRECT_DIAL_BUDGET_MS = 25_000L
+        // How long a delivery waits for a cold onion rendezvous before also
+        // depositing in the peer's mailbox. The dial itself is never cancelled
+        // (see TorCircuitManager.getConnectionWithin), so this only bounds latency.
+        private const val INITIAL_DIRECT_DIAL_BUDGET_MS = 20_000L
         // Leave room for the encrypted envelope and fixed Tor frame metadata.
         // Enforce this at queue time so an accepted message is always sendable.
         private const val MAX_DIRECT_TEXT_BYTES = 3_700
@@ -140,6 +139,10 @@ class TorMessagingService private constructor(private val context: Context) {
     // outbound circuit, so the receiver can identify us without destructive
     // trial decryption that would corrupt ratchet sessions.
     private val peersIntroducedOnConnection = ConcurrentHashMap.newKeySet<String>()
+    // Which concrete connection each peer was introduced on; a reconnect yields a
+    // new connection id and therefore requires a fresh introduction.
+    private val introducedConnectionIds = ConcurrentHashMap<String, String>()
+    private var connectionEventsJob: Job? = null
     private val lastVerifiedPeerActivity = ConcurrentHashMap<String, Long>()
     private val lastPeerDialAttempt = ConcurrentHashMap<String, Long>()
     private val lastTypingSignalAt = ConcurrentHashMap<String, Long>()
@@ -237,6 +240,9 @@ class TorMessagingService private constructor(private val context: Context) {
             // This MUST happen before any encrypt/decrypt calls
             initializeRatchetManager()
             
+            // Both peers must pick the same socket when they dial each other at once.
+            circuitManager.preferIncomingResolver = { peer -> shouldPreferIncomingCircuit(peer) }
+
             // ━━━ START HIDDEN SERVICE (inbound) ━━━
             // This makes us reachable via .onion address.
             // Without this, no one can connect to us and messages can never arrive.
@@ -297,6 +303,8 @@ class TorMessagingService private constructor(private val context: Context) {
         heartbeatJob?.cancel()
         queueDeliveryJob?.cancel()
         mailboxPollJob?.cancel()
+        connectionEventsJob?.cancel()
+        introducedConnectionIds.clear()
         mailboxClient.stopPolling()
         mailboxService.stop()
         ownMailboxOnion = null
@@ -1209,6 +1217,12 @@ class TorMessagingService private constructor(private val context: Context) {
      */
     private fun startQueueDeliveryLoop() {
         queueDeliveryJob?.cancel()
+        // Flush queued frames the moment a (re)connection becomes usable instead
+        // of waiting for the next poll tick.
+        connectionEventsJob?.cancel()
+        connectionEventsJob = scope.launch {
+            circuitManager.connectionEvents.collect { queueWakeSignal.tryEmit(Unit) }
+        }
         queueDeliveryJob = scope.launch {
             while (isActive) {
                 try {
@@ -1265,14 +1279,12 @@ class TorMessagingService private constructor(private val context: Context) {
             peersWithReadLoop.remove(recipientOnion)
         }
 
-        // Give a first direct onion dial a bounded head start.
-        // Existing pooled circuits return immediately; offline
-        // contacts fall through to their encrypted mailbox rather
-        // than freezing every queued message behind a 60s dial.
+        // Give a first direct onion dial a bounded head start. The dial keeps
+        // running in the background after this budget, so a slow cold rendezvous
+        // still completes for the next cycle while this message falls through to
+        // the encrypted mailbox instead of freezing the whole recipient queue.
         val connection = try {
-            withTimeoutOrNull(INITIAL_DIRECT_DIAL_BUDGET_MS) {
-                circuitManager.getConnection(recipientOnion)
-            }
+            circuitManager.getConnectionWithin(recipientOnion, INITIAL_DIRECT_DIAL_BUDGET_MS)
         } catch (e: Exception) {
             Log.w(TAG, "⚠️ Could not connect to ${redactEndpoint(recipientOnion)}: ${e.message}")
             null
@@ -1304,6 +1316,13 @@ class TorMessagingService private constructor(private val context: Context) {
         // ━━━ CRITICAL: Send CONTACT_EXCHANGE on first use of new connection ━━━
         // This ensures the remote hidden service can identify who connected
         // WITHOUT destructive ratchet trial decryption (which corrupts sessions).
+        // The introduction is tracked per connection id: after any reconnect the
+        // new socket must be introduced again, otherwise the remote side drops it
+        // as an unidentified inbound connection.
+        val currentConnectionId = circuitManager.getActiveConnectionId(recipientOnion)
+        if (currentConnectionId != null && introducedConnectionIds[recipientOnion] != currentConnectionId) {
+            peersIntroducedOnConnection.remove(recipientOnion)
+        }
         val hasNormalMessages = messages.any { queued ->
             OnionMessageProtocol.OnionFrame.decode(queued.frameData)?.frameType !=
                 OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
@@ -1329,6 +1348,7 @@ class TorMessagingService private constructor(private val context: Context) {
                     )
                     introductionReady = circuitManager.sendData(recipientOnion, introFrame.encode())
                     if (introductionReady) {
+                        currentConnectionId?.let { introducedConnectionIds[recipientOnion] = it }
                         Log.i(TAG, "📤 Auto-sent CONTACT_EXCHANGE on new outbound connection to ${redactEndpoint(recipientOnion)}")
                         scope.launch {
                             delay(1500)
@@ -1468,6 +1488,9 @@ class TorMessagingService private constructor(private val context: Context) {
             // Otherwise, try to decrypt and decode
             val decryptedData = if (isAlreadyDecrypted) data else decryptData(senderOnion, data)
             frame = OnionMessageProtocol.OnionFrame.decode(decryptedData) ?: return false
+            // A frame that decrypted with our session keys proves the peer is alive,
+            // even if it later turns out to be a duplicate retransmission.
+            markPeerResponsive(senderOnion)
             
             // Check freshness (allow 7-day offline window for mailbox & BSP synced messages)
             if (!OnionMessageProtocol.isMessageFresh(frame, allowOfflineWindow = allowOfflineTimestamp)) {

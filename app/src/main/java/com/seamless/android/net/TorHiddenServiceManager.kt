@@ -269,25 +269,41 @@ class TorHiddenServiceManager private constructor(private val context: Context) 
         
         serverJob = scope.launch {
             Log.i(TAG, "🔌 Hidden service server listening on port $HIDDEN_SERVICE_PORT")
-            
+            var rebindDelayMs = 500L
+
             while (isActive && isRunning.get()) {
                 try {
                     val clientSocket = withContext(Dispatchers.IO) {
                         serverSocket?.accept()
                     }
-                    
+                    rebindDelayMs = 500L
+
                     clientSocket?.let { socket ->
                         Log.d(TAG, "📥 Incoming connection from ${socket.remoteSocketAddress}")
-                        
+
                         // Notify listener
                         connectionListener?.onIncomingConnection(socket)
                     }
-                    
+
                 } catch (e: SocketException) {
-                    if (isRunning.get()) {
-                        Log.e(TAG, "Server socket error: ${e.message}")
+                    if (!isRunning.get() || !isActive) break
+                    // A single socket error used to end the loop for good, leaving
+                    // the app silently unreachable. Rebind and keep accepting.
+                    Log.e(TAG, "Server socket error: ${e.message} — rebinding in ${rebindDelayMs}ms")
+                    delay(rebindDelayMs)
+                    rebindDelayMs = (rebindDelayMs * 2).coerceAtMost(10_000L)
+                    try {
+                        serverSocket?.close()
+                    } catch (_: Exception) {
                     }
-                    break
+                    try {
+                        serverSocket = ServerSocket().apply {
+                            reuseAddress = true
+                            bind(java.net.InetSocketAddress("127.0.0.1", HIDDEN_SERVICE_PORT))
+                        }
+                    } catch (bindError: Exception) {
+                        Log.e(TAG, "Failed to rebind server socket: ${bindError.message}")
+                    }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error accepting connection: ${e.message}")
                 }
