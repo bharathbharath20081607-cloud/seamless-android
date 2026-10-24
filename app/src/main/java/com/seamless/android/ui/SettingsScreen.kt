@@ -29,6 +29,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import com.seamless.android.service.MeshForegroundService
 import com.seamless.android.ui.theme.SeamlessCyan
 import com.seamless.android.ui.theme.SeamlessColors
+import com.seamless.android.ui.theme.tactilePress
 import com.seamless.android.ui.debug.DebugSettingsSheet
 import com.seamless.android.mesh.BluetoothMeshService
 import com.seamless.android.net.TorManager
@@ -49,6 +50,8 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val colorScheme = MaterialTheme.colorScheme
+    androidx.activity.compose.BackHandler(onBack = onBackClick)
+    val themePref by com.seamless.android.ui.theme.ThemePreferenceManager.themeFlow.collectAsState()
     
     // State for background service toggle - check preference periodically
     var isBackgroundEnabled by remember { 
@@ -130,13 +133,13 @@ fun SettingsScreen(
             // Profile Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp),
+                shape = RoundedCornerShape(18.dp),
                 colors = CardDefaults.cardColors(
                     containerColor = colorScheme.surface
                 ),
                 border = androidx.compose.foundation.BorderStroke(
                     1.dp,
-                    if (isDark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.08f)
+                    if (isDark) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.08f)
                 ),
                 onClick = onProfileClick
             ) {
@@ -185,6 +188,86 @@ fun SettingsScreen(
                             contentDescription = null,
                             tint = colorScheme.onSurface.copy(alpha = 0.5f)
                         )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Appearance Card (System · Dark · Light)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = colorScheme.surface
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (isDark) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.08f)
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                ) {
+                    Text(
+                        text = "Appearance",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Switch between Obsidian Dark and Optical Alabaster Light",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    val options = listOf(
+                        com.seamless.android.ui.theme.ThemePreference.System to "System",
+                        com.seamless.android.ui.theme.ThemePreference.Dark to "Obsidian Dark",
+                        com.seamless.android.ui.theme.ThemePreference.Light to "Optical Light"
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(
+                                if (isDark) Color(0xFF0A0A0E) else colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                            )
+                            .padding(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        options.forEach { (pref, label) ->
+                            val isSelected = themePref == pref
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(
+                                        if (isSelected) colorScheme.primary else Color.Transparent
+                                    )
+                                    .tactilePress(
+                                        scaleDown = 0.95f,
+                                        onClick = {
+                                            com.seamless.android.ui.theme.ThemePreferenceManager.set(context, pref)
+                                        }
+                                    )
+                                    .padding(vertical = 9.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (isSelected) colorScheme.onPrimary else colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -667,9 +750,13 @@ fun SettingsScreen(
             var showPanicConfirm by remember { mutableStateOf(false) }
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(18.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = Color(0xFF2D1010)
+                    containerColor = if (isDark) Color(0xFF230D10) else Color(0xFFFFF1F2)
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    Color(0xFFEF4444).copy(alpha = 0.30f)
                 )
             ) {
                 Column(
@@ -681,14 +768,14 @@ fun SettingsScreen(
                         Icon(
                             Icons.Default.Warning,
                             contentDescription = null,
-                            tint = Color(0xFFFF4444),
+                            tint = Color(0xFFEF4444),
                             modifier = Modifier.size(20.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = "Panic Button",
                             style = MaterialTheme.typography.titleMedium,
-                            color = Color(0xFFFF4444),
+                            color = Color(0xFFEF4444),
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -696,17 +783,17 @@ fun SettingsScreen(
                     Text(
                         text = "Instantly wipe all messages and sign out. Use in an emergency.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color.White.copy(alpha = 0.6f)
+                        color = if (isDark) Color.White.copy(alpha = 0.65f) else Color(0xFF7F1D1D)
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Button(
                         onClick = { showPanicConfirm = true },
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFFFF4444),
+                            containerColor = Color(0xFFEF4444),
                             contentColor = Color.White
                         ),
-                        shape = RoundedCornerShape(12.dp)
+                        shape = RoundedCornerShape(14.dp)
                     ) {
                         Icon(Icons.Default.DeleteForever, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
@@ -718,8 +805,8 @@ fun SettingsScreen(
             if (showPanicConfirm) {
                 AlertDialog(
                     onDismissRequest = { showPanicConfirm = false },
-                    title = { Text("⚠️ Confirm Panic", color = Color(0xFFFF4444), fontWeight = FontWeight.Bold) },
-                    text = { Text("This will permanently delete ALL messages and contacts. This cannot be undone.", color = Color.White) },
+                    title = { Text("⚠️ Confirm Panic", color = Color(0xFFEF4444), fontWeight = FontWeight.Bold) },
+                    text = { Text("This will permanently delete ALL messages and contacts. This cannot be undone.", color = colorScheme.onSurface) },
                     confirmButton = {
                         TextButton(onClick = {
                             showPanicConfirm = false
@@ -738,15 +825,15 @@ fun SettingsScreen(
                                 android.os.Process.killProcess(android.os.Process.myPid())
                             }
                         }) {
-                            Text("WIPE EVERYTHING", color = Color(0xFFFF4444), fontWeight = FontWeight.Bold)
+                            Text("WIPE EVERYTHING", color = Color(0xFFEF4444), fontWeight = FontWeight.Bold)
                         }
                     },
                     dismissButton = {
                         TextButton(onClick = { showPanicConfirm = false }) {
-                            Text("Cancel", color = Color.White)
+                            Text("Cancel", color = colorScheme.onSurface)
                         }
                     },
-                    containerColor = Color(0xFF1A1A2E)
+                    containerColor = colorScheme.surface
                 )
             }
 
@@ -755,9 +842,13 @@ fun SettingsScreen(
             // Debug Settings Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(18.dp),
                 colors = CardDefaults.cardColors(
                     containerColor = colorScheme.surface
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (isDark) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.08f)
                 )
             ) {
                 Column(

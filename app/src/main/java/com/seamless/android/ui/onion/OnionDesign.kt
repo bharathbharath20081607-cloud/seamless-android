@@ -24,34 +24,81 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.seamless.android.ui.theme.ThemePreferenceManager
 
 internal object OnionUi {
-    val Canvas = Color(0xFF000000)
-    val CanvasRaised = Color(0xFF09090C)
-    val Surface = Color(0xFF111116)
-    val SurfacePressed = Color(0xFF181820)
-    val Outline = Color(0xFF26262E)
-    val Accent = Color(0xFFFFFFFF)
-    val AccentStrong = Color(0xFF2B2B35)
-    val OutgoingStart = Color(0xFF2D5B52)
-    val OutgoingEnd = Color(0xFF17342F)
-    val IncomingStart = Color(0xFF20222B)
-    val IncomingEnd = Color(0xFF13141A)
-    val Online = Color(0xFF30D158)
-    val Warning = Color(0xFFFF9F0A)
-    val Danger = Color(0xFFFF453A)
-    val TextSecondary = Color(0xFFA8A8B2)
-    val TextMuted = Color(0xFF6E6E78)
-    val Corner = RoundedCornerShape(16.dp)
-    val Hairline = Color.White.copy(alpha = 0.08f)
+    private val isDark: Boolean
+        get() = ThemePreferenceManager.isCurrentlyDark
+
+    val Canvas: Color
+        get() = if (isDark) Color(0xFF000000) else Color(0xFFF5F5F7)
+
+    val CanvasRaised: Color
+        get() = if (isDark) Color(0xFF09090D) else Color(0xFFFFFFFF)
+
+    val Surface: Color
+        get() = if (isDark) Color(0xFF121218) else Color(0xFFFFFFFF)
+
+    val SurfacePressed: Color
+        get() = if (isDark) Color(0xFF1A1A23) else Color(0xFFEEEEF3)
+
+    val Outline: Color
+        get() = if (isDark) Color(0xFF282832) else Color(0xFFE4E4E9)
+
+    val TextPrimary: Color
+        get() = if (isDark) Color(0xFFF4F4F6) else Color(0xFF09090B)
+
+    val Accent: Color
+        get() = if (isDark) Color(0xFFFFFFFF) else Color(0xFF09090B)
+
+    val AccentStrong: Color
+        get() = if (isDark) Color(0xFF2B2B36) else Color(0xFFE4E4EC)
+
+    // Unified Flagship Titanium-Slate / Obsidian Outgoing Bubble Gradient
+    val OutgoingStart: Color
+        get() = if (isDark) Color(0xFF2A2D3D) else Color(0xFF202028)
+
+    val OutgoingEnd: Color
+        get() = if (isDark) Color(0xFF1D1F2B) else Color(0xFF121218)
+
+    // Unified Machined Obsidian / Optical Alabaster Incoming Bubble Gradient
+    val IncomingStart: Color
+        get() = if (isDark) Color(0xFF171820) else Color(0xFFFFFFFF)
+
+    val IncomingEnd: Color
+        get() = if (isDark) Color(0xFF101117) else Color(0xFFF6F6FA)
+
+    val Online = Color(0xFF10B981)
+    val Warning = Color(0xFFF59E0B)
+    val Danger = Color(0xFFEF4444)
+
+    val TextSecondary: Color
+        get() = if (isDark) Color(0xFFA1A1AA) else Color(0xFF52525B)
+
+    val TextMuted: Color
+        get() = if (isDark) Color(0xFF71717A) else Color(0xFF71717A)
+
+    val Corner = RoundedCornerShape(18.dp)
+
+    val Hairline: Color
+        get() = if (isDark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.08f)
 }
 
 @Composable
 internal fun OnionPage(content: @Composable () -> Unit) {
+    val isDark = ThemePreferenceManager.isCurrentlyDark
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(OnionUi.Canvas, Color(0xFF060609), OnionUi.Canvas)))
+            .background(
+                Brush.verticalGradient(
+                    if (isDark) {
+                        listOf(OnionUi.Canvas, Color(0xFF07070B), OnionUi.Canvas)
+                    } else {
+                        listOf(Color(0xFFF8F8FA), OnionUi.Canvas, Color(0xFFEEEEF3))
+                    }
+                )
+            )
     ) { content() }
 }
 
@@ -62,13 +109,17 @@ internal fun OnionStatusChip(
     modifier: Modifier = Modifier
 ) {
     Surface(
-        modifier = modifier,
+        modifier = modifier.border(
+            width = 1.dp,
+            color = color.copy(alpha = 0.28f),
+            shape = RoundedCornerShape(999.dp)
+        ),
         shape = RoundedCornerShape(999.dp),
         color = color.copy(alpha = 0.14f),
         contentColor = color
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(Modifier.size(7.dp).clip(CircleShape).background(color))
@@ -99,7 +150,7 @@ internal fun OnionAvatar(
                 .size(52.dp)
                 .clip(CircleShape)
                 .background(Brush.linearGradient(listOf(start, end)))
-                .border(1.dp, Color.White.copy(alpha = 0.14f), CircleShape),
+                .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Box(contentAlignment = Alignment.Center) {

@@ -5,7 +5,11 @@ import androidx.compose.ui.focus.focusRequester
 // [Goose] TODO: Replace inline file attachment stub with FilePickerButton abstraction that dispatches via FileShareDispatcher
 
 
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.*
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import com.seamless.android.ui.theme.tactilePress
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -296,76 +300,100 @@ fun MessageInput(
         
         Spacer(modifier = Modifier.width(4.dp))
         
-        // Voice and image buttons when no text (only visible in Mesh chat)
-        if (value.text.isEmpty() && showMediaButtons) {
-            // Hold-to-record microphone
-            val bg = if (isDark) Color(0xFF26262E) else Color(0xFFE4E4E9)
+        // Expressive Spring-Morphing Action Cluster (Media/Mic <-> Send Button)
+        val latestSelectedPeer = rememberUpdatedState(selectedPrivatePeer)
+        val latestChannel = rememberUpdatedState(currentChannel)
+        val latestOnSendVoiceNote = rememberUpdatedState(onSendVoiceNote)
 
-            // Ensure latest values are used when finishing recording
-            val latestSelectedPeer = rememberUpdatedState(selectedPrivatePeer)
-            val latestChannel = rememberUpdatedState(currentChannel)
-            val latestOnSendVoiceNote = rememberUpdatedState(onSendVoiceNote)
-
-            // Image button (image picker) - keep layout space reserved during recording so mic button doesn't shift under finger
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (!isRecording) {
-                    ImagePickerButton(
-                        onImageReady = { outPath ->
-                            onSendImageNote(latestSelectedPeer.value, latestChannel.value, outPath)
-                        }
+        androidx.compose.animation.AnimatedContent(
+            targetState = hasText,
+            transitionSpec = {
+                (androidx.compose.animation.scaleIn(
+                    initialScale = 0.72f,
+                    animationSpec = androidx.compose.animation.core.spring(
+                        dampingRatio = 0.66f,
+                        stiffness = 480f
                     )
-                }
-            }
-
-            Spacer(Modifier.width(1.dp))
-
-            VoiceRecordButton(
-                backgroundColor = bg,
-                onStart = {
-                    isRecording = true
-                    elapsedMs = 0L
-                    // Keep existing focus to avoid IME collapse, but do not force-show keyboard
-                    if (isFocused.value) {
-                        try { focusRequester.requestFocus() } catch (_: Exception) {}
-                    }
-                },
-                onAmplitude = { amp, ms ->
-                    amplitude = amp
-                    elapsedMs = ms
-                },
-                onFinish = { path ->
-                    isRecording = false
-                    // Extract and cache waveform from the actual audio file to match receiver rendering
-                    AudioWaveformExtractor.extractAsync(path, sampleCount = 120) { arr ->
-                        if (arr != null) {
-                            try { com.seamless.android.features.voice.VoiceWaveformCache.put(path, arr) } catch (_: Exception) {}
-                        }
-                    }
-                    // BLE path (private or public) — use latest values to avoid stale captures
-                    latestOnSendVoiceNote.value(
-                        latestSelectedPeer.value,
-                        latestChannel.value,
-                        path
+                ) + androidx.compose.animation.fadeIn(
+                    animationSpec = androidx.compose.animation.core.tween(150)
+                )).togetherWith(
+                    androidx.compose.animation.scaleOut(
+                        targetScale = 0.72f,
+                        animationSpec = androidx.compose.animation.core.tween(130)
+                    ) + androidx.compose.animation.fadeOut(
+                        animationSpec = androidx.compose.animation.core.tween(120)
                     )
-                }
-            )
-        } else if (hasText) {
-            // Optical White Send Button (#FFFFFF circle with #000000 arrow icon in dark mode)
-            Box(
-                modifier = Modifier
-                    .padding(end = 6.dp)
-                    .size(34.dp)
-                    .clip(CircleShape)
-                    .background(if (isDark) Color.White else Color.Black)
-                    .clickable { onSend() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.ArrowUpward,
-                    contentDescription = "Send",
-                    tint = if (isDark) Color.Black else Color.White,
-                    modifier = Modifier.size(18.dp)
                 )
+            },
+            label = "InputActionMorph"
+        ) { showingSendButton ->
+            if (showingSendButton) {
+                // High-contrast Optical White / Obsidian Send Button with tactile spring + haptic tick
+                Box(
+                    modifier = Modifier
+                        .padding(end = 6.dp)
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(if (isDark) Color.White else Color(0xFF09090B))
+                        .border(
+                            width = 1.dp,
+                            color = if (isDark) Color.White.copy(alpha = 0.35f) else Color.Black.copy(alpha = 0.2f),
+                            shape = CircleShape
+                        )
+                        .tactilePress(
+                            scaleDown = 0.90f,
+                            onClick = { onSend() }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.ArrowUpward,
+                        contentDescription = "Send",
+                        tint = if (isDark) Color.Black else Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            } else if (showMediaButtons) {
+                val bg = if (isDark) Color(0xFF26262E) else Color(0xFFE4E4E9)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (!isRecording) {
+                        ImagePickerButton(
+                            onImageReady = { outPath ->
+                                onSendImageNote(latestSelectedPeer.value, latestChannel.value, outPath)
+                            }
+                        )
+                    }
+                    VoiceRecordButton(
+                        backgroundColor = bg,
+                        onStart = {
+                            isRecording = true
+                            elapsedMs = 0L
+                            if (isFocused.value) {
+                                try { focusRequester.requestFocus() } catch (_: Exception) {}
+                            }
+                        },
+                        onAmplitude = { amp, ms ->
+                            amplitude = amp
+                            elapsedMs = ms
+                        },
+                        onFinish = { path ->
+                            isRecording = false
+                            AudioWaveformExtractor.extractAsync(path, sampleCount = 120) { arr ->
+                                if (arr != null) {
+                                    try { com.seamless.android.features.voice.VoiceWaveformCache.put(path, arr) } catch (_: Exception) {}
+                                }
+                            }
+                            latestOnSendVoiceNote.value(
+                                latestSelectedPeer.value,
+                                latestChannel.value,
+                                path
+                            )
+                        }
+                    )
+                }
             }
         }
     }
@@ -379,19 +407,36 @@ fun CommandSuggestionsBox(
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val isDark = (colorScheme.background.red + colorScheme.background.green + colorScheme.background.blue) < 1.5f
-
-    // Glassmorphic suggestion box
-    val glassColor = if (isDark) 
-        com.seamless.android.ui.theme.SeamlessColors.GlassSurfaceDark 
-    else 
-        com.seamless.android.ui.theme.SeamlessColors.GlassSurfaceLight
+    val boxShape = RoundedCornerShape(18.dp)
 
     Column(
         modifier = modifier
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .clip(boxShape)
+            .background(
+                brush = Brush.verticalGradient(
+                    if (isDark) {
+                        listOf(Color(0xFF17171F), Color(0xFF101016))
+                    } else {
+                        listOf(Color(0xFFFFFFFF), Color(0xFFF6F6FA))
+                    }
+                ),
+                shape = boxShape
+            )
+            .border(
+                width = 1.dp,
+                brush = Brush.verticalGradient(
+                    if (isDark) {
+                        listOf(Color.White.copy(alpha = 0.16f), Color.White.copy(alpha = 0.04f))
+                    } else {
+                        listOf(Color.Black.copy(alpha = 0.09f), Color.Black.copy(alpha = 0.04f))
+                    }
+                ),
+                shape = boxShape
+            )
             .verticalScroll(rememberScrollState())
-            .background(glassColor, RoundedCornerShape(12.dp))
-            .border(1.dp, colorScheme.outline.copy(alpha = 0.1f), RoundedCornerShape(12.dp))
-            .padding(vertical = 8.dp)
+            .padding(vertical = 6.dp, horizontal = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         suggestions.forEach { suggestion: CommandSuggestion ->
             CommandSuggestionItem(
@@ -408,55 +453,67 @@ fun CommandSuggestionItem(
     onClick: () -> Unit
 ) {
     val colorScheme = MaterialTheme.colorScheme
+    val isDark = (colorScheme.background.red + colorScheme.background.green + colorScheme.background.blue) < 1.5f
+    val rowShape = RoundedCornerShape(12.dp)
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(rowShape)
+            .background(
+                if (isDark) Color.White.copy(alpha = 0.04f)
+                else Color.Black.copy(alpha = 0.03f)
+            )
             .clickable { onClick() }
-            .padding(horizontal = 12.dp, vertical = 3.dp)
-            .background(Color.Gray.copy(alpha = 0.1f)),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Show all aliases together
         val allCommands = if (suggestion.aliases.isNotEmpty()) {
             listOf(suggestion.command) + suggestion.aliases
         } else {
             listOf(suggestion.command)
         }
 
-        Text(
-            text = allCommands.joinToString(", "),
-            style = MaterialTheme.typography.bodySmall.copy(
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Medium
-            ),
-            color = colorScheme.primary,
-            fontSize = (BASE_FONT_SIZE - 4).sp
-        )
-
-        // Show syntax if any
-        suggestion.syntax?.let { syntax ->
+        // Command Pill Badge
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(colorScheme.primary.copy(alpha = 0.12f))
+                .border(
+                    width = 1.dp,
+                    color = colorScheme.primary.copy(alpha = 0.22f),
+                    shape = RoundedCornerShape(8.dp)
+                )
+                .padding(horizontal = 8.dp, vertical = 3.dp)
+        ) {
             Text(
-                text = syntax,
-                style = MaterialTheme.typography.bodySmall.copy(
-                    fontFamily = FontFamily.Monospace
+                text = allCommands.joinToString(", "),
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
                 ),
-                color = colorScheme.onSurface.copy(alpha = 0.8f),
-                fontSize = (BASE_FONT_SIZE - 5).sp
+                color = colorScheme.primary
             )
         }
 
-        // Show description
+        suggestion.syntax?.let { syntax ->
+            Text(
+                text = syntax,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontFamily = FontFamily.Monospace
+                ),
+                color = colorScheme.onSurfaceVariant
+            )
+        }
+
         Text(
             text = suggestion.description,
-            style = MaterialTheme.typography.bodySmall.copy(
-                fontFamily = FontFamily.Monospace
-            ),
-            color = colorScheme.onSurface.copy(alpha = 0.7f),
-            fontSize = (BASE_FONT_SIZE - 5).sp,
+            style = MaterialTheme.typography.bodySmall,
+            color = colorScheme.onSurface.copy(alpha = 0.72f),
             maxLines = 1,
-            overflow = TextOverflow.Ellipsis
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
         )
     }
 }
@@ -469,18 +526,35 @@ fun MentionSuggestionsBox(
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val isDark = (colorScheme.background.red + colorScheme.background.green + colorScheme.background.blue) < 1.5f
-    
-    // Glassmorphic suggestion box
-    val glassColor = if (isDark) 
-        com.seamless.android.ui.theme.SeamlessColors.GlassSurfaceDark 
-    else 
-        com.seamless.android.ui.theme.SeamlessColors.GlassSurfaceLight
-        
+    val boxShape = RoundedCornerShape(18.dp)
+
     Column(
         modifier = modifier
-            .background(glassColor, RoundedCornerShape(12.dp))
-            .border(1.dp, colorScheme.outline.copy(alpha = 0.1f), RoundedCornerShape(12.dp))
-            .padding(vertical = 8.dp)
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .clip(boxShape)
+            .background(
+                brush = Brush.verticalGradient(
+                    if (isDark) {
+                        listOf(Color(0xFF17171F), Color(0xFF101016))
+                    } else {
+                        listOf(Color(0xFFFFFFFF), Color(0xFFF6F6FA))
+                    }
+                ),
+                shape = boxShape
+            )
+            .border(
+                width = 1.dp,
+                brush = Brush.verticalGradient(
+                    if (isDark) {
+                        listOf(Color.White.copy(alpha = 0.16f), Color.White.copy(alpha = 0.04f))
+                    } else {
+                        listOf(Color.Black.copy(alpha = 0.09f), Color.Black.copy(alpha = 0.04f))
+                    }
+                ),
+                shape = boxShape
+            )
+            .padding(vertical = 6.dp, horizontal = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         suggestions.forEach { suggestion: String ->
             MentionSuggestionItem(
@@ -497,34 +571,35 @@ fun MentionSuggestionItem(
     onClick: () -> Unit
 ) {
     val colorScheme = MaterialTheme.colorScheme
-    
+    val isDark = (colorScheme.background.red + colorScheme.background.green + colorScheme.background.blue) < 1.5f
+    val rowShape = RoundedCornerShape(12.dp)
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(rowShape)
+            .background(
+                if (isDark) Color.White.copy(alpha = 0.04f)
+                else Color.Black.copy(alpha = 0.03f)
+            )
             .clickable { onClick() }
-            .padding(horizontal = 12.dp, vertical = 3.dp)
-            .background(Color.Gray.copy(alpha = 0.1f)),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = stringResource(R.string.mention_suggestion_at, suggestion),
-            style = MaterialTheme.typography.bodySmall.copy(
-                fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodyMedium.copy(
                 fontWeight = FontWeight.SemiBold
             ),
-            color = Color(0xFFFF9500), // Orange like mentions
-            fontSize = (BASE_FONT_SIZE - 4).sp
+            color = colorScheme.primary
         )
-        
+
         Spacer(modifier = Modifier.weight(1f))
-        
+
         Text(
             text = stringResource(R.string.mention),
-            style = MaterialTheme.typography.bodySmall.copy(
-                fontFamily = FontFamily.Monospace
-            ),
-            color = colorScheme.onSurface.copy(alpha = 0.7f),
-            fontSize = (BASE_FONT_SIZE - 5).sp
+            style = MaterialTheme.typography.labelSmall,
+            color = colorScheme.onSurfaceVariant
         )
     }
 }

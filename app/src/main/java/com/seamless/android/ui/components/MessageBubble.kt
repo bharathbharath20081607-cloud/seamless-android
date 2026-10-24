@@ -1,29 +1,37 @@
 @file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui.components
-import androidx.compose.ui.unit.Dp
 
-import androidx.compose.animation.core.*
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.ui.graphics.Outline
-import androidx.compose.ui.unit.Density
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Premium Message Bubble — Obsidian & Optical Light Edition
+// Flagship Message Bubble — High-Contrast Luminance & Top-Lit Specular Physics
+// Engineered for instant Figure-Ground segregation (Von Restorff isolation)
+// across both Obsidian Dark and Optical Alabaster Light modes.
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
@@ -38,39 +46,38 @@ fun MessageBubble(
     val bubbleShape = remember(isSelf, isFirstInGroup, isLastInGroup) {
         CyberBubbleShape(isSelf, isFirstInGroup, isLastInGroup)
     }
-    
-    // ── Press-to-scale spring animation (weighty 0.84f damping) ──────
+
+    // ── Tactile Press-to-Scale Spring Physics ───────────────────────
     var isPressed by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.97f else 1f,
+        targetValue = if (isPressed) 0.972f else 1f,
         animationSpec = spring(
-            dampingRatio = 0.84f,
-            stiffness = 400f
+            dampingRatio = 0.78f,
+            stiffness = 520f
         ),
         label = "bubbleScale"
     )
-    
+
     val backgroundModifier = if (isSelf) {
-        // ── SENT BUBBLE ─────────────────────────────────────────────
-        // High-contrast smoked Obsidian glass pill (#1F1F27 -> #17171E) with White@22% specular border
+        // ── SENT BUBBLE (Authoritative Elevated Titanium-Slate / Obsidian) ──
         Modifier
             .shadow(
-                elevation = 2.dp, 
-                shape = bubbleShape, 
-                spotColor = Color.Black.copy(alpha = 0.35f),
-                ambientColor = Color.Black.copy(alpha = 0.2f)
+                elevation = if (isDark) 3.dp else 4.dp,
+                shape = bubbleShape,
+                spotColor = Color.Black.copy(alpha = if (isDark) 0.45f else 0.22f),
+                ambientColor = Color.Black.copy(alpha = 0.18f)
             )
             .background(
                 brush = Brush.verticalGradient(
                     colors = if (isDark) {
                         listOf(
-                            Color(0xFF1F1F27),
-                            Color(0xFF17171E)
+                            Color(0xFF2A2D3D),
+                            Color(0xFF1D1F2B)
                         )
                     } else {
                         listOf(
-                            Color(0xFF22222A),
-                            Color(0xFF18181F)
+                            Color(0xFF202028),
+                            Color(0xFF121218)
                         )
                     }
                 ),
@@ -78,31 +85,61 @@ fun MessageBubble(
             )
             .border(
                 width = 1.dp,
-                brush = Brush.linearGradient(
-                    colors = listOf(
-                        Color.White.copy(alpha = 0.22f),
-                        Color.White.copy(alpha = 0.08f)
-                    )
+                brush = Brush.verticalGradient(
+                    colors = if (isDark) {
+                        listOf(
+                            Color.White.copy(alpha = 0.26f),
+                            Color.White.copy(alpha = 0.07f)
+                        )
+                    } else {
+                        listOf(
+                            Color.White.copy(alpha = 0.20f),
+                            Color.Black.copy(alpha = 0.15f)
+                        )
+                    }
                 ),
                 shape = bubbleShape
             )
     } else {
-        // ── RECEIVED BUBBLE ─────────────────────────────────────────
-        // Machined dark glass (#121217) with 1.dp White@10% border in dark mode
+        // ── RECEIVED BUBBLE (Machined Obsidian Glass / Pure Optical Alabaster) ──
         Modifier
             .shadow(
-                elevation = 1.dp,
+                elevation = if (isDark) 1.dp else 2.dp,
                 shape = bubbleShape,
-                spotColor = Color.Black.copy(alpha = 0.2f),
-                ambientColor = Color.Black.copy(alpha = 0.1f)
+                spotColor = Color.Black.copy(alpha = if (isDark) 0.25f else 0.10f),
+                ambientColor = Color.Black.copy(alpha = 0.08f)
             )
             .background(
-                color = if (isDark) Color(0xFF121217) else colorScheme.surfaceVariant.copy(alpha = 0.85f),
+                brush = Brush.verticalGradient(
+                    colors = if (isDark) {
+                        listOf(
+                            Color(0xFF15151C),
+                            Color(0xFF0E0E13)
+                        )
+                    } else {
+                        listOf(
+                            Color(0xFFFFFFFF),
+                            Color(0xFFF6F6FA)
+                        )
+                    }
+                ),
                 shape = bubbleShape
             )
             .border(
                 width = 1.dp,
-                color = if (isDark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.08f),
+                brush = Brush.verticalGradient(
+                    colors = if (isDark) {
+                        listOf(
+                            Color.White.copy(alpha = 0.12f),
+                            Color.White.copy(alpha = 0.03f)
+                        )
+                    } else {
+                        listOf(
+                            Color.Black.copy(alpha = 0.09f),
+                            Color.Black.copy(alpha = 0.05f)
+                        )
+                    }
+                ),
                 shape = bubbleShape
             )
     }
@@ -116,7 +153,7 @@ fun MessageBubble(
             .pointerInput(Unit) {
                 awaitPointerEventScope {
                     while (true) {
-                        val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
                         val anyPressed = event.changes.any { it.pressed }
                         isPressed = anyPressed
                     }
@@ -124,9 +161,9 @@ fun MessageBubble(
             }
             .then(backgroundModifier)
             .padding(
-                start = if (!isSelf && isLastInGroup) 16.dp else 14.dp, 
-                end = if (isSelf && isLastInGroup) 16.dp else 14.dp, 
-                top = 9.dp, 
+                start = if (!isSelf && isLastInGroup) 16.dp else 14.dp,
+                end = if (isSelf && isLastInGroup) 16.dp else 14.dp,
+                top = 10.dp,
                 bottom = 8.dp
             )
     ) {
@@ -135,12 +172,7 @@ fun MessageBubble(
 }
 
 /**
- * Modern Chat Bubble Shape — iMessage/WhatsApp-inspired
- * 
- * Features:
- * - Smooth 20dp corner radii (slightly softer than before)
- * - Refined bezier tails (6dp wide, 10dp tall — less aggressive)
- * - Clean asymmetric grouping: 4dp corners for consecutive same-sender messages
+ * Modern Chat Bubble Shape — Continuous Bezier Geometry
  */
 private class CyberBubbleShape(
     private val isSelf: Boolean,
@@ -153,41 +185,36 @@ private class CyberBubbleShape(
         density: Density
     ): Outline {
         val path = Path()
-        
-        // Refined radii — softer feel
+
         val largeRadius = 20.dp.toPx(density)
-        val mediumRadius = 14.dp.toPx(density) 
-        val smallRadius = 5.dp.toPx(density)
+        val mediumRadius = 14.dp.toPx(density)
+        val smallRadius = 6.dp.toPx(density)
         val tailWidth = 6.dp.toPx(density)
         val tailHeight = 10.dp.toPx(density)
 
         val w = size.width
         val h = size.height
-        
-        // Corner radii based on position in group
+
         val topLeadingRadius = if (isSelf) largeRadius else if (isFirstInGroup) largeRadius else smallRadius
         val topTrailingRadius = if (isSelf) { if (isFirstInGroup) largeRadius else smallRadius } else largeRadius
         val bottomLeadingRadius = if (isSelf) largeRadius else if (isLastInGroup) smallRadius else mediumRadius
         val bottomTrailingRadius = if (isSelf) { if (isLastInGroup) smallRadius else mediumRadius } else largeRadius
 
         if (isSelf) {
-            // SELF — right side, tail bottom-right
             path.moveTo(topLeadingRadius, 0f)
             path.lineTo(w - topTrailingRadius, 0f)
-            
-            // Top-right corner
+
             path.arcTo(
                 rect = androidx.compose.ui.geometry.Rect(
-                    w - 2 * topTrailingRadius, 0f, 
+                    w - 2 * topTrailingRadius, 0f,
                     w, 2 * topTrailingRadius
                 ),
                 startAngleDegrees = -90f,
                 sweepAngleDegrees = 90f,
                 forceMoveTo = false
             )
-            
+
             if (isLastInGroup) {
-                // Smooth bezier tail
                 path.lineTo(w, h - tailHeight)
                 path.cubicTo(
                     w, h - tailHeight * 0.3f,
@@ -211,7 +238,7 @@ private class CyberBubbleShape(
                     forceMoveTo = false
                 )
             }
-            
+
             path.lineTo(bottomLeadingRadius, h)
             path.arcTo(
                 rect = androidx.compose.ui.geometry.Rect(
@@ -222,7 +249,7 @@ private class CyberBubbleShape(
                 sweepAngleDegrees = 90f,
                 forceMoveTo = false
             )
-            
+
             path.lineTo(0f, topLeadingRadius)
             path.arcTo(
                 rect = androidx.compose.ui.geometry.Rect(
@@ -234,10 +261,9 @@ private class CyberBubbleShape(
                 forceMoveTo = false
             )
         } else {
-            // RECEIVED — left side, tail bottom-left
             path.moveTo(topLeadingRadius, 0f)
             path.lineTo(w - topTrailingRadius, 0f)
-            
+
             path.arcTo(
                 rect = androidx.compose.ui.geometry.Rect(
                     w - 2 * topTrailingRadius, 0f,
@@ -247,7 +273,7 @@ private class CyberBubbleShape(
                 sweepAngleDegrees = 90f,
                 forceMoveTo = false
             )
-            
+
             path.lineTo(w, h - bottomTrailingRadius)
             path.arcTo(
                 rect = androidx.compose.ui.geometry.Rect(
@@ -258,7 +284,7 @@ private class CyberBubbleShape(
                 sweepAngleDegrees = 90f,
                 forceMoveTo = false
             )
-            
+
             if (isLastInGroup) {
                 path.lineTo(largeRadius, h)
                 path.cubicTo(
@@ -283,7 +309,7 @@ private class CyberBubbleShape(
                     forceMoveTo = false
                 )
             }
-            
+
             path.lineTo(0f, topLeadingRadius)
             path.arcTo(
                 rect = androidx.compose.ui.geometry.Rect(
@@ -295,7 +321,7 @@ private class CyberBubbleShape(
                 forceMoveTo = false
             )
         }
-        
+
         path.close()
         return Outline.Generic(path)
     }

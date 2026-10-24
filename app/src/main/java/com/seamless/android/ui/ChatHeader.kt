@@ -38,6 +38,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import com.seamless.android.core.ui.utils.singleOrTripleClickable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.ui.geometry.Offset
 
 /**
@@ -402,34 +403,37 @@ private fun PrivateChatHeader(
             .background(glassColor)
             .padding(vertical = 8.dp)
     ) {
-        // Back button - positioned all the way to the left with minimal margin
-        Button(
-            onClick = onBackClick,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color.Transparent,
-                contentColor = colorScheme.primary
-            ),
-            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp), // Reduced horizontal padding
+        // Tactile glassmorphic pill back button
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .align(Alignment.CenterStart)
-                .offset(x = (-8).dp) // Move even further left to minimize margin
+                .padding(start = 6.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(
+                    if (isDark) Color.White.copy(alpha = 0.08f)
+                    else Color.Black.copy(alpha = 0.06f)
+                )
+                .border(
+                    width = 1.dp,
+                    color = if (isDark) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.08f),
+                    shape = RoundedCornerShape(14.dp)
+                )
+                .clickable(onClick = onBackClick)
+                .padding(horizontal = 10.dp, vertical = 6.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = stringResource(R.string.back),
-                    modifier = Modifier.size(16.dp),
-                    tint = colorScheme.primary
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = stringResource(R.string.chat_back),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colorScheme.primary
-                )
-            }
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = stringResource(R.string.back),
+                modifier = Modifier.size(16.dp),
+                tint = colorScheme.primary
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = stringResource(R.string.chat_back),
+                style = MaterialTheme.typography.labelLarge,
+                color = colorScheme.primary
+            )
         }
         
         // Title - perfectly centered regardless of other elements
@@ -504,34 +508,37 @@ private fun ChannelHeader(
             .background(glassColor)
             .padding(vertical = 8.dp)
     ) {
-        // Back button - positioned all the way to the left with minimal margin
-        Button(
-            onClick = onBackClick,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color.Transparent,
-                contentColor = colorScheme.primary
-            ),
-            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp), // Reduced horizontal padding
+        // Tactile glassmorphic pill back button
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .align(Alignment.CenterStart)
-                .offset(x = (-8).dp) // Move even further left to minimize margin
+                .padding(start = 6.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(
+                    if (isDark) Color.White.copy(alpha = 0.08f)
+                    else Color.Black.copy(alpha = 0.06f)
+                )
+                .border(
+                    width = 1.dp,
+                    color = if (isDark) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.08f),
+                    shape = RoundedCornerShape(14.dp)
+                )
+                .clickable(onClick = onBackClick)
+                .padding(horizontal = 10.dp, vertical = 6.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = stringResource(R.string.back),
-                    modifier = Modifier.size(16.dp),
-                    tint = colorScheme.primary
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = stringResource(R.string.chat_back),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colorScheme.primary
-                )
-            }
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = stringResource(R.string.back),
+                modifier = Modifier.size(16.dp),
+                tint = colorScheme.primary
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = stringResource(R.string.chat_back),
+                style = MaterialTheme.typography.labelLarge,
+                color = colorScheme.primary
+            )
         }
         
         // Title - perfectly centered regardless of other elements
@@ -651,27 +658,42 @@ private fun MainHeader(
             val peerCount = connectedPeers.filter { it != viewModel.meshServiceInstance?.myPeerID }.size
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
                 modifier = Modifier
-                    .clip(RoundedCornerShape(14.dp))
+                    .clip(RoundedCornerShape(999.dp))
                     .background(
-                        if (peerCount > 0) colorScheme.primary.copy(alpha = 0.14f)
-                        else colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                        if (peerCount > 0) com.seamless.android.ui.theme.SeamlessColors.Emerald.copy(alpha = 0.14f)
+                        else colorScheme.surfaceVariant.copy(alpha = 0.65f)
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = if (peerCount > 0) com.seamless.android.ui.theme.SeamlessColors.Emerald.copy(alpha = 0.32f)
+                        else colorScheme.outline.copy(alpha = 0.25f),
+                        shape = RoundedCornerShape(999.dp)
                     )
                     .clickable { onSidebarClick() }
-                    .padding(horizontal = 8.dp, vertical = 5.dp)
+                    .padding(horizontal = 9.dp, vertical = 5.dp)
             ) {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (peerCount > 0) com.seamless.android.ui.theme.SeamlessColors.Emerald
+                            else colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+                        )
+                )
                 Icon(
                     imageVector = Icons.Outlined.People,
                     contentDescription = "Network",
-                    modifier = Modifier.size(16.dp),
-                    tint = if (peerCount > 0) colorScheme.primary else colorScheme.onSurfaceVariant
+                    modifier = Modifier.size(15.dp),
+                    tint = if (peerCount > 0) com.seamless.android.ui.theme.SeamlessColors.Emerald else colorScheme.onSurfaceVariant
                 )
                 Text(
                     text = peerCount.toString(),
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    color = if (peerCount > 0) colorScheme.primary else colorScheme.onSurfaceVariant
+                    color = if (peerCount > 0) com.seamless.android.ui.theme.SeamlessColors.Emerald else colorScheme.onSurfaceVariant
                 )
             }
             
@@ -801,34 +823,36 @@ private fun LocationChannelsButton(
         null -> "#mesh" to Color(0xFF007AFF) // Default to mesh
     }
     
-    Button(
-        onClick = onClick,
-        colors = ButtonDefaults.buttonColors(
-            containerColor = Color.Transparent,
-            contentColor = badgeColor
-        ),
-        contentPadding = PaddingValues(start = 4.dp, end = 0.dp, top = 2.dp, bottom = 2.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = badgeText,
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    fontFamily = FontFamily.Default
-                ),
-                color = badgeColor,
-                maxLines = 1
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(badgeColor.copy(alpha = 0.12f))
+            .border(
+                width = 1.dp,
+                color = badgeColor.copy(alpha = 0.28f),
+                shape = RoundedCornerShape(999.dp)
             )
-            
-            // Teleportation indicator (like iOS)
-            if (teleported) {
-                Spacer(modifier = Modifier.width(2.dp))
-                Icon(
-                    imageVector = Icons.Default.PinDrop,
-                    contentDescription = stringResource(R.string.cd_teleported),
-                    modifier = Modifier.size(12.dp),
-                    tint = badgeColor
-                )
-            }
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    ) {
+        Text(
+            text = badgeText,
+            style = MaterialTheme.typography.labelMedium.copy(
+                fontWeight = FontWeight.Bold
+            ),
+            color = badgeColor,
+            maxLines = 1
+        )
+
+        if (teleported) {
+            Spacer(modifier = Modifier.width(3.dp))
+            Icon(
+                imageVector = Icons.Default.PinDrop,
+                contentDescription = stringResource(R.string.cd_teleported),
+                modifier = Modifier.size(12.dp),
+                tint = badgeColor
+            )
         }
     }
 }

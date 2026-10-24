@@ -11,7 +11,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.draw.clip
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.livedata.observeAsState
@@ -638,29 +640,43 @@ fun ChatScreen(viewModel: ChatViewModel) {
         // Scroll-to-bottom floating button
         AnimatedVisibility(
             visible = isScrolledUp && !showSidebar,
-            enter = slideInVertically(initialOffsetY = { it / 2 }) + fadeIn(),
-            exit = slideOutVertically(targetOffsetY = { it / 2 }) + fadeOut(),
+            enter = slideInVertically(
+                animationSpec = com.seamless.android.ui.theme.SeamlessAnimations.SpatialOffsetSpring,
+                initialOffsetY = { it / 2 }
+            ) + scaleIn(
+                animationSpec = com.seamless.android.ui.theme.SeamlessAnimations.ExpressiveMorphSpring,
+                initialScale = 0.8f
+            ) + fadeIn(),
+            exit = slideOutVertically(
+                animationSpec = com.seamless.android.ui.theme.SeamlessAnimations.SpatialOffsetSpring,
+                targetOffsetY = { it / 2 }
+            ) + scaleOut(targetScale = 0.8f) + fadeOut(),
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(end = 16.dp, bottom = 64.dp)
+                .padding(end = 16.dp, bottom = 68.dp)
                 .zIndex(1.5f)
                 .windowInsetsPadding(WindowInsets.navigationBars)
                 .windowInsetsPadding(WindowInsets.ime)
         ) {
-            Surface(
-                shape = CircleShape,
-                color = colorScheme.background,
-                tonalElevation = 3.dp,
-                shadowElevation = 6.dp,
-                border = BorderStroke(2.dp, Color(0xFF00C851))
-            ) {
-                IconButton(onClick = { forceScrollToBottom = !forceScrollToBottom }) {
-                    Icon(
-                        imageVector = Icons.Filled.ArrowDownward,
-                        contentDescription = stringResource(com.seamless.android.R.string.cd_scroll_to_bottom),
-                        tint = Color(0xFF00C851)
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(colorScheme.surface)
+                    .border(
+                        width = 1.dp,
+                        color = colorScheme.primary.copy(alpha = 0.22f),
+                        shape = CircleShape
                     )
-                }
+                    .clickable { forceScrollToBottom = !forceScrollToBottom },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.ArrowDownward,
+                    contentDescription = stringResource(com.seamless.android.R.string.cd_scroll_to_bottom),
+                    tint = colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
+                )
             }
         }
 
@@ -668,12 +684,12 @@ fun ChatScreen(viewModel: ChatViewModel) {
             visible = showSidebar,
             enter = slideInHorizontally(
                 initialOffsetX = { it },
-                animationSpec = tween(300, easing = EaseOutCubic)
-            ) + fadeIn(animationSpec = tween(300)),
+                animationSpec = com.seamless.android.ui.theme.SeamlessAnimations.SpatialOffsetSpring
+            ) + fadeIn(animationSpec = tween(220)),
             exit = slideOutHorizontally(
                 targetOffsetX = { it },
-                animationSpec = tween(250, easing = EaseInCubic)
-            ) + fadeOut(animationSpec = tween(250)),
+                animationSpec = com.seamless.android.ui.theme.SeamlessAnimations.SpatialOffsetSpring
+            ) + fadeOut(animationSpec = tween(180)),
             modifier = Modifier.zIndex(2f)
         ) {
             SidebarOverlay(
@@ -683,29 +699,36 @@ fun ChatScreen(viewModel: ChatViewModel) {
             )
         }
         
-        // Slide-out menu overlay with backdrop
-        if (showSlideMenu) {
-            // Backdrop scrim
+        // Animated Slide-out menu backdrop scrim
+        val slideMenuScrimAlpha by animateFloatAsState(
+            targetValue = if (showSlideMenu) 0.58f else 0f,
+            animationSpec = tween(durationMillis = 240, easing = EaseOutCubic),
+            label = "slideMenuScrimAlpha"
+        )
+        if (slideMenuScrimAlpha > 0f) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.5f))
-                    .clickable { showSlideMenu = false }
+                    .background(Color.Black.copy(alpha = slideMenuScrimAlpha))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { showSlideMenu = false }
                     .zIndex(3f)
             )
         }
         
-        // Slide-out menu
+        // Slide-out menu with spring physics
         AnimatedVisibility(
             visible = showSlideMenu,
             enter = slideInHorizontally(
                 initialOffsetX = { -it },
-                animationSpec = tween(300, easing = EaseOutCubic)
-            ) + fadeIn(animationSpec = tween(300)),
+                animationSpec = com.seamless.android.ui.theme.SeamlessAnimations.SpatialOffsetSpring
+            ) + fadeIn(animationSpec = tween(200)),
             exit = slideOutHorizontally(
                 targetOffsetX = { -it },
-                animationSpec = tween(250, easing = EaseInCubic)
-            ) + fadeOut(animationSpec = tween(250)),
+                animationSpec = com.seamless.android.ui.theme.SeamlessAnimations.SpatialOffsetSpring
+            ) + fadeOut(animationSpec = tween(180)),
             modifier = Modifier.zIndex(4f)
         ) {
             com.seamless.android.ui.navigation.SlideOutMenu(
@@ -869,7 +892,11 @@ fun ChatScreen(viewModel: ChatViewModel) {
     )
 
     // Profile Screen
-    if (showProfileScreen) {
+    androidx.compose.animation.AnimatedVisibility(
+        visible = showProfileScreen,
+        enter = com.seamless.android.ui.theme.SeamlessTransitions.DrillDownEnter,
+        exit = com.seamless.android.ui.theme.SeamlessTransitions.DrillDownExit
+    ) {
         com.seamless.android.profile.ui.ProfileScreen(
             onBackClick = {
                 showProfileScreen = false
@@ -884,8 +911,8 @@ fun ChatScreen(viewModel: ChatViewModel) {
     // Private Mesh Screen
     androidx.compose.animation.AnimatedVisibility(
         visible = showPrivateMeshScreen,
-        enter = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenEnter,
-        exit = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenExit
+        enter = com.seamless.android.ui.theme.SeamlessTransitions.HubEnter,
+        exit = com.seamless.android.ui.theme.SeamlessTransitions.HubExit
     ) {
         com.seamless.android.ui.mesh.PrivateMeshScreen(
             meshService = viewModel.meshServiceInstance,
@@ -893,9 +920,12 @@ fun ChatScreen(viewModel: ChatViewModel) {
         )
     }
     
-
     // Onion P2P Contacts Screen - Zero-server messaging via Tor
-    if (showOnionContactsScreen) {
+    androidx.compose.animation.AnimatedVisibility(
+        visible = showOnionContactsScreen,
+        enter = com.seamless.android.ui.theme.SeamlessTransitions.HubEnter,
+        exit = com.seamless.android.ui.theme.SeamlessTransitions.HubExit
+    ) {
         com.seamless.android.ui.onion.OnionContactsScreen(
             onNavigateBack = { showOnionContactsScreen = false },
             onContactClick = { contact ->
@@ -917,25 +947,51 @@ fun ChatScreen(viewModel: ChatViewModel) {
         )
     }
     
-    // Onion P2P Chat Screen - Direct messaging via Tor
+    // Cache last active contact/group so exit animations remain non-null
+    var cachedOnionContact by remember {
+        mutableStateOf<com.seamless.android.net.OnionContactManager.OnionContact?>(null)
+    }
     if (selectedOnionContact != null) {
-        com.seamless.android.ui.onion.OnionChatScreen(
-            contact = selectedOnionContact!!,
-            onNavigateBack = {
-                selectedOnionContact = null
-                showOnionContactsScreen = true
-            }
-        )
+        cachedOnionContact = selectedOnionContact
+    }
+    var cachedOnionGroup by remember {
+        mutableStateOf<com.seamless.android.data.PrivateGroupEntity?>(null)
+    }
+    if (selectedOnionGroup != null) {
+        cachedOnionGroup = selectedOnionGroup
     }
 
-    if (selectedOnionGroup != null) {
-        com.seamless.android.ui.onion.GroupChatScreen(
-            group = selectedOnionGroup!!,
-            onNavigateBack = {
-                selectedOnionGroup = null
-                showOnionContactsScreen = true
-            }
-        )
+    // Onion P2P Chat Screen - Direct messaging via Tor
+    androidx.compose.animation.AnimatedVisibility(
+        visible = selectedOnionContact != null,
+        enter = com.seamless.android.ui.theme.SeamlessTransitions.DrillDownEnter,
+        exit = com.seamless.android.ui.theme.SeamlessTransitions.DrillDownExit
+    ) {
+        cachedOnionContact?.let { contact ->
+            com.seamless.android.ui.onion.OnionChatScreen(
+                contact = contact,
+                onNavigateBack = {
+                    selectedOnionContact = null
+                    showOnionContactsScreen = true
+                }
+            )
+        }
+    }
+
+    androidx.compose.animation.AnimatedVisibility(
+        visible = selectedOnionGroup != null,
+        enter = com.seamless.android.ui.theme.SeamlessTransitions.DrillDownEnter,
+        exit = com.seamless.android.ui.theme.SeamlessTransitions.DrillDownExit
+    ) {
+        cachedOnionGroup?.let { group ->
+            com.seamless.android.ui.onion.GroupChatScreen(
+                group = group,
+                onNavigateBack = {
+                    selectedOnionGroup = null
+                    showOnionContactsScreen = true
+                }
+            )
+        }
     }
 }
 
@@ -1172,7 +1228,11 @@ private fun ChatDialogs(
     }
     
     // Chats screen - shows favorited contacts
-    if (showChatsScreen) {
+    androidx.compose.animation.AnimatedVisibility(
+        visible = showChatsScreen,
+        enter = com.seamless.android.ui.theme.SeamlessTransitions.HubEnter,
+        exit = com.seamless.android.ui.theme.SeamlessTransitions.HubExit
+    ) {
         ChatsScreen(
             viewModel = viewModel,
             onBackClick = onChatsScreenDismiss,
@@ -1181,7 +1241,11 @@ private fun ChatDialogs(
     }
     
     // Settings screen
-    if (showSettingsScreen) {
+    androidx.compose.animation.AnimatedVisibility(
+        visible = showSettingsScreen,
+        enter = com.seamless.android.ui.theme.SeamlessTransitions.HubEnter,
+        exit = com.seamless.android.ui.theme.SeamlessTransitions.HubExit
+    ) {
         SettingsScreen(
             onBackClick = onSettingsScreenDismiss,
             meshService = viewModel.meshServiceInstance,
@@ -1192,8 +1256,8 @@ private fun ChatDialogs(
     // Share Things screen
     androidx.compose.animation.AnimatedVisibility(
         visible = showShareReceiveScreen,
-        enter = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenEnter,
-        exit = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenExit
+        enter = com.seamless.android.ui.theme.SeamlessTransitions.HubEnter,
+        exit = com.seamless.android.ui.theme.SeamlessTransitions.HubExit
     ) {
         com.seamless.android.ui.fileshare.ShareReceiveScreen(
             onShareThingsClick = onNavigateToFilePicker,
@@ -1208,8 +1272,8 @@ private fun ChatDialogs(
     // File Picker screen
     androidx.compose.animation.AnimatedVisibility(
         visible = showFilePickerScreen,
-        enter = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenEnter,
-        exit = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenExit
+        enter = com.seamless.android.ui.theme.SeamlessTransitions.DrillDownEnter,
+        exit = com.seamless.android.ui.theme.SeamlessTransitions.DrillDownExit
     ) {
         com.seamless.android.ui.fileshare.FilePickerScreen(
             onFileSelected = { filePath ->
@@ -1224,8 +1288,8 @@ private fun ChatDialogs(
     // Device Discovery screen - handles its own progress screens internally
     androidx.compose.animation.AnimatedVisibility(
         visible = showDeviceDiscoveryScreen,
-        enter = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenEnter,
-        exit = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenExit
+        enter = com.seamless.android.ui.theme.SeamlessTransitions.DrillDownEnter,
+        exit = com.seamless.android.ui.theme.SeamlessTransitions.DrillDownExit
     ) {
         com.seamless.android.ui.fileshare.DeviceDiscoveryScreen(
             isHosting = isHostingMode,
@@ -1240,8 +1304,8 @@ private fun ChatDialogs(
     // Received Files screen
     androidx.compose.animation.AnimatedVisibility(
         visible = showReceivedFilesScreen,
-        enter = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenEnter,
-        exit = com.seamless.android.ui.fileshare.HyperDropTransitions.ScreenExit
+        enter = com.seamless.android.ui.theme.SeamlessTransitions.HubEnter,
+        exit = com.seamless.android.ui.theme.SeamlessTransitions.HubExit
     ) {
         com.seamless.android.ui.fileshare.ReceivedFilesScreen(
             onBackClick = onReceivedFilesScreenDismiss

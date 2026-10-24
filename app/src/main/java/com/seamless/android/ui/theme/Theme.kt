@@ -6,6 +6,7 @@ import android.os.Build
 import android.view.View
 import android.view.WindowInsetsController
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
@@ -24,28 +25,28 @@ private val DarkColorScheme = darkColorScheme(
     primary = Color.White,                          // Optical White accent
     onPrimary = Color.Black,
     primaryContainer = SeamlessColors.ObsidianContainer,
-    onPrimaryContainer = Color.White,
+    onPrimaryContainer = SeamlessColors.TextPrimaryDark,
 
     secondary = SeamlessColors.TextSecondaryDark,   // Zinc-400
     onSecondary = Color.Black,
     secondaryContainer = SeamlessColors.ObsidianContainer,
-    onSecondaryContainer = Color.White,
+    onSecondaryContainer = SeamlessColors.TextPrimaryDark,
 
     tertiary = SeamlessColors.TextTertiaryDark,     // Zinc-500
     onTertiary = Color.White,
     tertiaryContainer = SeamlessColors.ObsidianBright,
-    onTertiaryContainer = Color.White,
+    onTertiaryContainer = SeamlessColors.TextPrimaryDark,
 
     error = SeamlessColors.Error,
     onError = Color.White,
     errorContainer = Color(0xFF3B0A0A),
     onErrorContainer = SeamlessColors.Coral,
 
-    background = SeamlessColors.Obsidian,           // True black
-    onBackground = Color.White,
+    background = SeamlessColors.Obsidian,           // True black (#000000)
+    onBackground = SeamlessColors.TextPrimaryDark,  // Calibrated Alabaster (#F4F4F6) prevents OLED halation
 
     surface = SeamlessColors.ObsidianElevated,      // #101014
-    onSurface = Color.White,
+    onSurface = SeamlessColors.TextPrimaryDark,
     surfaceVariant = SeamlessColors.ObsidianContainer,  // #1A1A20
     onSurfaceVariant = SeamlessColors.TextSecondaryDark,
 
@@ -157,11 +158,11 @@ fun SeamlessTheme(
         colorScheme = colorScheme,
         typography = Typography,
         shapes = Shapes(
-            extraSmall = androidx.compose.foundation.shape.RoundedCornerShape(4.dp),
-            small = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
-            medium = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
-            large = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
-            extraLarge = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+            extraSmall = RoundedCornerShape(8.dp),
+            small = RoundedCornerShape(12.dp),
+            medium = RoundedCornerShape(16.dp),
+            large = RoundedCornerShape(20.dp),
+            extraLarge = RoundedCornerShape(28.dp)
         ),
         content = content
     )
