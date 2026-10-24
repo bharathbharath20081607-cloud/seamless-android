@@ -142,13 +142,13 @@ class FragmentManager {
             
             // iOS: if incomingFragments[fragmentID] == nil
             if (!incomingFragments.containsKey(fragmentIDString)) {
-                incomingFragments[fragmentIDString] = mutableMapOf()
-                fragmentMetadata[fragmentIDString] = Triple(
-                    fragmentPayload.originalType, 
-                    fragmentPayload.total, 
-                    System.currentTimeMillis()
-                )
+                incomingFragments[fragmentIDString] = java.util.concurrent.ConcurrentHashMap()
             }
+            fragmentMetadata[fragmentIDString] = Triple(
+                fragmentPayload.originalType, 
+                fragmentPayload.total, 
+                System.currentTimeMillis()
+            )
             
             // iOS: incomingFragments[fragmentID]?[index] = Data(fragmentData)
             incomingFragments[fragmentIDString]?.put(fragmentPayload.index, fragmentPayload.data)

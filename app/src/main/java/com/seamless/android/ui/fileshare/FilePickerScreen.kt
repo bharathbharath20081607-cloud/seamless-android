@@ -42,16 +42,8 @@ fun FilePickerScreen(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris ->
         if (uris.isNotEmpty()) {
-            // Check for limit (user suggested ~3, let's allow up to 5 for flexibility)
-            if (uris.size > 5) {
-               // We should probably show an error, but for now just take the first 5
-               // or delegate to ViewModel to handle/warn
-            }
-            
-            viewModel.addFilesToQueue(uris.take(5))
-            
+            viewModel.addFilesToQueue(uris.take(20))
             // Trigger navigation to DeviceDiscoveryScreen immediately
-            // Pass "queue" to indicate we have a queue ready
             onFileSelected("queue")
         }
     }

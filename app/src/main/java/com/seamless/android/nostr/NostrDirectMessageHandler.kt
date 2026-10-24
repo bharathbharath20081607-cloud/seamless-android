@@ -205,7 +205,11 @@ class NostrDirectMessageHandler(
                     }
 
                     if (fullFilePacket != null) {
-                        val uniqueMsgId = java.util.UUID.randomUUID().toString().uppercase()
+                        val rawTransferId = fullFilePacket.transferId.ifBlank { java.util.UUID.randomUUID().toString() }
+                        val uniqueMsgId = rawTransferId.uppercase()
+                        if (seenStore.hasRead(rawTransferId) || seenStore.hasDelivered(rawTransferId)) {
+                            return
+                        }
                         val savedPath = com.seamless.android.features.file.FileUtils.saveIncomingFile(application, fullFilePacket)
                         val message = BitchatMessage(
                             id = uniqueMsgId,
@@ -219,8 +223,19 @@ class NostrDirectMessageHandler(
                             senderPeerID = convKey
                         )
                         Log.d(TAG, "📄 Saved Nostr encrypted incoming file to $savedPath (msgId=$uniqueMsgId)")
+                        val viewing = state.getSelectedPrivateChatPeerValue() == convKey
                         withContext(Dispatchers.Main) {
-                            privateChatManager.handleIncomingPrivateMessage(message, suppressUnread = false)
+                            privateChatManager.handleIncomingPrivateMessage(message, suppressUnread = viewing)
+                        }
+                        if (!seenStore.hasDelivered(rawTransferId)) {
+                            val nostrTransport = NostrTransport.getInstance(application)
+                            nostrTransport.sendDeliveryAckGeohash(rawTransferId, senderPubkey, recipientIdentity)
+                            seenStore.markDelivered(rawTransferId)
+                        }
+                        if (viewing && !seenStore.hasRead(rawTransferId)) {
+                            val nostrTransport = NostrTransport.getInstance(application)
+                            nostrTransport.sendReadReceiptGeohash(rawTransferId, senderPubkey, recipientIdentity)
+                            seenStore.markRead(rawTransferId)
                         }
                     }
                 } else {

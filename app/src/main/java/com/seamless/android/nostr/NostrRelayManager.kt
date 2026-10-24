@@ -138,9 +138,16 @@ class NostrRelayManager private constructor() {
     // Event deduplication system
     private val eventDeduplicator = NostrEventDeduplicator.getInstance()
     
-    // Message queue for reliability
-    private val messageQueue = mutableListOf<Pair<NostrEvent, List<String>>>()
+    // Message queue for reliability (tracks remaining target relays and enqueue timestamp)
+    private data class QueuedEvent(
+        val event: NostrEvent,
+        val pendingRelays: MutableSet<String>,
+        val enqueuedAt: Long = System.currentTimeMillis()
+    )
+    private val messageQueue = mutableListOf<QueuedEvent>()
     private val messageQueueLock = Any()
+    private val MESSAGE_QUEUE_TTL_MS = 10 * 60 * 1000L // 10 minutes
+    private val MAX_MESSAGE_QUEUE_SIZE = 250
     
     // Coroutine scope for background operations
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -418,18 +425,30 @@ class NostrRelayManager private constructor() {
      */
     fun sendEvent(event: NostrEvent, relayUrls: List<String>? = null) {
         val targetRelays = relayUrls ?: relaysList.map { it.url }
+        ensureConnectionsFor(targetRelays.toSet())
         
-        // Add to queue for reliability
-        synchronized(messageQueueLock) {
-            messageQueue.add(Pair(event, targetRelays))
-        }
-        
-        // Attempt immediate send
+        // Attempt immediate send and queue only relays that are not yet connected / failed
         scope.launch {
+            val remainingRelays = mutableSetOf<String>()
             targetRelays.forEach { relayUrl ->
                 val webSocket = connections[relayUrl]
                 if (webSocket != null) {
-                    sendToRelay(event, webSocket, relayUrl)
+                    val sent = sendToRelay(event, webSocket, relayUrl)
+                    if (!sent) {
+                        remainingRelays.add(relayUrl)
+                    }
+                } else {
+                    remainingRelays.add(relayUrl)
+                }
+            }
+            if (remainingRelays.isNotEmpty()) {
+                val now = System.currentTimeMillis()
+                synchronized(messageQueueLock) {
+                    messageQueue.removeAll { now - it.enqueuedAt > MESSAGE_QUEUE_TTL_MS || it.pendingRelays.isEmpty() }
+                    while (messageQueue.size >= MAX_MESSAGE_QUEUE_SIZE) {
+                        messageQueue.removeAt(0)
+                    }
+                    messageQueue.add(QueuedEvent(event, remainingRelays, now))
                 }
             }
         }
@@ -786,25 +805,23 @@ class NostrRelayManager private constructor() {
             while (isActive) {
                 delay(KEEP_ALIVE_INTERVAL)
                 
-                val connectedRelays = connections.toList()
-                if (connectedRelays.isEmpty()) continue
-                
-                Log.v(TAG, "💓 Sending keep-alive to ${connectedRelays.size} relays")
-                
-                connectedRelays.forEach { (relayUrl, webSocket) ->
+                // OkHttp automatically sends WebSocket protocol PINGs every 25s and triggers onFailure
+                // if a relay fails to PONG. Here we proactively reconnect any disconnected relays
+                // whose backoff window has elapsed.
+                val now = System.currentTimeMillis()
+                relaysList.forEach { relay ->
                     try {
-                        // Check for stale connections
-                        val relay = relaysList.find { it.url == relayUrl }
-                        val lastActivity = relay?.lastConnectedAt ?: 0
-                        val timeSinceActivity = System.currentTimeMillis() - lastActivity
-                        
-                        if (timeSinceActivity > CONNECTION_STALE_THRESHOLD && relay?.isConnected == true) {
-                            Log.w(TAG, "⚠️ Relay $relayUrl appears stale (${timeSinceActivity/1000}s), forcing reconnect")
-                            webSocket.close(1000, "Stale connection")
-                            // Reconnect will be triggered by onClosed
+                        if (!connections.containsKey(relay.url)) {
+                            val nextRetry = relay.nextReconnectTime ?: 0L
+                            if (now >= nextRetry) {
+                                if (relay.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                                    relay.reconnectAttempts = 0
+                                }
+                                launch { connectToRelay(relay.url) }
+                            }
                         }
                     } catch (e: Exception) {
-                        Log.w(TAG, "Keep-alive error for $relayUrl: ${e.message}")
+                        Log.w(TAG, "Keep-alive check error for ${relay.url}: ${e.message}")
                     }
                 }
             }
@@ -1004,8 +1021,8 @@ class NostrRelayManager private constructor() {
         }
     }
     
-    private fun sendToRelay(event: NostrEvent, webSocket: WebSocket, relayUrl: String) {
-        try {
+    private fun sendToRelay(event: NostrEvent, webSocket: WebSocket, relayUrl: String): Boolean {
+        return try {
             val request = NostrRequest.Event(event)
             val message = gson.toJson(request, NostrRequest::class.java)
             
@@ -1020,13 +1037,16 @@ class NostrRelayManager private constructor() {
             } else {
                 Log.e(TAG, "❌ Failed to send event to $relayUrl: WebSocket send failed")
             }
+            success
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to send event to $relayUrl: ${e.message}")
+            false
         }
     }
     
     private fun handleMessage(message: String, relayUrl: String) {
         try {
+            relaysList.find { it.url == relayUrl }?.lastConnectedAt = System.currentTimeMillis()
             val jsonElement = JsonParser.parseString(message)
             if (!jsonElement.isJsonArray) {
                 Log.w(TAG, "Received non-array message from $relayUrl")
@@ -1129,7 +1149,12 @@ class NostrRelayManager private constructor() {
         }
     }
     
-    private fun handleDisconnection(relayUrl: String, error: Throwable) {
+    private fun handleDisconnection(relayUrl: String, error: Throwable, webSocket: WebSocket? = null) {
+        val currentWs = connections[relayUrl]
+        if (webSocket != null && currentWs != null && currentWs !== webSocket) {
+            // Ignore late disconnection callback from a replaced WebSocket instance
+            return
+        }
         connections.remove(relayUrl)
         // NOTE: Don't remove subscriptions here - keep them for restoration on reconnection
         
@@ -1250,13 +1275,23 @@ class NostrRelayManager private constructor() {
             // Restore all active subscriptions for this relay
             restoreSubscriptionsForRelay(relayUrl, webSocket)
             
-            // Process any queued messages for this relay
+            // Process any queued messages for this relay and remove once sent
+            val now = System.currentTimeMillis()
             synchronized(messageQueueLock) {
                 val iterator = messageQueue.iterator()
                 while (iterator.hasNext()) {
-                    val (event, targetRelays) = iterator.next()
-                    if (relayUrl in targetRelays) {
-                        sendToRelay(event, webSocket, relayUrl)
+                    val item = iterator.next()
+                    if (now - item.enqueuedAt > MESSAGE_QUEUE_TTL_MS) {
+                        iterator.remove()
+                        continue
+                    }
+                    if (relayUrl in item.pendingRelays) {
+                        if (sendToRelay(item.event, webSocket, relayUrl)) {
+                            item.pendingRelays.remove(relayUrl)
+                        }
+                    }
+                    if (item.pendingRelays.isEmpty()) {
+                        iterator.remove()
                     }
                 }
             }
@@ -1273,12 +1308,12 @@ class NostrRelayManager private constructor() {
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             Log.d(TAG, "WebSocket closed for $relayUrl: $code $reason")
             val error = Exception("WebSocket closed: $code $reason")
-            handleDisconnection(relayUrl, error)
+            handleDisconnection(relayUrl, error, webSocket)
         }
         
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             Log.e(TAG, "❌ WebSocket failure for $relayUrl: ${t.message}")
-            handleDisconnection(relayUrl, t)
+            handleDisconnection(relayUrl, t, webSocket)
         }
     }
 }

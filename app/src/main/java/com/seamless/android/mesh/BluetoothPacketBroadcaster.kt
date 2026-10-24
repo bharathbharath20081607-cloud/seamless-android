@@ -202,6 +202,59 @@ class BluetoothPacketBroadcaster(
         }
     }
 
+    /**
+     * Suspending broadcast that awaits full transmission of all fragments before returning.
+     * Used by chunked file transfers so chunk N+1 never overlaps with chunk N.
+     */
+    suspend fun broadcastPacketAwait(
+        routed: RoutedPacket,
+        gattServer: BluetoothGattServer?,
+        characteristic: BluetoothGattCharacteristic?
+    ) {
+        val packet = routed.packet
+        val isFile = packet.type == MessageType.FILE_TRANSFER.value
+        val transferId = routed.transferId ?: (if (isFile) sha256Hex(packet.payload) else null)
+        if (fragmentManager != null) {
+            val fragments = try {
+                fragmentManager.createFragments(packet)
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Fragment creation failed: ${e.message}", e)
+                return
+            }
+            if (fragments.size > 1) {
+                if (transferId != null) {
+                    TransferProgressManager.start(transferId, fragments.size)
+                }
+                fragmentMutex.lock()
+                try {
+                    var sent = 0
+                    for (fragment in fragments) {
+                        if (!broadcasterScope.isActive) return
+                        if (transferId != null && transferJobs[transferId]?.isCancelled == true) return
+                        broadcastSinglePacketAwait(RoutedPacket(fragment, transferId = transferId), gattServer, characteristic)
+                        delay(8)
+                        if (transferId != null) {
+                            sent += 1
+                            TransferProgressManager.progress(transferId, sent, fragments.size)
+                            if (sent == fragments.size) TransferProgressManager.complete(transferId, fragments.size)
+                        }
+                    }
+                } finally {
+                    fragmentMutex.unlock()
+                }
+                return
+            }
+        }
+        if (transferId != null) {
+            TransferProgressManager.start(transferId, 1)
+        }
+        broadcastSinglePacketAwait(routed, gattServer, characteristic)
+        if (transferId != null) {
+            TransferProgressManager.progress(transferId, 1, 1)
+            TransferProgressManager.complete(transferId, 1)
+        }
+    }
+
     fun cancelTransfer(transferId: String): Boolean {
         val job = transferJobs.remove(transferId) ?: return false
         job.cancel()
@@ -478,12 +531,12 @@ class BluetoothPacketBroadcaster(
         val server = gattServer ?: return false
         val address = device.address
         return try {
-            var initiated = false
-            val retryDelays = longArrayOf(0L, 15L, 30L, 60L)
+            var delivered = false
+            val retryDelays = longArrayOf(0L, 15L, 30L, 60L, 120L, 220L)
             for (delayMs in retryDelays) {
                 if (delayMs > 0L) delay(delayMs)
                 connectionTracker.prepareDeviceNotify(address)
-                initiated = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val initiated = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     server.notifyCharacteristicChanged(device, char, false, data) == android.bluetooth.BluetoothStatusCodes.SUCCESS
                 } else {
                     @Suppress("DEPRECATION")
@@ -491,13 +544,17 @@ class BluetoothPacketBroadcaster(
                     @Suppress("DEPRECATION")
                     server.notifyCharacteristicChanged(device, char, false)
                 }
-                if (initiated) break
-                connectionTracker.onDeviceNotifyCompleted(address, false)
+                if (initiated) {
+                    val acked = connectionTracker.awaitDeviceNotify(address, 650L)
+                    if (acked) {
+                        delivered = true
+                        break
+                    }
+                } else {
+                    connectionTracker.onDeviceNotifyCompleted(address, false)
+                }
             }
-            if (initiated) {
-                connectionTracker.awaitDeviceNotify(address, 450L)
-            }
-            initiated
+            delivered
         } catch (e: Exception) {
             Log.w(TAG, "Error sending to server connection $address: ${e.message}")
             connectionTracker.onDeviceNotifyCompleted(address, false)
@@ -521,12 +578,12 @@ class BluetoothPacketBroadcaster(
         val gatt = deviceConn.gatt ?: return false
         val address = deviceConn.device.address
         return try {
-            var initiated = false
-            val retryDelays = longArrayOf(0L, 15L, 30L, 60L)
+            var delivered = false
+            val retryDelays = longArrayOf(0L, 15L, 30L, 60L, 120L, 220L)
             for (delayMs in retryDelays) {
                 if (delayMs > 0L) delay(delayMs)
                 connectionTracker.prepareDeviceWrite(address)
-                initiated = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val initiated = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     gatt.writeCharacteristic(
                         char,
                         data,
@@ -538,13 +595,17 @@ class BluetoothPacketBroadcaster(
                     @Suppress("DEPRECATION")
                     gatt.writeCharacteristic(char)
                 }
-                if (initiated) break
-                connectionTracker.onDeviceWriteCompleted(address, false)
+                if (initiated) {
+                    val acked = connectionTracker.awaitDeviceWrite(address, 750L)
+                    if (acked) {
+                        delivered = true
+                        break
+                    }
+                } else {
+                    connectionTracker.onDeviceWriteCompleted(address, false)
+                }
             }
-            if (initiated) {
-                connectionTracker.awaitDeviceWrite(address, 550L)
-            }
-            initiated
+            delivered
         } catch (e: Exception) {
             Log.w(TAG, "Error sending to client connection $address: ${e.message}")
             connectionTracker.onDeviceWriteCompleted(address, false)

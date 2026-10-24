@@ -450,32 +450,53 @@ class TurboTransferEngine(private val context: Context) {
             callback?.onTransferStarted(fileName, fileSize)
             
             if (!outputDir.exists()) outputDir.mkdirs()
-            val outFile = File(outputDir, fileName)
-            
-            FileOutputStream(outFile).use { output ->
-                val buffer = ByteArray(TRANSFER_BUFFER_SIZE)
-                var totalReceived = 0L
-                var lastProgress = 0
-                
-                while (totalReceived < fileSize) {
-                    val toRead = minOf(buffer.size.toLong(), fileSize - totalReceived).toInt()
-                    val bytesRead = input.read(buffer, 0, toRead)
-                    if (bytesRead == -1) break
-                    
-                    output.write(buffer, 0, bytesRead)
-                    totalReceived += bytesRead
-                    
-                    val progress = ((totalReceived * 100) / fileSize).toInt()
-                    if (progress - lastProgress >= PROGRESS_REPORT_INTERVAL || progress >= 100) {
-                        lastProgress = progress
-                        val speed = calculateSpeed(totalReceived)
-                        callback?.onTransferProgress(fileName, progress, totalReceived, speed)
-                    }
+            val safeName = File(fileName).name.ifBlank { "received_file_${System.currentTimeMillis()}" }
+            var outFile = File(outputDir, safeName)
+            if (outFile.exists()) {
+                val dotIndex = safeName.lastIndexOf('.')
+                val base = if (dotIndex > 0) safeName.substring(0, dotIndex) else safeName
+                val ext = if (dotIndex > 0) safeName.substring(dotIndex) else ""
+                var counter = 1
+                while (outFile.exists()) {
+                    outFile = File(outputDir, "$base ($counter)$ext")
+                    counter++
                 }
             }
             
-            Log.i(TAG, "✅ Received: $fileName saved to ${outFile.absolutePath}")
-            callback?.onTransferCompleted(fileName)
+            var totalReceived = 0L
+            try {
+                FileOutputStream(outFile).use { output ->
+                    val buffer = ByteArray(TRANSFER_BUFFER_SIZE)
+                    var lastProgress = 0
+                    
+                    while (totalReceived < fileSize) {
+                        val toRead = minOf(buffer.size.toLong(), fileSize - totalReceived).toInt()
+                        val bytesRead = input.read(buffer, 0, toRead)
+                        if (bytesRead == -1) break
+                        
+                        output.write(buffer, 0, bytesRead)
+                        totalReceived += bytesRead
+                        
+                        val progress = if (fileSize > 0L) ((totalReceived * 100) / fileSize).toInt().coerceIn(0, 100) else 100
+                        if (progress - lastProgress >= PROGRESS_REPORT_INTERVAL || progress >= 100) {
+                            lastProgress = progress
+                            val speed = calculateSpeed(totalReceived)
+                            callback?.onTransferProgress(safeName, progress, totalReceived, speed)
+                        }
+                    }
+                    output.flush()
+                }
+                if (fileSize > 0L && totalReceived < fileSize) {
+                    runCatching { outFile.delete() }
+                    throw IOException("Incomplete transfer ($totalReceived / $fileSize bytes)")
+                }
+            } catch (e: Exception) {
+                runCatching { if (outFile.exists()) outFile.delete() }
+                throw e
+            }
+            
+            Log.i(TAG, "✅ Received: ${outFile.name} saved to ${outFile.absolutePath}")
+            callback?.onTransferCompleted(outFile.name)
         }
     }
 

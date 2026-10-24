@@ -183,6 +183,14 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
         }
     }
 
+    androidx.activity.compose.BackHandler {
+        if (showInfo) {
+            showInfo = false
+        } else {
+            onNavigateBack()
+        }
+    }
+
     OnionPage {
         Scaffold(
             modifier = Modifier.imePadding(),

@@ -87,6 +87,12 @@ class WifiAwareService(private val context: Context) {
             return
         }
 
+        // Reuse existing attached session instead of attaching a duplicate session on periodic refresh
+        if (wifiAwareSession != null) {
+            callback?.onSessionReady()
+            return
+        }
+
         wifiAwareManager = context.getSystemService(Context.WIFI_AWARE_SERVICE) as? WifiAwareManager
         if (wifiAwareManager == null) {
             Log.e(TAG, "Failed to get WifiAwareManager")
@@ -113,6 +119,8 @@ class WifiAwareService(private val context: Context) {
                 wifiAwareSession = null
                 publishSession = null
                 subscribeSession = null
+                isPublishing = false
+                isSubscribing = false
             }
         }, mainHandler)
     }

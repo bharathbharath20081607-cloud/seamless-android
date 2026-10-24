@@ -120,6 +120,8 @@ fun DeviceDiscoveryScreen(
     val statusMessage by viewModel.statusMessage.observeAsState()
     val errorMessage by viewModel.errorMessage.observeAsState()
     val pendingFile by viewModel.pendingFile.observeAsState()
+    val pendingFilesCount by viewModel.pendingFilesCount.observeAsState(0)
+    val canRetry by viewModel.canRetry.observeAsState(false)
     val currentTransfer by viewModel.currentTransfer.observeAsState()
 
     // Observe incoming file requests (Secure Handover)
@@ -135,6 +137,10 @@ fun DeviceDiscoveryScreen(
     DisposableEffect(Unit) {
         onDispose {
             viewModel.stopDeviceDiscovery()
+            if (isHosting) {
+                viewModel.disconnect()
+                viewModel.dismissTransferScreen()
+            }
         }
     }
 
@@ -145,6 +151,44 @@ fun DeviceDiscoveryScreen(
     // Determine if transfer is complete or failed
     val isComplete = lastTransferResult?.success == true
     val isFailed = lastTransferResult?.success == false
+
+    // Step-by-step system back navigation for progress/waiting states and device discovery
+    androidx.activity.compose.BackHandler {
+        when (transferScreenState) {
+            TransferScreenState.ANIMATING_SEND,
+            TransferScreenState.SENDING -> {
+                if (!isComplete && !isFailed) {
+                    viewModel.cancelActiveTransfer()
+                }
+                viewModel.dismissTransferScreen()
+            }
+            TransferScreenState.ANIMATING_RECEIVE,
+            TransferScreenState.RECEIVING -> {
+                if (!isComplete && !isFailed && !isBatchTransferComplete) {
+                    viewModel.resetBatchTransfer()
+                    viewModel.cancelActiveTransfer()
+                    viewModel.disconnect()
+                } else {
+                    viewModel.resetBatchTransfer()
+                }
+                viewModel.dismissTransferScreen()
+                if (isHosting) {
+                    onBackClick()
+                }
+            }
+            TransferScreenState.WAITING -> {
+                if (incomingBatchRequest != null) {
+                    viewModel.rejectBatchTransfer()
+                }
+                viewModel.disconnect()
+                viewModel.dismissTransferScreen()
+                onBackClick()
+            }
+            TransferScreenState.NONE -> {
+                onBackClick()
+            }
+        }
+    }
 
     // Show full-screen progress screens based on transfer state
     when (transferScreenState) {
@@ -182,14 +226,14 @@ fun DeviceDiscoveryScreen(
                 fileIndex = currentTransfer?.fileIndex ?: 1,
                 totalFiles = currentTransfer?.totalFiles ?: 1,
                 onCancel = {
-                    viewModel.disconnect()
+                    viewModel.cancelActiveTransfer()
                     viewModel.dismissTransferScreen()
                 },
                 onDone = {
                     viewModel.dismissTransferScreen()
                     onBackClick()
                 },
-                onRetry = null
+                onRetry = if (canRetry) ({ viewModel.retryLastTransfer() }) else null
             )
             return // Don't show device discovery
         }
@@ -235,14 +279,35 @@ fun DeviceDiscoveryScreen(
                     onAccept = {},
                     onReject = {},
                     onCancel = {
-                        viewModel.disconnect()
+                        viewModel.cancelActiveTransfer()
                         viewModel.dismissTransferScreen()
                     },
                     onDone = {
                         viewModel.dismissTransferScreen()
                         onBackClick()
                     },
-                    onOpenFile = null
+                    onOpenFile = {
+                        val receivedName = currentTransfer?.fileName ?: lastTransferResult?.fileName ?: incomingRequest?.fileName
+                        if (!receivedName.isNullOrBlank()) {
+                            try {
+                                val file = java.io.File(java.io.File(context.getExternalFilesDir(null), "received_files"), receivedName)
+                                if (file.exists()) {
+                                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                                        context,
+                                        "${context.packageName}.fileprovider",
+                                        file
+                                    )
+                                    val mime = android.webkit.MimeTypeMap.getSingleton()
+                                        .getMimeTypeFromExtension(file.extension.lowercase()) ?: "*/*"
+                                    val openIntent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                                        setDataAndType(uri, mime)
+                                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    context.startActivity(android.content.Intent.createChooser(openIntent, "Open file"))
+                                }
+                            } catch (_: Exception) { }
+                        }
+                    }
                 )
             }
             return // Don't show device discovery
@@ -417,7 +482,10 @@ fun DeviceDiscoveryScreen(
                         title = title,
                         subtitle = subtitle,
                         style = radarStyle,
-                        deviceCount = discoveredDevices.size
+                        deviceCount = discoveredDevices.size,
+                        contentColor = HyperDropColors.TextPrimary,
+                        secondaryContentColor = HyperDropColors.TextSecondary,
+                        badgeTextColor = Color.Black
                     )
                 }
 
@@ -517,8 +585,8 @@ fun DeviceDiscoveryScreen(
                     }
                 }
 
-                // Pending File Send Action
-                if (connectionInfo != null && pendingFile != null) {
+                // Pending File / Queue Send Action
+                if (connectionInfo != null && (pendingFile != null || pendingFilesCount > 0)) {
                     GlassCard(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -533,7 +601,7 @@ fun DeviceDiscoveryScreen(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = pendingFile?.fileName ?: stringResource(com.seamless.android.R.string.unknown),
+                            text = pendingFile?.fileName ?: "$pendingFilesCount file${if (pendingFilesCount > 1) "s" else ""} queued",
                             style = HyperDropTypography.BodyLarge.copy(
                                 fontWeight = FontWeight.Bold,
                                 color = HyperDropColors.TextPrimary
@@ -542,7 +610,13 @@ fun DeviceDiscoveryScreen(
                         Spacer(modifier = Modifier.height(12.dp))
                         PremiumButton(
                             text = stringResource(com.seamless.android.R.string.send_now),
-                            onClick = { viewModel.sendPendingFile() },
+                            onClick = {
+                                if (pendingFile != null) {
+                                    viewModel.sendPendingFile()
+                                } else {
+                                    viewModel.processNextInQueue()
+                                }
+                            },
                             icon = Icons.AutoMirrored.Filled.Send,
                             color = Color.White
                         )

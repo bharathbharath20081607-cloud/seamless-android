@@ -62,6 +62,7 @@ class WifiDirectService : Service() {
         const val ACTION_SET_NFC_TRUSTED = "com.seamless.android.action.SET_NFC_TRUSTED"
         const val ACTION_ACCEPT_TRANSFER = "com.seamless.android.action.ACCEPT_TRANSFER"
         const val ACTION_REJECT_TRANSFER = "com.seamless.android.action.REJECT_TRANSFER"
+        const val ACTION_CANCEL_TRANSFER = "com.seamless.android.action.CANCEL_TRANSFER"
 
         // Extra constants for intent data
         const val EXTRA_DEVICE_ADDRESS = "extra_device_address"
@@ -96,6 +97,8 @@ class WifiDirectService : Service() {
     @Volatile private var isServerRunning: Boolean = false
     @Volatile private var lastAcceptedPeerAddress: String? = null
     @Volatile private var lastAcceptedTimestamp: Long = 0L
+    @Volatile private var activeTransferSocket: Socket? = null
+    @Volatile private var isTransferCancelled: Boolean = false
     
     // Pending confirmation for manual file transfer approval
     private var pendingConfirmation: CompletableDeferred<Boolean>? = null
@@ -166,6 +169,9 @@ class WifiDirectService : Service() {
             }
             ACTION_REJECT_TRANSFER -> {
                 pendingConfirmation?.complete(false)
+            }
+            ACTION_CANCEL_TRANSFER -> {
+                cancelActiveTransfer()
             }
         }
         
@@ -353,6 +359,24 @@ class WifiDirectService : Service() {
         }
         
         channel?.let { ch ->
+            if (!isRetry) {
+                wifiP2pManager.requestGroupInfo(ch) { existingGroup ->
+                    if (existingGroup != null && existingGroup.isGroupOwner && existingGroup.clientList.isEmpty()) {
+                        Log.d(TAG, "Removing empty local group before connecting to peer $deviceAddress")
+                        wifiP2pManager.removeGroup(ch, object : WifiP2pManager.ActionListener {
+                            override fun onSuccess() {
+                                handler.postDelayed({ connectToDevice(deviceAddress, isRetry = true) }, 250L)
+                            }
+                            override fun onFailure(reason: Int) {
+                                connectToDevice(deviceAddress, isRetry = true)
+                            }
+                        })
+                    } else {
+                        connectToDevice(deviceAddress, isRetry = true)
+                    }
+                }
+                return
+            }
             wifiP2pManager.connect(ch, config, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
                     Log.d(TAG, "Connection initiated to: $deviceAddress")
@@ -361,9 +385,16 @@ class WifiDirectService : Service() {
 
                 override fun onFailure(reason: Int) {
                     Log.e(TAG, "Connection failed: $reason (isRetry=$isRetry)")
-                    if (reason == WifiP2pManager.BUSY && !isRetry) {
+                    if (reason == WifiP2pManager.BUSY) {
                         handler.postDelayed({
-                            connectToDevice(deviceAddress, isRetry = true)
+                            wifiP2pManager.connect(ch, config, object : WifiP2pManager.ActionListener {
+                                override fun onSuccess() {
+                                    notifyCallbacks { onConnectionInitiated(deviceAddress) }
+                                }
+                                override fun onFailure(r: Int) {
+                                    notifyCallbacks { onConnectionFailed(r) }
+                                }
+                            })
                         }, 450L)
                     } else {
                         notifyCallbacks { onConnectionFailed(reason) }
@@ -373,7 +404,17 @@ class WifiDirectService : Service() {
         }
     }
 
+    private fun cancelActiveTransfer() {
+        isTransferCancelled = true
+        pendingConfirmation?.complete(false)
+        try {
+            activeTransferSocket?.close()
+        } catch (_: Exception) { }
+        activeTransferSocket = null
+    }
+
     private fun disconnect() {
+        cancelActiveTransfer()
         channel?.let { ch ->
             wifiP2pManager.removeGroup(ch, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
@@ -513,6 +554,8 @@ class WifiDirectService : Service() {
             }
 
             val activeSocket = socket ?: throw (lastConnectError ?: IOException("Failed to connect to recipient"))
+            isTransferCancelled = false
+            activeTransferSocket = activeSocket
             outputStream = DataOutputStream(BufferedOutputStream(activeSocket.getOutputStream(), BUFFER_SIZE))
 
             Log.d(TAG, "⚡ TURBO: Socket connected with ${SOCKET_SEND_BUFFER / 1024}KB send buffer")
@@ -545,6 +588,9 @@ class WifiDirectService : Service() {
 
             // 3. Stream file payload
             while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                if (isTransferCancelled) {
+                    throw IOException("Transfer cancelled")
+                }
                 outputStream.write(buffer, 0, bytesRead)
                 totalBytesSent += bytesRead
 
@@ -575,6 +621,9 @@ class WifiDirectService : Service() {
             Log.e(TAG, "Error during file transfer", e)
             notifyCallbacks { onFileTransferFailed(fileName, e.message ?: "Transfer failed") }
         } finally {
+            if (activeTransferSocket === socket) {
+                activeTransferSocket = null
+            }
             try {
                 inputStream?.close()
                 outputStream?.close()
@@ -634,6 +683,8 @@ class WifiDirectService : Service() {
         var inputStream: DataInputStream? = null
         var fileOutputStream: OutputStream? = null
         var safeFileName = "unknown"
+        var outFile: File? = null
+        var transferComplete = false
         try {
             // Capture the client's IP for bidirectional transfer
             val remoteAddr = (socket.remoteSocketAddress as? InetSocketAddress)?.address?.hostAddress
@@ -666,6 +717,8 @@ class WifiDirectService : Service() {
             val rawFileName = String(nameBytes, Charsets.UTF_8)
             safeFileName = File(rawFileName).name.ifBlank { "received_file_${System.currentTimeMillis()}" }
             val fileSize = inputStream.readLong()
+            isTransferCancelled = false
+            activeTransferSocket = socket
 
             // SECURITY CHECK: Should we accept this file?
             val now = System.currentTimeMillis()
@@ -717,19 +770,21 @@ class WifiDirectService : Service() {
 
             val targetDir = File(getExternalFilesDir(null), "received_files")
             if (!targetDir.exists()) targetDir.mkdirs()
-            var outFile = File(targetDir, safeFileName)
-            if (outFile.exists()) {
+            var resolvedFile = File(targetDir, safeFileName)
+            if (resolvedFile.exists()) {
                 val dotIndex = safeFileName.lastIndexOf('.')
                 val base = if (dotIndex > 0) safeFileName.substring(0, dotIndex) else safeFileName
                 val ext = if (dotIndex > 0) safeFileName.substring(dotIndex) else ""
                 var counter = 1
-                while (outFile.exists()) {
-                    outFile = File(targetDir, "$base ($counter)$ext")
+                while (resolvedFile.exists()) {
+                    resolvedFile = File(targetDir, "$base ($counter)$ext")
                     counter++
                 }
             }
+            outFile = resolvedFile
+            safeFileName = resolvedFile.name
 
-            fileOutputStream = BufferedOutputStream(FileOutputStream(outFile), BUFFER_SIZE)
+            fileOutputStream = BufferedOutputStream(FileOutputStream(resolvedFile), BUFFER_SIZE)
 
             val buffer = ByteArray(BUFFER_SIZE)
             var totalBytesRead = 0L
@@ -738,6 +793,9 @@ class WifiDirectService : Service() {
             notifyCallbacks { onFileTransferStarted(safeFileName, fileSize) }
 
             while (totalBytesRead < fileSize) {
+                if (isTransferCancelled) {
+                    throw IOException("Transfer cancelled")
+                }
                 val bytesToRead = minOf(buffer.size.toLong(), fileSize - totalBytesRead).toInt()
                 val bytesRead = inputStream.read(buffer, 0, bytesToRead)
                 if (bytesRead == -1) break
@@ -755,6 +813,7 @@ class WifiDirectService : Service() {
             if (fileSize > 0L && totalBytesRead < fileSize) {
                 throw IOException("Incomplete transfer ($totalBytesRead / $fileSize bytes)")
             }
+            transferComplete = true
 
             // Refresh batch approval timestamp so subsequent queued files in a batch auto-stream seamlessly
             if (remoteAddr != null) {
@@ -768,17 +827,23 @@ class WifiDirectService : Service() {
             }
 
             notifyCallbacks { onFileTransferCompleted(safeFileName) }
-            Log.d(TAG, "✅ Received file saved to: ${outFile.absolutePath}")
+            Log.d(TAG, "✅ Received file saved to: ${resolvedFile.absolutePath}")
         } catch (e: Exception) {
             Log.e(TAG, "Error receiving file", e)
             notifyCallbacks { onFileTransferFailed(safeFileName, e.message ?: "Receive failed") }
         } finally {
+            if (activeTransferSocket === socket) {
+                activeTransferSocket = null
+            }
             try {
                 inputStream?.close()
                 fileOutputStream?.close()
                 socket.close()
             } catch (e: Exception) {
                 Log.e(TAG, "Error closing receive streams", e)
+            }
+            if (!transferComplete) {
+                runCatching { outFile?.takeIf { it.exists() }?.delete() }
             }
         }
     }

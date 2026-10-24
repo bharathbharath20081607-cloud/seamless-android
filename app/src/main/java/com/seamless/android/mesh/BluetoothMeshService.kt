@@ -1428,20 +1428,19 @@ class BluetoothMeshService(private val context: Context) {
                         )
                         val signed = signPacketBeforeBroadcast(packet)
                         val wireTransferId = if (totalChunks == 1) canonicalTransferId else sha256Hex(payload)
-                        connectionManager.broadcastPacket(RoutedPacket(signed, transferId = wireTransferId))
+                        connectionManager.broadcastPacketAwait(RoutedPacket(signed, transferId = wireTransferId))
                         if (totalChunks > 1) {
                             TransferProgressManager.progress(canonicalTransferId, chunkIndex + 1, totalChunks)
                         }
                         
                         if (totalChunks > 1 && chunkIndex < totalChunks - 1) {
-                            val fragCount = ((payload.size + 439) / 440).coerceAtLeast(1)
-                            delay(fragCount * 22L + 80L)
+                            delay(40L)
                         }
+                        try { gossipSyncManager.onPublicPacketSeen(signed) } catch (_: Exception) { }
                     }
                     if (totalChunks > 1) {
                         TransferProgressManager.complete(canonicalTransferId, totalChunks)
                     }
-                    try { gossipSyncManager.onPublicPacketSeen(BitchatPacket(1u, MessageType.FILE_TRANSFER.value, hexStringToByteArray(myPeerID), SpecialRecipients.BROADCAST, System.currentTimeMillis().toULong(), ByteArray(0), null, MAX_TTL)) } catch (_: Exception) { }
                     Log.d(TAG, "✅ sendFileBroadcast completed successfully (${totalChunks} chunks)")
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ sendFileBroadcast coroutine failed: ${e.message}", e)
@@ -1527,14 +1526,13 @@ class BluetoothMeshService(private val context: Context) {
                             // Sign and send the encrypted packet
                             val signed = signPacketBeforeBroadcast(packet)
                             val wireTransferId = if (totalChunks == 1) canonicalTransferId else sha256Hex(filePayload)
-                            connectionManager.broadcastPacket(RoutedPacket(signed, transferId = wireTransferId))
+                            connectionManager.broadcastPacketAwait(RoutedPacket(signed, transferId = wireTransferId))
                             if (totalChunks > 1) {
                                 TransferProgressManager.progress(canonicalTransferId, chunkIndex + 1, totalChunks)
                             }
                             
                             if (totalChunks > 1 && chunkIndex < totalChunks - 1) {
-                                val fragCount = ((encrypted.size + 439) / 440).coerceAtLeast(1)
-                                delay(fragCount * 22L + 80L)
+                                delay(40L)
                             }
                         }
                         if (totalChunks > 1) {
@@ -1681,10 +1679,9 @@ class BluetoothMeshService(private val context: Context) {
                     payload = encrypted,
                     ttl = com.seamless.android.util.AppConstants.MESSAGE_TTL_HOPS
                 )
-                connectionManager.broadcastPacket(RoutedPacket(signPacketBeforeBroadcast(packet)))
+                connectionManager.broadcastPacketAwait(RoutedPacket(signPacketBeforeBroadcast(packet), transferId = transferId))
                 if (totalChunks > 1 && chunkIndex < totalChunks - 1) {
-                    val fragCount = ((encrypted.size + 439) / 440).coerceAtLeast(1)
-                    delay(fragCount * 22L + 80L)
+                    delay(40L)
                 }
             }
         } catch (e: Exception) {
@@ -1791,8 +1788,9 @@ class BluetoothMeshService(private val context: Context) {
                             ttl = MAX_TTL
                         )
                         
-                        // Send
-                        connectionManager.broadcastPacket(RoutedPacket(packet))
+                        // Sign and send
+                        val signedPacket = signPacketBeforeBroadcast(packet)
+                        connectionManager.broadcastPacket(RoutedPacket(signedPacket))
                         Log.d(TAG, "📤 Sent encrypted PM to $recipientPeerID")
                         
                         // Also send through local chat UI

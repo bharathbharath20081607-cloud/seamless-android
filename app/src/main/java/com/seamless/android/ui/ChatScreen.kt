@@ -154,6 +154,9 @@ fun ChatScreen(viewModel: ChatViewModel) {
     var selectedOnionContact by remember { mutableStateOf<com.seamless.android.net.OnionContactManager.OnionContact?>(null) }
     var selectedOnionGroup by remember { mutableStateOf<com.seamless.android.data.PrivateGroupEntity?>(null) }
     var showNetworkHub by remember { mutableStateOf(false) }
+    var profileOpenedFromSettings by remember { mutableStateOf(false) }
+    var privateChatOpenedFromChatsScreen by remember { mutableStateOf(false) }
+    var onionContactsSelectedTab by remember { mutableStateOf(0) }
     
     // Emoji Rain Effect state
     val emojiRainState = com.seamless.android.ui.effects.rememberEmojiRainState()
@@ -177,6 +180,96 @@ fun ChatScreen(viewModel: ChatViewModel) {
 
     // Get location channel info for timeline switching
     val selectedLocationChannel by viewModel.selectedLocationChannel.observeAsState()
+
+    // Hierarchical system back navigation across all overlays, sheets, and sub-screens
+    val canNavigateBack = showFullScreenImageViewer ||
+        showPasswordDialog ||
+        showUserSheet ||
+        showNetworkHub ||
+        showAppInfo ||
+        showLocationNotesSheet ||
+        showLocationChannelsSheet ||
+        selectedOnionContact != null ||
+        selectedOnionGroup != null ||
+        showOnionContactsScreen ||
+        showDeviceDiscoveryScreen ||
+        showFilePickerScreen ||
+        showShareReceiveScreen ||
+        showReceivedFilesScreen ||
+        showPrivateMeshScreen ||
+        showProfileScreen ||
+        showSettingsScreen ||
+        showChatsScreen ||
+        showSlideMenu ||
+        showSidebar ||
+        selectedPrivatePeer != null ||
+        currentChannel != null ||
+        selectedLocationChannel is com.seamless.android.geohash.ChannelID.Location
+
+    androidx.activity.compose.BackHandler(enabled = canNavigateBack) {
+        when {
+            showFullScreenImageViewer -> showFullScreenImageViewer = false
+            showPasswordDialog -> {
+                showPasswordDialog = false
+                passwordInput = ""
+                viewModel.handleBackPressed()
+            }
+            showUserSheet -> {
+                showUserSheet = false
+                selectedMessageForSheet = null
+            }
+            showNetworkHub -> showNetworkHub = false
+            showAppInfo -> viewModel.hideAppInfo()
+            showLocationNotesSheet -> showLocationNotesSheet = false
+            showLocationChannelsSheet -> showLocationChannelsSheet = false
+            selectedOnionContact != null -> {
+                selectedOnionContact = null
+                showOnionContactsScreen = true
+            }
+            selectedOnionGroup != null -> {
+                selectedOnionGroup = null
+                showOnionContactsScreen = true
+            }
+            showOnionContactsScreen -> showOnionContactsScreen = false
+            showDeviceDiscoveryScreen -> {
+                showDeviceDiscoveryScreen = false
+                if (isHostingMode) {
+                    showShareReceiveScreen = true
+                } else {
+                    showFilePickerScreen = true
+                }
+            }
+            showFilePickerScreen -> {
+                showFilePickerScreen = false
+                showShareReceiveScreen = true
+            }
+            showShareReceiveScreen -> showShareReceiveScreen = false
+            showReceivedFilesScreen -> showReceivedFilesScreen = false
+            showPrivateMeshScreen -> showPrivateMeshScreen = false
+            showProfileScreen -> {
+                showProfileScreen = false
+                if (profileOpenedFromSettings) {
+                    profileOpenedFromSettings = false
+                    showSettingsScreen = true
+                }
+            }
+            showSettingsScreen -> showSettingsScreen = false
+            showChatsScreen -> showChatsScreen = false
+            showSlideMenu -> showSlideMenu = false
+            showSidebar -> viewModel.hideSidebar()
+            selectedPrivatePeer != null -> {
+                viewModel.endPrivateChat()
+                if (privateChatOpenedFromChatsScreen) {
+                    privateChatOpenedFromChatsScreen = false
+                    showChatsScreen = true
+                }
+            }
+            currentChannel != null -> viewModel.switchToChannel(null)
+            selectedLocationChannel is com.seamless.android.geohash.ChannelID.Location -> {
+                viewModel.selectLocationChannel(com.seamless.android.geohash.ChannelID.Mesh)
+            }
+        }
+    }
 
     // Determine what messages to show based on current context (unified timelines)
     val rawMessages = when {
@@ -503,7 +596,14 @@ fun ChatScreen(viewModel: ChatViewModel) {
             onLocationNotesClick = { showLocationNotesSheet = true },
             onChatsClick = { showChatsScreen = true },
             onSettingsClick = { showSettingsScreen = true },
-            onMenuClick = { showSlideMenu = true }
+            onMenuClick = { showSlideMenu = true },
+            onExitPrivateChat = {
+                viewModel.endPrivateChat()
+                if (privateChatOpenedFromChatsScreen) {
+                    privateChatOpenedFromChatsScreen = false
+                    showChatsScreen = true
+                }
+            }
         )
 
         // Divider under header - positioned after status bar + header height
@@ -617,6 +717,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
                             showSettingsScreen = true
                         }
                         com.seamless.android.ui.navigation.MenuAction.NavigateToProfile -> {
+                            profileOpenedFromSettings = false
                             showProfileScreen = true
                         }
                         com.seamless.android.ui.navigation.MenuAction.NavigateToShareThings -> {
@@ -705,35 +806,50 @@ fun ChatScreen(viewModel: ChatViewModel) {
         showChatsScreen = showChatsScreen,
         onChatsScreenDismiss = { showChatsScreen = false },
         onChatSelected = { peerId -> 
+            privateChatOpenedFromChatsScreen = true
             viewModel.startPrivateChat(peerId)
             showChatsScreen = false
         },
         showSettingsScreen = showSettingsScreen,
         onSettingsScreenDismiss = { showSettingsScreen = false },
         onNavigateToProfile = { 
+            profileOpenedFromSettings = true
             showSettingsScreen = false
             showProfileScreen = true 
         },
         showShareReceiveScreen = showShareReceiveScreen,
         onShareReceiveScreenDismiss = { showShareReceiveScreen = false },
         onNavigateToFilePicker = { 
+            isHostingMode = false
             showShareReceiveScreen = false
             showFilePickerScreen = true 
         },
         onNavigateToDeviceDiscovery = { 
+            isHostingMode = true
             showShareReceiveScreen = false
             showDeviceDiscoveryScreen = true 
         },
         showFilePickerScreen = showFilePickerScreen,
-        onFilePickerScreenDismiss = { showFilePickerScreen = false },
+        onFilePickerScreenDismiss = {
+            showFilePickerScreen = false
+            showShareReceiveScreen = true
+        },
         onFileSelected = { filePath ->
             // After file is selected and prepared by FileShareViewModel,
             // navigate to DeviceDiscoveryScreen to select a recipient device
+            isHostingMode = false
             showFilePickerScreen = false
             showDeviceDiscoveryScreen = true
         },
         showDeviceDiscoveryScreen = showDeviceDiscoveryScreen,
-        onDeviceDiscoveryScreenDismiss = { showDeviceDiscoveryScreen = false },
+        onDeviceDiscoveryScreenDismiss = {
+            showDeviceDiscoveryScreen = false
+            if (isHostingMode) {
+                showShareReceiveScreen = true
+            } else {
+                showFilePickerScreen = true
+            }
+        },
         onDeviceSelected = { deviceId ->
             // Device connection is handled by FileShareViewModel
             // Keep screen open to show connection status and transfer progress
@@ -755,7 +871,13 @@ fun ChatScreen(viewModel: ChatViewModel) {
     // Profile Screen
     if (showProfileScreen) {
         com.seamless.android.profile.ui.ProfileScreen(
-            onBackClick = { showProfileScreen = false }
+            onBackClick = {
+                showProfileScreen = false
+                if (profileOpenedFromSettings) {
+                    profileOpenedFromSettings = false
+                    showSettingsScreen = true
+                }
+            }
         )
     }
     
@@ -778,6 +900,7 @@ fun ChatScreen(viewModel: ChatViewModel) {
             onNavigateBack = { showOnionContactsScreen = false },
             onContactClick = { contact ->
                 // Open P2P chat with this contact
+                onionContactsSelectedTab = 0
                 selectedOnionContact = contact
                 showOnionContactsScreen = false
             },
@@ -785,9 +908,12 @@ fun ChatScreen(viewModel: ChatViewModel) {
                 // Share contact info is handled within the screen
             },
             onGroupClick = { group ->
+                onionContactsSelectedTab = 1
                 selectedOnionGroup = group
                 showOnionContactsScreen = false
-            }
+            },
+            initialTab = onionContactsSelectedTab,
+            onTabChanged = { onionContactsSelectedTab = it }
         )
     }
     
@@ -795,14 +921,20 @@ fun ChatScreen(viewModel: ChatViewModel) {
     if (selectedOnionContact != null) {
         com.seamless.android.ui.onion.OnionChatScreen(
             contact = selectedOnionContact!!,
-            onNavigateBack = { selectedOnionContact = null }
+            onNavigateBack = {
+                selectedOnionContact = null
+                showOnionContactsScreen = true
+            }
         )
     }
 
     if (selectedOnionGroup != null) {
         com.seamless.android.ui.onion.GroupChatScreen(
             group = selectedOnionGroup!!,
-            onNavigateBack = { selectedOnionGroup = null }
+            onNavigateBack = {
+                selectedOnionGroup = null
+                showOnionContactsScreen = true
+            }
         )
     }
 }
@@ -900,7 +1032,8 @@ private fun ChatFloatingHeader(
     onLocationNotesClick: () -> Unit,
     onChatsClick: () -> Unit,
     onSettingsClick: () -> Unit,
-    onMenuClick: () -> Unit
+    onMenuClick: () -> Unit,
+    onExitPrivateChat: () -> Unit = { viewModel.endPrivateChat() }
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val locationManager = remember { com.seamless.android.geohash.LocationChannelManager.getInstance(context) }
@@ -926,7 +1059,7 @@ private fun ChatFloatingHeader(
                     viewModel = viewModel,
                     onBackClick = {
                         when {
-                            selectedPrivatePeer != null -> viewModel.endPrivateChat()
+                            selectedPrivatePeer != null -> onExitPrivateChat()
                             currentChannel != null -> viewModel.switchToChannel(null)
                         }
                     },
@@ -1080,10 +1213,9 @@ private fun ChatDialogs(
     ) {
         com.seamless.android.ui.fileshare.FilePickerScreen(
             onFileSelected = { filePath ->
-                // Handle file selection
-                onFileSelected(filePath)
+                // Handle file selection and proceed to DeviceDiscoveryScreen
                 onIsHostingModeChange(false)
-                onFilePickerScreenDismiss()
+                onFileSelected(filePath)
             },
             onBackClick = onFilePickerScreenDismiss
         )

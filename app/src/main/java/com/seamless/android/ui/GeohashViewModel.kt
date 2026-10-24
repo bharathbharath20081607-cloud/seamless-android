@@ -123,7 +123,7 @@ class GeohashViewModel(
                     val teleported = state.isTeleported.value ?: false
                     val event = NostrProtocol.createEphemeralGeohashEvent(content, channel.geohash, identity, nickname, teleported)
                     val relayManager = NostrRelayManager.getInstance(getApplication())
-                    relayManager.sendEventToGeohash(event, channel.geohash, includeDefaults = false, nRelays = 5)
+                    relayManager.sendEventToGeohash(event, channel.geohash, includeDefaults = true, nRelays = 5)
                 } finally {
                     // Ensure we stop the per-message mining animation regardless of success/failure
                     if (startedMining) {

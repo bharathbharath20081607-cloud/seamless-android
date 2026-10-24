@@ -133,10 +133,11 @@ class TorGroupMessaging private constructor(context: Context) {
     suspend fun addMembers(groupId: String, contactIds: Set<String>): Result<Unit> = runCatching {
         val group = requireNotNull(groupDao.getGroup(groupId)) { "Group not found" }
         val me = contacts.getMyContactInfo()
-        require(group.isCreatedByMe && group.creatorOnionAddress == me.onionAddress) {
+        ensureLocalMembership(group, me)
+        val current = groupDao.getMembersForGroupNow(groupId)
+        require(group.isCreatedByMe) {
             "Only the group creator can add members"
         }
-        val current = groupDao.getMembersForGroupNow(groupId)
         val currentAddresses = current.mapTo(mutableSetOf()) { it.memberOnionAddress }
         val currentWireMembers = current.mapNotNull { member ->
             contacts.getContactByOnion(member.memberOnionAddress)?.toWireMember()
@@ -186,12 +187,13 @@ class TorGroupMessaging private constructor(context: Context) {
     suspend fun removeMember(groupId: String, memberOnion: String): Result<Unit> = runCatching {
         val group = requireNotNull(groupDao.getGroup(groupId)) { "Group not found" }
         val me = contacts.getMyContactInfo()
-        require(group.isCreatedByMe && group.creatorOnionAddress == me.onionAddress) {
+        ensureLocalMembership(group, me)
+        val members = groupDao.getMembersForGroupNow(groupId)
+        require(group.isCreatedByMe) {
             "Only the group creator can remove members"
         }
         val target = memberOnion.trim().lowercase()
         require(target != me.onionAddress.lowercase()) { "Use leave to exit your own group" }
-        val members = groupDao.getMembersForGroupNow(groupId)
         val removed = requireNotNull(members.firstOrNull { it.memberOnionAddress.lowercase() == target }) {
             "Member not found"
         }
@@ -214,6 +216,7 @@ class TorGroupMessaging private constructor(context: Context) {
     suspend fun leaveGroup(groupId: String): Result<Unit> = runCatching {
         val group = requireNotNull(groupDao.getGroup(groupId)) { "Group not found" }
         val me = contacts.getMyContactInfo()
+        ensureLocalMembership(group, me)
         val members = groupDao.getMembersForGroupNow(groupId)
         val event = encode(
             WireEvent(
@@ -232,15 +235,16 @@ class TorGroupMessaging private constructor(context: Context) {
     suspend fun renameGroup(groupId: String, newName: String): Result<Unit> = runCatching {
         val group = requireNotNull(groupDao.getGroup(groupId)) { "Group not found" }
         val me = contacts.getMyContactInfo()
-        require(group.isCreatedByMe && group.creatorOnionAddress == me.onionAddress) {
+        ensureLocalMembership(group, me)
+        val members = groupDao.getMembersForGroupNow(groupId)
+        require(group.isCreatedByMe) {
             "Only the group creator can rename the group"
         }
         val clean = newName.trim()
         require(clean.length in 1..80) { "Group name must be between 1 and 80 characters" }
         groupDao.renameGroup(groupId, clean)
         val event = encode(WireEvent(type = "rename", groupId = groupId, groupName = clean, creatorOnion = me.onionAddress))
-        groupDao.getMembersForGroupNow(groupId)
-            .filter { it.memberOnionAddress != me.onionAddress }
+        members.filter { it.memberOnionAddress != me.onionAddress }
             .forEach { queue(it.memberOnionAddress, event) }
     }
 
@@ -704,9 +708,14 @@ class TorGroupMessaging private constructor(context: Context) {
         if (!group.isCreatedByMe || isGroupMember(group.groupId, me.onionAddress)) return
         val creator = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(group.creatorOnionAddress)
         val local = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(me.onionAddress)
-        if (creator == local) {
-            groupDao.insertMember(GroupMemberEntity(group.groupId, me.onionAddress, me.nickname))
+        if (local.isBlank()) return
+        // The group was created on this device, so this device is its owner even if
+        // our own onion address changed (e.g. rotated/re-resolved hidden service)
+        // since creation. Drop the stale self row and register the current address.
+        if (creator != local) {
+            groupDao.removeMember(group.groupId, group.creatorOnionAddress)
         }
+        groupDao.insertMember(GroupMemberEntity(group.groupId, me.onionAddress, me.nickname))
     }
 
     private fun OnionContactManager.OnionContact.toWireMember() = WireMember(

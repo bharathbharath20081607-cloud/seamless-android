@@ -216,6 +216,8 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
     val pendingFilesCount: LiveData<Int> = _pendingFilesCount
     private val _isProcessingQueue = MutableLiveData(false)
     val isProcessingQueue: LiveData<Boolean> = _isProcessingQueue
+    private var batchTotalFiles: Int = 1
+    private var batchCurrentIndex: Int = 1
     
     // Transfer resume support - save state to SharedPreferences
     private val prefs by lazy {
@@ -348,6 +350,8 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
                 })
             }
             
+            val deviceName = "${com.seamless.android.service.HyperDropIdentity.getAlias(context)} (${com.seamless.android.service.HyperDropIdentity.getDeviceModel()})"
+            wifiAwareService?.setDeviceName(deviceName)
             wifiAwareService?.start()
         }
     }
@@ -394,7 +398,7 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
             }
             
             // Set device name for discovery
-            val deviceName = android.os.Build.MODEL
+            val deviceName = "${com.seamless.android.service.HyperDropIdentity.getAlias(context)} (${com.seamless.android.service.HyperDropIdentity.getDeviceModel()})"
             wifiAwareService?.setDeviceName(deviceName)
             wifiAwareService?.start()
         }
@@ -532,8 +536,18 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun cancelActiveTransfer() {
+        val context = getApplication<Application>()
+        val intent = Intent(context, WifiDirectService::class.java).apply {
+            action = WifiDirectService.ACTION_CANCEL_TRANSFER
+        }
+        context.startService(intent)
+        clearQueue()
+    }
+
     fun disconnect() {
         connectionTimeoutJob?.cancel()
+        clearQueue()
         val context = getApplication<Application>()
         val intent = Intent(context, WifiDirectService::class.java).apply {
             action = WifiDirectService.ACTION_DISCONNECT
@@ -589,7 +603,8 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
     fun addFilesToQueue(uris: List<Uri>) {
         val context = getApplication<Application>()
         
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
+            val resolved = mutableListOf<QueuedFile>()
             for (uri in uris) {
                 try {
                     val cursor = context.contentResolver.query(uri, null, null, null, null)
@@ -615,16 +630,27 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                     
                     // ZERO-COPY: Use URI directly for robust large file support
-                    // WifiDirectService now supports streaming from content:// URIs
-                    pendingFilesQueue.add(QueuedFile(uri, uri.toString(), fileName, fileSize))
-                    Log.d(TAG, "📋 Added to queue (zero-copy): $fileName (queue size: ${pendingFilesQueue.size})")
-                    
+                    resolved.add(QueuedFile(uri, uri.toString(), fileName, fileSize))
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to add file to queue: ${e.message}")
                 }
             }
             
-            _pendingFilesCount.postValue(pendingFilesQueue.size)
+            withContext(Dispatchers.Main) {
+                if (_isProcessingQueue.value != true) {
+                    batchTotalFiles = (pendingFilesQueue.size + resolved.size).coerceAtLeast(1)
+                    batchCurrentIndex = 0
+                } else {
+                    batchTotalFiles += resolved.size
+                }
+                pendingFilesQueue.addAll(resolved)
+                _pendingFilesCount.value = pendingFilesQueue.size
+                Log.d(TAG, "📋 Added ${resolved.size} file(s) to queue (queue size: ${pendingFilesQueue.size})")
+                // If already connected to a peer and not currently transferring, start sending immediately
+                if (_connectionInfo.value?.groupFormed == true && _isProcessingQueue.value != true && pendingFilesQueue.isNotEmpty()) {
+                    processNextInQueue()
+                }
+            }
         }
     }
     
@@ -634,16 +660,19 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
     fun processNextInQueue() {
         if (pendingFilesQueue.isEmpty()) {
             _isProcessingQueue.value = false
+            batchTotalFiles = 1
+            batchCurrentIndex = 1
             _statusMessage.value = "All files sent!"
             return
         }
         
         val next = pendingFilesQueue.removeAt(0)
+        batchCurrentIndex = (batchCurrentIndex + 1).coerceAtMost(batchTotalFiles.coerceAtLeast(1))
         _pendingFilesCount.value = pendingFilesQueue.size
         _isProcessingQueue.value = true
         
-        Log.d(TAG, "📤 Processing queue: ${next.fileName} (${pendingFilesQueue.size} remaining)")
-        sendFile(next.filePath, next.fileName, next.fileSize)
+        Log.d(TAG, "📤 Processing queue (${batchCurrentIndex}/${batchTotalFiles}): ${next.fileName} (${pendingFilesQueue.size} remaining)")
+        sendFile(next.filePath, next.fileName, next.fileSize, batchCurrentIndex, batchTotalFiles.coerceAtLeast(1))
     }
     
     /**
@@ -653,11 +682,13 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
         pendingFilesQueue.clear()
         _pendingFilesCount.value = 0
         _isProcessingQueue.value = false
+        batchTotalFiles = 1
+        batchCurrentIndex = 1
     }
     
     // ==================== END QUEUE FUNCTIONS ====================
 
-    fun sendFile(filePath: String, fileName: String, fileSize: Long) {
+    fun sendFile(filePath: String, fileName: String, fileSize: Long, fileIndex: Int = 1, totalFiles: Int = 1) {
         val context = getApplication<Application>()
         val intent = Intent(context, WifiDirectService::class.java).apply {
             action = WifiDirectService.ACTION_SEND_FILE
@@ -678,8 +709,17 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
             filePath = filePath  // For retry capability
         )
         addTransferToHistory(transfer)
-        _currentTransfer.value = TransferProgress(transfer.id, fileName, 0, 0L, fileSize)
-        // 🚀 Skip LAUNCHING state, go directly to SENDING to use UFO animation
+        _lastTransferResult.value = null
+        _currentTransfer.value = TransferProgress(
+            id = transfer.id,
+            fileName = fileName,
+            progress = 0,
+            bytesTransferred = 0L,
+            totalBytes = fileSize,
+            fileIndex = fileIndex,
+            totalFiles = totalFiles
+        )
+        // 🚀 Go directly to SENDING to use real-time UFO animation
         _transferScreenState.value = TransferScreenState.SENDING
     }
 
@@ -1028,9 +1068,10 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
 
         _statusMessage.value = if (isReceiver) "Receiving $fileName..." else "Sending $fileName..."
         _errorMessage.value = null
+        _lastTransferResult.value = null
         
-        // Update transfer screen state
-        val targetState = if (isReceiver) TransferScreenState.ANIMATING_RECEIVE else TransferScreenState.ANIMATING_SEND
+        // Transition directly to SENDING / RECEIVING (real-time UFO progress screens)
+        val targetState = if (isReceiver) TransferScreenState.RECEIVING else TransferScreenState.SENDING
         _transferScreenState.value = targetState
 
         if (existingTransfer != null) {
@@ -1043,7 +1084,17 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }
             _transferHistory.value = updatedHistory
-            _currentTransfer.value = TransferProgress(existingTransfer.id, fileName, 0, 0L, fileSize)
+            val curIdx = _currentTransfer.value?.fileIndex ?: batchCurrentIndex.coerceAtLeast(1)
+            val curTotal = _currentTransfer.value?.totalFiles ?: batchTotalFiles.coerceAtLeast(1)
+            _currentTransfer.value = TransferProgress(
+                id = existingTransfer.id,
+                fileName = fileName,
+                progress = 0,
+                bytesTransferred = 0L,
+                totalBytes = fileSize,
+                fileIndex = curIdx,
+                totalFiles = curTotal
+            )
         } else {
             // New incoming transfer
             val newTransfer = FileTransfer(
@@ -1055,7 +1106,18 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
                 timestamp = System.currentTimeMillis()
             )
             addTransferToHistory(newTransfer)
-            _currentTransfer.value = TransferProgress(newTransfer.id, fileName, 0, 0L, fileSize)
+            val batchFiles = _batchTransferFiles.value.orEmpty()
+            val recvIndex = (_currentBatchFileIndex.value ?: 0) + 1
+            val recvTotal = batchFiles.size.coerceAtLeast(1)
+            _currentTransfer.value = TransferProgress(
+                id = newTransfer.id,
+                fileName = fileName,
+                progress = 0,
+                bytesTransferred = 0L,
+                totalBytes = fileSize,
+                fileIndex = recvIndex,
+                totalFiles = recvTotal
+            )
         }
     }
 
@@ -1146,7 +1208,9 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
         if (pendingFilesQueue.isNotEmpty() && transferDirection == TransferDirection.SENDING) {
             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                 processNextInQueue()
-            }, 500) // Small delay before next transfer
+            }, 350) // Small delay before next transfer
+        } else if (transferDirection == TransferDirection.SENDING) {
+            _isProcessingQueue.value = false
         }
         
         // Also mark batch file as completed

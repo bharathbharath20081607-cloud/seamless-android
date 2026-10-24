@@ -178,6 +178,24 @@ fun PrivateMeshScreen(
         )
     }
     val accentColor = if (isInRoom) MeshColors.SuccessGreen else MeshColors.PrimaryCyan
+
+    val handleBack: () -> Unit = {
+        when {
+            showRequestsDialog -> showRequestsDialog = false
+            showCreateScreen -> showCreateScreen = false
+            showJoinScreen -> {
+                meshManager.stopDiscovery()
+                showJoinScreen = false
+            }
+            state == PrivateMeshState.JOINING -> {
+                meshManager.leaveMesh()
+                meshManager.startDiscovery()
+                showJoinScreen = true
+            }
+            else -> onBackClick()
+        }
+    }
+    androidx.activity.compose.BackHandler(onBack = handleBack)
     
     Box(
         modifier = Modifier
@@ -202,16 +220,7 @@ fun PrivateMeshScreen(
                         )
                     },
                     navigationIcon = {
-                        IconButton(onClick = {
-                            when {
-                                showCreateScreen -> showCreateScreen = false
-                                showJoinScreen -> {
-                                    meshManager.stopDiscovery()
-                                    showJoinScreen = false
-                                }
-                                else -> onBackClick()
-                            }
-                        }) {
+                        IconButton(onClick = handleBack) {
                             Icon(
                                 Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = "Back",

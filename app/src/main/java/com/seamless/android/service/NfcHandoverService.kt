@@ -202,8 +202,8 @@ class NfcHandoverService(
                     
                     // Establish trust for this session (auto-accept files)
                     val trustIntent = Intent(context, WifiDirectService::class.java).apply {
-                        this.action = "ACTION_SET_NFC_TRUSTED"
-                        putExtra("is_trusted", true)
+                        this.action = WifiDirectService.ACTION_SET_NFC_TRUSTED
+                        putExtra(WifiDirectService.EXTRA_NFC_TRUSTED, true)
                     }
                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                         context.startForegroundService(trustIntent)

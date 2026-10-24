@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -46,11 +47,15 @@ fun RadarScanner(
     subtitle: String,
     style: RadarStyle = RadarStyle.SENDER,
     deviceCount: Int = 0,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    contentColor: Color = MaterialTheme.colorScheme.onBackground,
+    secondaryContentColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    badgeTextColor: Color = MaterialTheme.colorScheme.background
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "radar")
-    // Luxury Monochrome Instrument: Optical White with surgical status semantics
-    val accentColor = Color.White
+    // Adapts automatically to Light Mode (dark ink) and Dark Mode / HyperDrop (optical white)
+    val accentColor = contentColor
+    val contrastBoost = if (accentColor.luminance() < 0.5f) 1.65f else 1.0f
 
     // ── Main sweep rotation (360° every 3s) ──
     val sweepAngle by infiniteTransition.animateFloat(
@@ -196,7 +201,7 @@ fun RadarScanner(
                     val angleRad = (tick * 6f - 90f) * PI.toFloat() / 180f
                     val isMajor = tick % 5 == 0
                     val tickLength = if (isMajor) 8.dp.toPx() else 4.dp.toPx()
-                    val tickAlpha = if (isMajor) 0.30f else 0.12f
+                    val tickAlpha = ((if (isMajor) 0.30f else 0.12f) * contrastBoost).coerceAtMost(0.85f)
                     val startR = maxRadius - tickLength
                     val start = Offset(
                         center.x + cos(angleRad) * startR,
@@ -220,7 +225,7 @@ fun RadarScanner(
                     drawCircle(
                         brush = Brush.radialGradient(
                             colors = listOf(
-                                accentColor.copy(alpha = neonPulse * 0.12f),
+                                accentColor.copy(alpha = (neonPulse * 0.12f * contrastBoost).coerceAtMost(0.5f)),
                                 Color.Transparent
                             ),
                             center = center,
@@ -229,7 +234,7 @@ fun RadarScanner(
                         radius = maxRadius * 1.08f
                     )
                     drawCircle(
-                        color = accentColor.copy(alpha = neonPulse * 0.45f),
+                        color = accentColor.copy(alpha = (neonPulse * 0.45f * contrastBoost).coerceAtMost(0.85f)),
                         radius = maxRadius,
                         style = Stroke(width = medStroke)
                     )
@@ -244,11 +249,11 @@ fun RadarScanner(
                 ringRadii.forEachIndexed { index, fraction ->
                     val r = maxRadius * fraction
                     drawCircle(
-                        color = accentColor.copy(alpha = 0.015f),
+                        color = accentColor.copy(alpha = (0.015f * contrastBoost).coerceAtMost(0.08f)),
                         radius = r
                     )
                     drawCircle(
-                        color = accentColor.copy(alpha = if (index % 2 == 0) 0.14f else 0.10f),
+                        color = accentColor.copy(alpha = ((if (index % 2 == 0) 0.14f else 0.10f) * contrastBoost).coerceAtMost(0.6f)),
                         radius = r,
                         style = Stroke(
                             width = thinStroke,
@@ -258,7 +263,7 @@ fun RadarScanner(
                 }
 
                 // ━━━ CROSSHAIRS ━━━
-                val crossAlpha = 0.07f
+                val crossAlpha = (0.07f * contrastBoost).coerceAtMost(0.3f)
                 drawLine(
                     color = accentColor.copy(alpha = crossAlpha),
                     start = Offset(center.x, center.y - maxRadius * 0.88f),
@@ -285,8 +290,8 @@ fun RadarScanner(
                             drawArc(
                                 brush = Brush.sweepGradient(
                                     0f to Color.Transparent,
-                                    0.7f to accentColor.copy(alpha = 0.03f),
-                                    1f to accentColor.copy(alpha = 0.18f),
+                                    0.7f to accentColor.copy(alpha = (0.03f * contrastBoost).coerceAtMost(0.15f)),
+                                    1f to accentColor.copy(alpha = (0.18f * contrastBoost).coerceAtMost(0.45f)),
                                     center = center
                                 ),
                                 startAngle = trailStartAngle,
@@ -337,9 +342,9 @@ fun RadarScanner(
                                 radius = 10.dp.toPx(),
                                 center = blipPos
                             )
-                            // Crisp Optical White core
+                            // Crisp core
                             drawCircle(
-                                color = Color.White,
+                                color = accentColor,
                                 radius = 4.dp.toPx(),
                                 center = blipPos
                             )
@@ -407,7 +412,7 @@ fun RadarScanner(
                 )
             }
 
-            // ── Device count badge (Optical White circle with Pitch-Black number) ──
+            // ── Device count badge ──
             if (deviceCount > 0) {
                 Box(
                     modifier = Modifier
@@ -428,7 +433,7 @@ fun RadarScanner(
                     }
                     Text(
                         text = "$deviceCount",
-                        color = Color.Black,
+                        color = badgeTextColor,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -444,7 +449,7 @@ fun RadarScanner(
                 letterSpacing = (-0.2).sp
             ),
             fontWeight = FontWeight.Bold,
-            color = Color.White,
+            color = contentColor,
             textAlign = TextAlign.Center
         )
 
@@ -453,7 +458,7 @@ fun RadarScanner(
         Text(
             text = subtitle,
             style = MaterialTheme.typography.bodyMedium,
-            color = Color(0xFFB0B0B8),
+            color = secondaryContentColor,
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(horizontal = 32.dp)
         )

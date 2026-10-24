@@ -50,10 +50,11 @@ fun ConnectionStatusBar(
     connectionState: ConnectionState,
     modifier: Modifier = Modifier
 ) {
+    val onlineColor = Color(0xFF10B981)
     val (backgroundColor, textColor, statusText) = when (connectionState.status) {
         ConnectionStatus.ONLINE -> Triple(
-            SeamlessCyan.copy(alpha = 0.1f),
-            SeamlessCyan,
+            onlineColor.copy(alpha = 0.12f),
+            onlineColor,
             "Online • ${connectionState.meshPeerCount} nearby"
         )
         ConnectionStatus.TOR_ACTIVE -> Triple(
@@ -119,7 +120,7 @@ fun ConnectionStatusBar(
 private fun ConnectionStatusDot(status: ConnectionStatus) {
     val color = when (status) {
         ConnectionStatus.TOR_ACTIVE -> Color(0xFF7C4DFF)
-        ConnectionStatus.ONLINE -> SeamlessCyan
+        ConnectionStatus.ONLINE -> Color(0xFF10B981)
         ConnectionStatus.MESH_ONLY -> Color(0xFFFFA726)
         ConnectionStatus.OFFLINE -> Color(0xFFE53935)
         ConnectionStatus.CONNECTING -> Color(0xFF9E9E9E)
@@ -155,6 +156,7 @@ fun ConnectionIndicator(
     meshPeerCount: Int,
     modifier: Modifier = Modifier
 ) {
+    val onlineColor = Color(0xFF10B981)
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically
@@ -164,7 +166,7 @@ fun ConnectionIndicator(
             modifier = Modifier
                 .size(6.dp)
                 .clip(CircleShape)
-                .background(if (isOnline) SeamlessCyan else Color(0xFFFFA726))
+                .background(if (isOnline) onlineColor else Color(0xFFFFA726))
         )
         
         if (meshPeerCount > 0) {
@@ -172,7 +174,7 @@ fun ConnectionIndicator(
             Text(
                 text = "$meshPeerCount",
                 fontSize = 11.sp,
-                color = if (isOnline) SeamlessCyan else Color(0xFFFFA726),
+                color = if (isOnline) onlineColor else Color(0xFFFFA726),
                 fontWeight = FontWeight.Bold
             )
         }

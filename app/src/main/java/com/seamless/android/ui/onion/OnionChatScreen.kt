@@ -242,6 +242,14 @@ fun OnionChatScreen(
         }
     }
 
+    androidx.activity.compose.BackHandler {
+        if (showTrustMenu) {
+            showTrustMenu = false
+        } else {
+            onNavigateBack()
+        }
+    }
+
     Scaffold(
         topBar = {
             Surface(
@@ -439,6 +447,7 @@ fun OnionChatScreen(
             Surface(
                 color = Color.Transparent,
                 modifier = Modifier
+                    .imePadding() // Lift the input bar above the keyboard
                     .padding(horizontal = 14.dp, vertical = 12.dp)
                     .fillMaxWidth()
             ) {

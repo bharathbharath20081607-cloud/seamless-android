@@ -45,6 +45,7 @@ class BluetoothGattServerManager(
     
     // State management
     private var isActive = false
+    private val preparedWriteBuffers = java.util.concurrent.ConcurrentHashMap<String, java.util.TreeMap<Int, ByteArray>>()
 
     // Enforce a server connection limit by canceling the oldest connections (best-effort)
     fun enforceServerLimit(maxServer: Int) {
@@ -185,6 +186,7 @@ class BluetoothGattServerManager(
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
                         Log.i(TAG, "Server: Device disconnected ${device.address}")
+                        preparedWriteBuffers.remove(device.address)
                         connectionTracker.removeSubscribedDevice(device)
                         val existing = connectionTracker.getDeviceConnection(device.address)
                         if (existing == null || !existing.isClient || existing.gatt == null) {
@@ -217,8 +219,35 @@ class BluetoothGattServerManager(
             override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
                 if (!isActive) return
                 try {
+                    val chunks = preparedWriteBuffers.remove(device.address)
+                    if (execute && chunks != null && chunks.isNotEmpty()) {
+                        val totalSize = synchronized(chunks) { chunks.values.sumOf { it.size } }
+                        if (totalSize in 1..(256 * 1024)) {
+                            val combined = java.io.ByteArrayOutputStream(totalSize)
+                            synchronized(chunks) {
+                                for ((_, chunk) in chunks) {
+                                    combined.write(chunk)
+                                }
+                            }
+                            val fullBytes = combined.toByteArray()
+                            connectionTracker.updateLastPacketReceived(device.address)
+                            val packet = BitchatPacket.fromBinaryData(fullBytes)
+                            if (packet != null) {
+                                val peerID = packet.senderID.take(8).toByteArray().joinToString("") { "%02x".format(it) }
+                                Log.d(TAG, "Server: Parsed reassembled prepared-write packet type ${packet.type} (${fullBytes.size} bytes) from $peerID")
+                                delegate?.onPacketReceived(packet, peerID, device)
+                            } else {
+                                Log.w(TAG, "Server: Failed to parse reassembled prepared-write packet from ${device.address}, size: ${fullBytes.size} bytes")
+                            }
+                        }
+                    }
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-                } catch (_: Exception) { }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Server: Error in onExecuteWrite from ${device.address}: ${e.message}", e)
+                    try {
+                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                    } catch (_: Exception) { }
+                }
             }
             
             override fun onCharacteristicWriteRequest(
@@ -243,10 +272,21 @@ class BluetoothGattServerManager(
                         if (value.isEmpty()) {
                             Log.w(TAG, "Server: Received empty packet from ${device.address}")
                             if (responseNeeded) {
-                                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
                             }
                             return
                         }
+                        if (preparedWrite || offset > 0) {
+                            val chunks = preparedWriteBuffers.getOrPut(device.address) { java.util.TreeMap() }
+                            synchronized(chunks) {
+                                chunks[offset] = value.copyOf()
+                            }
+                            if (responseNeeded) {
+                                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+                            }
+                            return
+                        }
+                        preparedWriteBuffers.remove(device.address)
                         Log.i(TAG, "Server: Received packet from ${device.address}, size: ${value.size} bytes")
                         val packet = BitchatPacket.fromBinaryData(value)
                         if (packet != null) {
@@ -266,7 +306,7 @@ class BluetoothGattServerManager(
                     Log.e(TAG, "Server: Exception processing packet from ${device.address}: ${e.message}", e)
                     if (responseNeeded) {
                         try {
-                            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, if (preparedWrite) value else null)
                         } catch (_: Exception) { }
                     }
                 } catch (t: Throwable) {

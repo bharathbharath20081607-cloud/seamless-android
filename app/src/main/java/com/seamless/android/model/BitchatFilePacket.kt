@@ -51,9 +51,12 @@ data class BitchatFilePacket(
             val chunkFieldLen = 4
 
             // Calculate capacity
+            val includeTransferId = idBytes.isNotEmpty()
             var capacity = (1 + 2 + nameBytes.size) + (1 + 2 + sizeFieldLen) + (1 + 2 + mimeBytes.size) + (1 + contentLenFieldLen + content.size)
             if (totalChunks > 1) {
                 capacity += (1 + 2 + chunkFieldLen) * 2 // chunkIndex + totalChunks
+            }
+            if (includeTransferId) {
                 capacity += (1 + 2 + idBytes.size) // transferId
             }
 
@@ -83,7 +86,8 @@ data class BitchatFilePacket(
                 buf.put(TLVType.TOTAL_CHUNKS.v.toByte())
                 buf.putShort(chunkFieldLen.toShort())
                 buf.putInt(totalChunks)
-                
+            }
+            if (includeTransferId) {
                 buf.put(TLVType.TRANSFER_ID.v.toByte())
                 buf.putShort(idBytes.size.toShort())
                 buf.put(idBytes)

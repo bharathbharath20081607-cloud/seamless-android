@@ -304,6 +304,16 @@ class BluetoothConnectionManager(
         )
     }
 
+    suspend fun broadcastPacketAwait(routed: RoutedPacket) {
+        if (!isActive) return
+
+        packetBroadcaster.broadcastPacketAwait(
+            routed,
+            serverManager.getGattServer(),
+            serverManager.getCharacteristic()
+        )
+    }
+
     fun cancelTransfer(transferId: String): Boolean {
         return packetBroadcaster.cancelTransfer(transferId)
     }

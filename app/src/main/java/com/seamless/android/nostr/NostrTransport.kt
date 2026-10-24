@@ -285,13 +285,15 @@ class NostrTransport(
                 }
                 
                 // PRODUCTION FIX: Chunking Logic for Reliable Delivery
-                // Split file into 40KB chunks to fit within Relay limits
-                val CHUNK_SIZE = 40 * 1024
+                // Split file into 32KB chunks to fit comfortably within Relay WebSocket frame limits
+                val CHUNK_SIZE = 32 * 1024
                 val totalContent = filePacket.content
-                val totalChunks = (totalContent.size + CHUNK_SIZE - 1) / CHUNK_SIZE
-                val transferId = java.util.UUID.randomUUID().toString()
+                val totalChunks = ((totalContent.size + CHUNK_SIZE - 1) / CHUNK_SIZE).coerceAtLeast(1)
+                val transferId = filePacket.transferId.ifBlank { java.util.UUID.randomUUID().toString() }
+                val deliveryRelays = Nip65RelayRegistry.shared.getDeliveryRelays(recipientHex).toList()
                 
                 Log.i(TAG, "📤 Chunking file ${filePacket.fileName} (${totalContent.size} bytes) into $totalChunks chunks (ID: ${transferId.take(8)})")
+                com.seamless.android.mesh.TransferProgressManager.start(transferId, totalChunks)
                 
                 for (i in 0 until totalChunks) {
                     val start = i * CHUNK_SIZE
@@ -323,14 +325,17 @@ class NostrTransport(
                         senderIdentity = senderIdentity
                     )
                     
-                    // Send to network
+                    // Send to recipient's NIP-65 + default relays
                     giftWraps.forEach { event ->
-                        relayManager.sendEvent(event)
+                        NostrRelayManager.registerPendingGiftWrap(event.id)
+                        relayManager.sendEvent(event, deliveryRelays)
                     }
+                    com.seamless.android.mesh.TransferProgressManager.progress(transferId, i + 1, totalChunks)
                     
                     // Throttle to avoid flooding relays
                     delay(50)
                 }
+                com.seamless.android.mesh.TransferProgressManager.complete(transferId, totalChunks)
                 
                 Log.i(TAG, "✅ Sent all $totalChunks chunks for ${filePacket.fileName}")
                 

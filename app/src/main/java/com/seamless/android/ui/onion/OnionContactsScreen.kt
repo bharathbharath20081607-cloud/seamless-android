@@ -122,7 +122,9 @@ fun OnionContactsScreen(
     onNavigateBack: () -> Unit,
     onContactClick: (OnionContactManager.OnionContact) -> Unit,
     onShareMyContact: () -> Unit,
-    onGroupClick: (PrivateGroupEntity) -> Unit
+    onGroupClick: (PrivateGroupEntity) -> Unit,
+    initialTab: Int = 0,
+    onTabChanged: (Int) -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -139,11 +141,24 @@ fun OnionContactsScreen(
     val hiddenStatus by hiddenServiceManager.statusFlow.collectAsState()
     val recentMessages by messageRepository.getRecentConversations().collectAsState(initial = emptyList())
 
-    var selectedTab by remember { mutableStateOf(0) }
+    var selectedTab by remember(initialTab) { mutableStateOf(initialTab) }
     var showShareSheet by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var showQrInput by remember { mutableStateOf(false) }
     var showCreateGroup by remember { mutableStateOf(false) }
+
+    androidx.activity.compose.BackHandler {
+        when {
+            showQrInput -> {
+                showQrInput = false
+                showAddDialog = true
+            }
+            showAddDialog -> showAddDialog = false
+            showShareSheet -> showShareSheet = false
+            showCreateGroup -> showCreateGroup = false
+            else -> onNavigateBack()
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (serviceState == TorMessagingService.ServiceState.STOPPED) {
@@ -208,7 +223,10 @@ fun OnionContactsScreen(
                 listOf("Contacts", "Groups").forEachIndexed { index, label ->
                     Tab(
                         selected = selectedTab == index,
-                        onClick = { selectedTab = index },
+                        onClick = {
+                            selectedTab = index
+                            onTabChanged(index)
+                        },
                         text = { Text(label) },
                         icon = {
                             Icon(
@@ -296,7 +314,10 @@ fun OnionContactsScreen(
                     showQrInput = false
                 }
             },
-            onCancel = { showQrInput = false }
+            onCancel = {
+                showQrInput = false
+                showAddDialog = true
+            }
         )
     }
 

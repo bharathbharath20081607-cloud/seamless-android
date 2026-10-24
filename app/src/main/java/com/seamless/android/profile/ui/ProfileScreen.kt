@@ -146,6 +146,12 @@ fun ProfileScreen(
         label = "shimmer_x"
     )
 
+    if (!isInitialSetup) {
+        androidx.activity.compose.BackHandler {
+            if (isEditing) isEditing = false else onBackClick()
+        }
+    }
+
     Scaffold(
         containerColor = colorScheme.background,
         topBar = {
