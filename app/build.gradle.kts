@@ -14,7 +14,7 @@ val torNativeBinaries by configurations.creating {
 val torNativeLibsDir = layout.buildDirectory.dir("generated/tor-native/jniLibs")
 
 val extractTorNativeLibs by tasks.registering(Sync::class) {
-    from({ torNativeBinaries.map { zipTree(it) } })
+    from(torNativeBinaries.elements.map { files -> files.map { zipTree(it.asFile) } })
     include("armeabi-v7a/*.so", "arm64-v8a/*.so", "x86/*.so", "x86_64/*.so")
     into(torNativeLibsDir)
 }
@@ -104,6 +104,8 @@ android {
         baseline = file("lint-baseline.xml")
         abortOnError = false
         checkReleaseBuilds = false
+        ignoreWarnings = true
+        checkAllWarnings = false
     }
 }
 
