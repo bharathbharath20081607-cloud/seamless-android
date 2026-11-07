@@ -104,14 +104,14 @@ class GeohashPickerActivity : OrientationAwareActivity() {
                                     settings.javaScriptEnabled = true
                                     settings.domStorageEnabled = true
                                     settings.cacheMode = WebSettings.LOAD_DEFAULT
-                                    settings.allowFileAccess = true
-                                    settings.allowContentAccess = true
+                                    settings.allowFileAccess = false // SECURITY: assets load via android_asset without this
+                                    settings.allowContentAccess = false
                                     webChromeClient = WebChromeClient()
                                     webViewClient = object : WebViewClient() {
                                         override fun onPageFinished(view: WebView?, url: String?) {
                                             super.onPageFinished(view, url)
                                             // Initialize to last/initial geohash if provided, otherwise center
-                                            if (!geohashToFocus.isNullOrEmpty()) {
+                                            if (!geohashToFocus.isNullOrEmpty() && Regex("^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$").matches(geohashToFocus)) { // SECURITY: validate before JS interpolation
                                                 evaluateJavascript(
                                                     "window.focusGeohash('${geohashToFocus}')",
                                                     null

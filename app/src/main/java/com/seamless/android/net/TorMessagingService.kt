@@ -407,6 +407,7 @@ class TorMessagingService private constructor(private val context: Context) {
             // DO NOT ENCRYPT - recipient doesn't have our public key yet!
             // The frame contains our public key, which they need to decrypt future messages
             messageQueue.enqueue(recipientOnion, frame)
+            queueWakeSignal.tryEmit(Unit)
             
             Log.i(TAG, "📤 Sent contact exchange (unencrypted) to ${redactEndpoint(recipientOnion)} for auto-pairing")
         } catch (e: Exception) {
@@ -758,9 +759,38 @@ class TorMessagingService private constructor(private val context: Context) {
      * Ping a peer to check if they're online
      */
     suspend fun pingPeer(onionAddress: String): Boolean {
+        // A delivery worker streaming to this peer owns the socket introduction and
+        // its traffic already proves liveness; a concurrent ping could slip ahead of
+        // CONTACT_EXCHANGE on a fresh socket and get the connection rejected.
+        if (activeRecipientDeliveries.contains(onionAddress)) return true
         return try {
             val connection = circuitManager.getConnection(onionAddress)
             if (connection != null) {
+                ensureReadLoop(onionAddress)
+                val currentConnId = circuitManager.getActiveConnectionId(onionAddress)
+                if (currentConnId != null && introducedConnectionIds[onionAddress] != currentConnId) {
+                    peersIntroducedOnConnection.remove(onionAddress)
+                }
+                if (peersIntroducedOnConnection.add(onionAddress)) {
+                    val myInfo = contactManager.getMyContactInfo()
+                    if (myInfo.onionAddress.isNotBlank() && !myInfo.requiresRendezvous()) {
+                        val introFrame = OnionMessageProtocol.createContactExchangeFrame(
+                            myOnionAddress = myInfo.onionAddress,
+                            myNickname = myInfo.nickname,
+                            myPublicKey = myInfo.publicKey,
+                            myAvatarId = myInfo.avatarId,
+                            sequence = getSequenceManager(onionAddress).nextOutbound()
+                        )
+                        if (circuitManager.sendData(onionAddress, introFrame.encode())) {
+                            currentConnId?.let { introducedConnectionIds[onionAddress] = it }
+                            delay(50L)
+                        } else {
+                            peersIntroducedOnConnection.remove(onionAddress)
+                        }
+                    } else {
+                        peersIntroducedOnConnection.remove(onionAddress)
+                    }
+                }
                 val pingFrame = OnionMessageProtocol.createPingFrame()
                 val sent = circuitManager.sendData(onionAddress, encryptFrame(onionAddress, pingFrame).encode())
                 if (sent) ensureReadLoop(onionAddress)
@@ -1293,6 +1323,15 @@ class TorMessagingService private constructor(private val context: Context) {
         if (connection == null) {
             Log.d(TAG, "📭 No connection to ${redactEndpoint(recipientOnion)} — trying mailbox fallback")
             for (message in messages) {
+                // The mailbox accepted this exact encrypted frame already.
+                // Re-uploading it on every ACK retry creates duplicate blobs
+                // and can exhaust the recipient's bounded mailbox while they
+                // are offline. Keep the durable copy and retry direct/ACK
+                // delivery on the normal backoff schedule instead.
+                if (message.mailboxStored) {
+                    messageQueue.deferAcknowledgementRetry(message.id)
+                    continue
+                }
                 val delivered = tryMailboxDelivery(recipientOnion, message)
                 if (!delivered) {
                     messageQueue.handleSendFailure(
@@ -1344,6 +1383,7 @@ class TorMessagingService private constructor(private val context: Context) {
                         myOnionAddress = myInfo.onionAddress,
                         myNickname = myInfo.nickname,
                         myPublicKey = myInfo.publicKey,
+                        myAvatarId = myInfo.avatarId,
                         sequence = seqManager.nextOutbound()
                     )
                     introductionReady = circuitManager.sendData(recipientOnion, introFrame.encode())
@@ -1405,6 +1445,10 @@ class TorMessagingService private constructor(private val context: Context) {
                 } else {
                     // Direct send failed even with connection — try mailbox
                     peersIntroducedOnConnection.remove(recipientOnion)
+                    if (message.mailboxStored) {
+                        messageQueue.deferAcknowledgementRetry(message.id)
+                        continue
+                    }
                     val delivered = tryMailboxDelivery(recipientOnion, message)
                     if (!delivered) {
                         messageQueue.handleSendFailure(message.id, "Direct + Mailbox both failed")
@@ -1531,12 +1575,24 @@ class TorMessagingService private constructor(private val context: Context) {
                         ?.takeIf { it.isNotBlank() }
                         ?.let { contactManager.getContactByPublicKey(it)?.onionAddress }
                         ?: senderOnion
+                    val transportContact = contactManager.getContactByOnion(senderOnion)
+                    if (transportContact != null && !transportContact.onionAddress.equals(canonicalSender, ignoreCase = true)) {
+                        Log.w(TAG, "Rejected FILE_META with mismatched sender from ${redactEndpoint(senderOnion)}")
+                        deduplicator.forget(frame.messageId)
+                        return false
+                    }
                     handleFileMeta(canonicalSender, frame)
                 }
                 OnionMessageProtocol.FrameType.FILE_CHUNK -> {
                     val canonicalSender = attachmentTransfer.senderPublicKeyForChunk(frame.payload)
                         ?.let { contactManager.getContactByPublicKey(it)?.onionAddress }
                         ?: senderOnion
+                    val transportContact = contactManager.getContactByOnion(senderOnion)
+                    if (transportContact != null && !transportContact.onionAddress.equals(canonicalSender, ignoreCase = true)) {
+                        Log.w(TAG, "Rejected FILE_CHUNK with mismatched sender from ${redactEndpoint(senderOnion)}")
+                        deduplicator.forget(frame.messageId)
+                        return false
+                    }
                     handleFileChunk(canonicalSender, frame)
                 }
                 OnionMessageProtocol.FrameType.ACK -> { handleAck(frame); true }
@@ -1571,8 +1627,16 @@ class TorMessagingService private constructor(private val context: Context) {
                 // ━━━ Mailbox Protocol frames ━━━
                 OnionMessageProtocol.FrameType.MAILBOX_EXCHANGE -> {
                     Log.d(TAG, "📬 Received MAILBOX_EXCHANGE from ${redactEndpoint(senderOnion)}")
-                    handleMailboxExchange(senderOnion, frame)
-                    true
+                    if (handleMailboxExchange(senderOnion, frame)) {
+                        // An ACK means the endpoint is durably stored locally,
+                        // not merely that the frame reached a socket. This lets
+                        // a sender safely stop retrying mailbox setup.
+                        sendMessageAck(senderOnion, frame.messageId)
+                        true
+                    } else {
+                        deduplicator.forget(frame.messageId)
+                        false
+                    }
                 }
                 OnionMessageProtocol.FrameType.MAILBOX_STORE -> {
                     Log.d(TAG, "📬 Received MAILBOX_STORE from ${redactEndpoint(senderOnion)}")
@@ -1698,6 +1762,14 @@ class TorMessagingService private constructor(private val context: Context) {
         val senderContact = envelope.senderKey
             .takeIf { it.isNotEmpty() }
             ?.let { contactManager.getContactByPublicKey(it) }
+        val transportContact = contactManager.getContactByOnion(senderOnion)
+        if (transportContact != null && senderContact != null &&
+            !transportContact.publicKey.equals(senderContact.publicKey, ignoreCase = true)
+        ) {
+            Log.w(TAG, "Rejected MESSAGE with mismatched senderKey from ${redactEndpoint(senderOnion)}")
+            deduplicator.forget(frame.messageId)
+            return false
+        }
         val effectiveSenderOnion = senderContact?.onionAddress?.takeIf { it.isNotEmpty() } ?: senderOnion
 
         val previousHead = getChainHead(effectiveSenderOnion)
@@ -2181,6 +2253,10 @@ class TorMessagingService private constructor(private val context: Context) {
     private suspend fun handleMailboxPayload(payload: ByteArray, mailboxOnion: String): Boolean {
         val unsealed = decryptSealedMailboxPayload(payload)
         if (unsealed == null) {
+            Log.w(TAG, "Rejected unsealed mailbox payload from ${redactEndpoint(mailboxOnion)}")
+            return false
+        }
+        if (false) {
             val rawFrame = OnionMessageProtocol.OnionFrame.decode(payload) ?: return false
             if (rawFrame.frameType != OnionMessageProtocol.FrameType.CONTACT_EXCHANGE) {
                 Log.w(TAG, "Rejected unsealed mailbox payload with type ${rawFrame.frameType}")
@@ -2200,7 +2276,20 @@ class TorMessagingService private constructor(private val context: Context) {
             ?.let { contactManager.getContactByPublicKey(it) }
 
         return handleIncomingData(
-            senderOnion = contact?.onionAddress?.takeIf { it.isNotEmpty() } ?: mailboxOnion,
+            senderOnion = run {
+                val mailboxOwner = contactManager.getAllContacts().find {
+                    it.mailboxOnion.equals(mailboxOnion, ignoreCase = true)
+                }
+                if (mailboxOwner != null && !mailboxOnion.equals(ownMailboxOnion, ignoreCase = true)) {
+                    if (contact != null && !contact.publicKey.equals(mailboxOwner.publicKey, ignoreCase = true)) {
+                        Log.w(TAG, "Rejected mailbox payload with mismatched senderKey for contact outbox ${redactEndpoint(mailboxOnion)}")
+                        return false
+                    }
+                    mailboxOwner.onionAddress.takeIf { it.isNotEmpty() } ?: mailboxOnion
+                } else {
+                    contact?.onionAddress?.takeIf { it.isNotEmpty() } ?: mailboxOnion
+                }
+            },
             data = unsealed,
             isAlreadyDecrypted = true,
             allowOfflineTimestamp = true
@@ -2809,30 +2898,41 @@ class TorMessagingService private constructor(private val context: Context) {
      * The peer is sharing their mailbox .onion address so we can deliver
      * messages to them even when they're offline and poll their Tier 1 outbox.
      */
-    private fun handleMailboxExchange(senderOnion: String, frame: OnionMessageProtocol.OnionFrame) {
+    private suspend fun handleMailboxExchange(
+        senderOnion: String,
+        frame: OnionMessageProtocol.OnionFrame
+    ): Boolean {
         val exchange = OnionMessageProtocol.MailboxExchange.fromBytes(frame.payload)
         if (exchange == null) {
             Log.w(TAG, "Failed to parse mailbox exchange from ${redactEndpoint(senderOnion)}")
-            return
+            return false
         }
 
         Log.i(TAG, "📬 Peer ${redactEndpoint(senderOnion)} shared mailbox: ${redactEndpoint(exchange.mailboxOnion)}")
 
         // Update the contact's mailbox address and register for Tier 1 outbox polling
         val contact = contactManager.getContactByOnion(senderOnion)
-        if (contact != null) {
-            val endpoint = OnionContactManager.OnionContact
-                .canonicalizeOnionEndpoint(exchange.mailboxOnion)
-            if (endpoint.isBlank() || !endpoint.contains(".onion", ignoreCase = true)) {
-                Log.w(TAG, "Rejected invalid mailbox endpoint from ${redactEndpoint(senderOnion)}")
-                return
-            }
-            contactManager.updateMailboxAddress(contact.id, endpoint)
-            val updated = contactManager.getContact(contact.id) ?: contact.copy(mailboxOnion = endpoint)
-            scope.launch {
-                registerContactMailboxForPolling(updated)
-            }
+        if (contact == null) {
+            // Do not acknowledge an endpoint that cannot yet be bound to the
+            // authenticated contact exchange. The sender will retry after the
+            // pairing frame has been processed.
+            Log.w(TAG, "Deferred mailbox exchange from unknown contact ${redactEndpoint(senderOnion)}")
+            return false
         }
+        val endpoint = OnionContactManager.OnionContact
+            .canonicalizeOnionEndpoint(exchange.mailboxOnion)
+        if (!OnionContactManager.OnionContact.isValidOnionEndpoint(endpoint)) {
+            Log.w(TAG, "Rejected invalid mailbox endpoint from ${redactEndpoint(senderOnion)}")
+            return false
+        }
+        contactManager.updateMailboxAddress(contact.id, endpoint)
+        val updated = contactManager.getContact(contact.id) ?: contact.copy(mailboxOnion = endpoint)
+        registerContactMailboxForPolling(updated)
+        // A peer may have queued mail while we were disconnected. Fetch it
+        // now; do not add a needless periodic-poll delay after a successful,
+        // authenticated endpoint exchange.
+        mailboxClient.requestImmediatePoll()
+        return true
     }
 
     /**
@@ -2924,9 +3024,14 @@ class TorMessagingService private constructor(private val context: Context) {
                 sequence = seqManager.nextOutbound()
             )
 
-            val encryptedFrame = encryptFrame(recipientOnion, frame)
-            circuitManager.sendData(recipientOnion, encryptedFrame.encode())
-            Log.i(TAG, "📬 Sent mailbox exchange to ${redactEndpoint(recipientOnion)}")
+            // Queue the setup frame just like user traffic. A direct write can
+            // be lost during a Tor reconnect, leaving both sides with a
+            // "mailbox ready" status but no route for offline delivery.
+            // The receiver ACKs only after it persists and registers the
+            // endpoint for polling.
+            messageQueue.enqueue(recipientOnion, frame)
+            queueWakeSignal.tryEmit(Unit)
+            Log.i(TAG, "📬 Queued mailbox exchange to ${redactEndpoint(recipientOnion)}")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to send mailbox exchange: ${e.message}")
         }

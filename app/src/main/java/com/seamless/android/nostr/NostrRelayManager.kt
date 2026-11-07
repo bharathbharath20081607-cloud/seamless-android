@@ -877,7 +877,7 @@ class NostrRelayManager private constructor() {
                     val url = tag[1]
                     val marker = tag.getOrNull(2) // "read", "write", or null (both)
                     // Include if it's a write relay or both
-                    if (marker == null || marker == "write") {
+                    if ((marker == null || marker == "read") && isSafeRelayUrl(url)) { // NIP-65: deliver to recipient's READ relays
                         relays.add(url)
                     }
                 }
@@ -1005,13 +1005,9 @@ class NostrRelayManager private constructor() {
                 .url(urlString)
                 .build()
             
-            // If a relay failed via proxy (e.g. Cloudflare blocking Tor exit node) or Tor is not ready,
-            // fall back to direct WebSocket client so Nostr stays connected reliably.
-            val client = if ((relay?.reconnectAttempts ?: 0) >= 1) {
-                com.seamless.android.net.OkHttpProvider.directWebSocketClient()
-            } else {
-                httpClient
-            }
+            // SECURITY: always use the configured client (Tor SOCKS proxy when Tor is ON).
+            // Falling back to a direct client on retry would leak the user's real IP address.
+            val client = httpClient
             val webSocket = client.newWebSocket(request, RelayWebSocketListener(urlString))
             connections[urlString] = webSocket
             
@@ -1044,6 +1040,24 @@ class NostrRelayManager private constructor() {
         }
     }
     
+    /**
+     * SECURITY: relay URLs come from untrusted NIP-65 events. Only allow encrypted wss:// to public
+     * hosts, so a malicious relay list cannot point us at loopback/LAN services or plain ws://.
+     */
+    private fun isSafeRelayUrl(url: String): Boolean {
+        return try {
+            val uri = java.net.URI(url)
+            if (!"wss".equals(uri.scheme, ignoreCase = true)) return false
+            val host = uri.host?.lowercase() ?: return false
+            if (host == "localhost" || host.endsWith(".local") || host.endsWith(".internal")) return false
+            if (host.startsWith("[") || host.contains(':')) return false
+            if (Regex("^(127\\.|10\\.|192\\.168\\.|169\\.254\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|0\\.)").containsMatchIn(host)) return false
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     private fun handleMessage(message: String, relayUrl: String) {
         try {
             relaysList.find { it.url == relayUrl }?.lastConnectedAt = System.currentTimeMillis()
@@ -1057,6 +1071,11 @@ class NostrRelayManager private constructor() {
             
             when (response) {
                 is NostrResponse.Event -> {
+                    // SECURITY: drop forged events (bad id or bad Schnorr signature) before any handler sees them
+                    if (!response.event.isValidSignature()) {
+                        Log.w(TAG, "Dropping event with invalid signature from $relayUrl")
+                        return
+                    }
                     // Update relay stats
                     val relay = relaysList.find { it.url == relayUrl }
                     relay?.messagesReceived = (relay?.messagesReceived ?: 0) + 1

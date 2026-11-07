@@ -73,7 +73,7 @@ object FileUtils {
             Log.d(TAG, "📂 Opened input stream successfully")
 
             // Determine file extension
-            val extension = originalName?.substringAfterLast(".") ?: "bin"
+            val extension = (originalName?.substringAfterLast(".", "") ?: "").replace(Regex("[^A-Za-z0-9]"), "").take(16).ifBlank { "bin" } // SECURITY: no path chars
             val fileName = "file_${System.currentTimeMillis()}.$extension"
 
             // Create incoming dir if needed
@@ -120,7 +120,7 @@ object FileUtils {
                     }
                 } catch (_: Exception) { null }
             }
-            val extension = displayName?.substringAfterLast('.', missingDelimiterValue = "")?.takeIf { it.isNotBlank() }
+            val extension = displayName?.substringAfterLast('.', missingDelimiterValue = "")?.replace(Regex("[^A-Za-z0-9]"), "")?.take(16)?.takeIf { it.isNotBlank() }
                 ?: run {
                     // Try mime type to extension
                     val mime = try { context.contentResolver.getType(uri) } catch (_: Exception) { null }
@@ -281,7 +281,7 @@ object FileUtils {
         val baseName = (file.fileName.takeIf { it.isNotBlank() } ?: defaultPrefix)
             .replace(Regex("[^A-Za-z0-9._-]"), "_")
         val ext = extFromMime(lowerMime)
-        var safeName = if (baseName.contains('.')) baseName else baseName + ext
+        var safeName = (if (baseName.contains('.')) baseName else baseName + ext).trim('.', ' ').take(100).ifBlank { defaultPrefix + ext } // SECURITY: no "..", bounded length
         var idx = 1
         while (java.io.File(dir, safeName).exists() && idx < 1000) {
             val dot = safeName.lastIndexOf('.')

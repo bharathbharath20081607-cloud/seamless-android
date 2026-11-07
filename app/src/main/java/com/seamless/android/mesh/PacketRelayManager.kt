@@ -69,6 +69,7 @@ class PacketRelayManager(private val myPeerID: String) {
         val shouldRelay = isRelayEnabled() && shouldRelayPacket(relayPacket, peerID)
         
         if (shouldRelay) {
+            if (relayPacket.type != MessageType.FRAGMENT.value && (relayPacket.recipientID == null || relayPacket.recipientID.contentEquals(delegate?.getBroadcastRecipient()))) { delay(Random.nextLong(15L, 90L)) }
             relayPacket(RoutedPacket(relayPacket, peerID, routed.relayAddress))
         } else {
             Log.d(TAG, "Relay decision: NOT relaying packet type ${packet.type}")

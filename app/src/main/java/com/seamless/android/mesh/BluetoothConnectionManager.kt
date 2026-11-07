@@ -423,6 +423,27 @@ class BluetoothConnectionManager(
 
 
     /**
+     * Non-destructively ensure BLE advertising and scanning are active without
+     * disconnecting existing GATT connections or clearing addressPeerMap.
+     */
+    fun ensureDiscoveryActive() {
+        connectionScope.launch {
+            if (!isActive || bluetoothAdapter?.isEnabled != true) return@launch
+            val dbg = try { com.seamless.android.ui.debug.DebugSettingsManager.getInstance() } catch (_: Exception) { null }
+            if (dbg?.gattServerEnabled?.value != false) {
+                serverManager.start()
+                serverManager.restartAdvertising()
+            }
+            if (dbg?.gattClientEnabled?.value != false) {
+                clientManager.start()
+                clientManager.restartScanning()
+            }
+        }
+    }
+
+    fun isGattServerActive(): Boolean = isActive && serverManager.getGattServer() != null
+
+    /**
      * Get connected device count
      */
     fun getConnectedDeviceCount(): Int = connectionTracker.getConnectedDeviceCount()

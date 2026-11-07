@@ -59,6 +59,20 @@ class TorForegroundService : Service() {
         fun isRunning(context: Context): Boolean = running
 
         fun start(context: Context) {
+            try {
+                val intent = Intent(context, TorForegroundService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+                Log.i(TAG, "🧅 TorForegroundService start requested")
+            } catch (e: Exception) {
+                Log.w(TAG, "Background foreground-service start deferred by OS (${e.message}); scheduling worker")
+                runCatching { TorBackgroundWorker.schedule(context.applicationContext) }
+            }
+        }
+        fun startLegacyUnused(context: Context) {
             val intent = Intent(context, TorForegroundService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -87,7 +101,25 @@ class TorForegroundService : Service() {
         Log.i(TAG, "🧅 TorForegroundService created")
 
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, createNotification("Connecting to Tor..."))
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    createNotification("Connecting to Tor..."),
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+                )
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    createNotification("Connecting to Tor..."),
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, createNotification("Connecting to Tor..."))
+            }
+        } catch (e: Exception) {
+            runCatching { startForeground(NOTIFICATION_ID, createNotification("Connecting to Tor...")) }
+        }
 
         // Acquire partial wake lock to keep CPU running for Tor circuits
         acquireWakeLock()

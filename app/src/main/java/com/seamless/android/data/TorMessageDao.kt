@@ -53,7 +53,7 @@ interface TorMessageDao {
         WHERE id IN (
             SELECT id FROM tor_messages 
             GROUP BY contactOnionAddress 
-            HAVING timestamp = MAX(timestamp)
+            HAVING timestamp = MAX(timestamp) OR id = (SELECT m2.id FROM tor_messages m2 WHERE m2.contactOnionAddress = tor_messages.contactOnionAddress ORDER BY m2.timestamp DESC LIMIT 1)
         )
         ORDER BY timestamp DESC
     """)

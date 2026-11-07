@@ -2,30 +2,39 @@
 package com.seamless.android.service
 
 import android.Manifest
-import android.app.Service
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.Service
 import android.content.BroadcastReceiver
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.media.MediaScannerConnection
+import android.net.wifi.WifiManager
 import android.net.wifi.WpsInfo
 import android.net.wifi.p2p.*
+import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
+import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceRequest
 import android.os.*
+import android.provider.MediaStore
 import android.util.Log
+import android.webkit.MimeTypeMap
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
-import android.content.pm.ServiceInfo
 import com.seamless.android.R
 import kotlinx.coroutines.*
 import java.io.*
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Wi-Fi Direct service for peer-to-peer file sharing
+ * Wi-Fi Direct service for peer-to-peer file sharing (HyperDrop)
  */
 class WifiDirectService : Service() {
 
@@ -33,23 +42,16 @@ class WifiDirectService : Service() {
         private const val TAG = "WifiDirectService"
         private const val NOTIFICATION_ID = 1002
         private const val SOCKET_TIMEOUT = 30000 // 30s timeout for large file transfers
-        
+
         // ⚡ TURBO MODE v2.0 - MAXIMUM SPEED CONFIGURATION
-        // Research shows 256KB is the optimal buffer for Android Wi-Fi transfers:
-        // - Large enough to minimize syscall overhead
-        // - Small enough to avoid GC pauses and memory pressure
-        // - Matches typical MTU multiples for Wi-Fi (1500 bytes * ~170)
-        private const val BUFFER_SIZE = 256 * 1024  // 256KB - 4x faster than 64KB
-        
-        // Socket buffer sizes - 2MB allows TCP window scaling for max throughput
-        // This enables the kernel to buffer more data, reducing context switches
+        private const val BUFFER_SIZE = 256 * 1024  // 256KB optimal Wi-Fi buffer
         private const val SOCKET_SEND_BUFFER = 2 * 1024 * 1024 // 2MB send buffer
         private const val SOCKET_RECV_BUFFER = 2 * 1024 * 1024 // 2MB receive buffer
-        
-        // Progress reporting throttle - reduces UI overhead during transfers
-        // Reporting every 2% instead of 1% = 50% fewer callback invocations
         private const val PROGRESS_REPORT_INTERVAL = 2
-        
+
+        private const val HEADER_MAGIC_PING = -1
+        private const val HEADER_MAGIC_V2 = -2
+
         private const val CHANNEL_ID = "wifi_direct_channel"
 
         // Action constants for intent-based control
@@ -69,6 +71,9 @@ class WifiDirectService : Service() {
         const val EXTRA_FILE_PATH = "extra_file_path"
         const val EXTRA_FILE_NAME = "extra_file_name"
         const val EXTRA_FILE_SIZE = "extra_file_size"
+        const val EXTRA_FILE_INDEX = "extra_file_index"
+        const val EXTRA_TOTAL_FILES = "extra_total_files"
+        const val EXTRA_SENDER_NAME = "extra_sender_name"
         const val EXTRA_NFC_TRUSTED = "extra_nfc_trusted"
     }
 
@@ -90,7 +95,13 @@ class WifiDirectService : Service() {
     private var isNfcTrustedSession = false
     private var lastDeviceFoundTime = 0L
     private var discoveryRetryCount = 0
-    
+    private var isLocalServiceRegistered = false
+
+    // Map discovered peer MAC addresses to friendly HyperDrop aliases via DNS-SD
+    private val dnsSdAliases = ConcurrentHashMap<String, String>()
+    private val connectedClientMacs = ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var hasConnectedPeerInGroup: Boolean = false
+
     // Track the client's IP address (discovered from incoming connections)
     // This enables the group owner to send files TO the client
     @Volatile private var clientAddress: String? = null
@@ -99,7 +110,7 @@ class WifiDirectService : Service() {
     @Volatile private var lastAcceptedTimestamp: Long = 0L
     @Volatile private var activeTransferSocket: Socket? = null
     @Volatile private var isTransferCancelled: Boolean = false
-    
+
     // Pending confirmation for manual file transfer approval
     private var pendingConfirmation: CompletableDeferred<Boolean>? = null
 
@@ -113,13 +124,18 @@ class WifiDirectService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "WifiDirectService onCreate")
-        
+
         createNotificationChannel()
         startForegroundServiceCompat()
-        
+
         wifiP2pManager = getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager
         channel = wifiP2pManager.initialize(this, mainLooper, null)
-        
+
+        // Proactively start the TCP receive server on port 8988
+        serviceScope.launch {
+            startReceiveServer()
+        }
+
         // Register broadcast receiver
         receiver = WiFiDirectBroadcastReceiver()
         val intentFilter = IntentFilter().apply {
@@ -138,7 +154,7 @@ class WifiDirectService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand: action=${intent?.action}")
-        
+
         when (intent?.action) {
             ACTION_START_DISCOVERY -> startDiscovery()
             ACTION_STOP_DISCOVERY -> stopDiscovery()
@@ -154,9 +170,13 @@ class WifiDirectService : Service() {
                 val filePath = intent.getStringExtra(EXTRA_FILE_PATH)
                 val fileName = intent.getStringExtra(EXTRA_FILE_NAME)
                 val fileSize = intent.getLongExtra(EXTRA_FILE_SIZE, 0L)
+                val fileIndex = intent.getIntExtra(EXTRA_FILE_INDEX, 1).coerceAtLeast(1)
+                val totalFiles = intent.getIntExtra(EXTRA_TOTAL_FILES, 1).coerceAtLeast(1)
+                val senderName = intent.getStringExtra(EXTRA_SENDER_NAME)
+                    ?: "${HyperDropIdentity.getAlias(this)} (${HyperDropIdentity.getDeviceModel()})"
                 if (filePath != null && fileName != null) {
                     serviceScope.launch {
-                        sendFile(filePath, fileName, fileSize)
+                        sendFile(filePath, fileName, fileSize, fileIndex, totalFiles, senderName)
                     }
                 }
             }
@@ -174,7 +194,7 @@ class WifiDirectService : Service() {
                 cancelActiveTransfer()
             }
         }
-        
+
         return START_STICKY
     }
 
@@ -185,14 +205,41 @@ class WifiDirectService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         Log.d(TAG, "WifiDirectService onDestroy")
-        
+
         cleanup()
         serviceScope.cancel()
-        
+
         try {
             receiver?.let { unregisterReceiver(it) }
         } catch (e: Exception) {
             Log.e(TAG, "Error unregistering receiver", e)
+        }
+    }
+
+    /**
+     * Check whether there is an active P2P group with an actual connected peer.
+     */
+    fun hasActivePeerConnection(deviceAddress: String? = null): Boolean {
+        val conn = currentConnection ?: return false
+        if (!conn.groupFormed) return false
+        if (!conn.isGroupOwner) {
+            // We are a Client connected to a Group Owner
+            return true
+        }
+        // We are Group Owner — only truly connected if a client has joined or registered its IP
+        val hasClient = hasConnectedPeerInGroup || clientAddress != null || connectedClientMacs.isNotEmpty()
+        if (!hasClient) return false
+        if (deviceAddress != null && connectedClientMacs.isNotEmpty()) {
+            return connectedClientMacs.any { it.equals(deviceAddress, ignoreCase = true) } || clientAddress != null
+        }
+        return true
+    }
+
+    private fun hasWifiDirectPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         }
     }
 
@@ -217,41 +264,138 @@ class WifiDirectService : Service() {
             .setSmallIcon(R.drawable.ic_notification)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
-        
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Must match android:foregroundServiceType="connectedDevice" in manifest
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
     }
 
-    private fun startDiscovery() {
-        val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+    /**
+     * Register a DNS-SD local service and response listeners so HyperDrop peers
+     * can exchange friendly aliases and stay discoverable in P2P Listen state.
+     */
+    private fun ensureDnsSdConfigured(ch: WifiP2pManager.Channel) {
+        if (!hasWifiDirectPermission()) return
+        try {
+            val alias = HyperDropIdentity.getAlias(this)
+            val model = HyperDropIdentity.getDeviceModel()
+            val visibility = HyperDropIdentity.getVisibilityMode(this)
+
+            wifiP2pManager.setDnsSdResponseListeners(
+                ch,
+                { _, _, srcDevice ->
+                    val addr = srcDevice?.deviceAddress?.lowercase(Locale.US)
+                    if (!addr.isNullOrBlank() && !srcDevice.deviceName.isNullOrBlank()) {
+                        dnsSdAliases.putIfAbsent(addr, srcDevice.deviceName)
+                    }
+                },
+                { _, record, srcDevice ->
+                    val addr = srcDevice?.deviceAddress?.lowercase(Locale.US) ?: return@setDnsSdResponseListeners
+                    val peerAlias = record["alias"]
+                    val peerModel = record["model"]
+                    if (!peerAlias.isNullOrBlank()) {
+                        val display = if (!peerModel.isNullOrBlank()) {
+                            "⚡ $peerAlias ($peerModel)"
+                        } else {
+                            "⚡ $peerAlias"
+                        }
+                        dnsSdAliases[addr] = display
+                        Log.d(TAG, "🎯 DNS-SD resolved peer $addr -> $display")
+                    }
+                }
+            )
+
+            if (!isLocalServiceRegistered && visibility != HyperDropIdentity.VisibilityMode.HIDDEN) {
+                val record = mapOf(
+                    "alias" to alias,
+                    "model" to model,
+                    "port" to "8988"
+                )
+                val serviceInfo = WifiP2pDnsSdServiceInfo.newInstance("_hyperdrop", "_tcp", record)
+                wifiP2pManager.addLocalService(ch, serviceInfo, object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() {
+                        isLocalServiceRegistered = true
+                        Log.d(TAG, "✅ Registered HyperDrop DNS-SD local service: $alias ($model)")
+                    }
+                    override fun onFailure(reason: Int) {
+                        Log.d(TAG, "DNS-SD addLocalService note: $reason")
+                    }
+                })
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "DNS-SD setup warning: ${e.message}")
         }
-        
-        if (!hasPermission) {
+    }
+
+    private fun startDiscovery(retryAttempt: Int = 0) {
+        if (!hasWifiDirectPermission()) {
             Log.w(TAG, "Missing permission for Wi-Fi Direct discovery")
             notifyCallbacks { onDiscoveryFailed(-1) }
             return
         }
-        
-        channel?.let { ch ->
-            wifiP2pManager.discoverPeers(ch, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() {
-                    Log.d(TAG, "Discovery started successfully")
-                    notifyCallbacks { onDiscoveryStarted() }
-                }
 
-                override fun onFailure(reason: Int) {
-                    Log.e(TAG, "Discovery failed: $reason")
+        serviceScope.launch {
+            startReceiveServer()
+        }
+
+        channel?.let { ch ->
+            ensureDnsSdConfigured(ch)
+
+            // If we are sitting in a stale empty autonomous group (0 clients), remove it first
+            // so the Wi-Fi P2P radio can scan social channels 1, 6, and 11 properly.
+            if (retryAttempt == 0) {
+                wifiP2pManager.requestGroupInfo(ch) { existingGroup ->
+                    if (existingGroup != null && existingGroup.isGroupOwner && existingGroup.clientList.isEmpty()) {
+                        Log.d(TAG, "Removing stale empty P2P group before starting discovery")
+                        hasConnectedPeerInGroup = false
+                        connectedClientMacs.clear()
+                        wifiP2pManager.removeGroup(ch, object : WifiP2pManager.ActionListener {
+                            override fun onSuccess() {
+                                handler.postDelayed({ startDiscovery(retryAttempt = 1) }, 250L)
+                            }
+                            override fun onFailure(reason: Int) {
+                                startDiscovery(retryAttempt = 1)
+                            }
+                        })
+                    } else {
+                        performDiscoverPeers(ch, retryAttempt)
+                    }
+                }
+                return
+            }
+
+            performDiscoverPeers(ch, retryAttempt)
+        }
+    }
+
+    private fun performDiscoverPeers(ch: WifiP2pManager.Channel, retryAttempt: Int) {
+        if (!hasWifiDirectPermission()) return
+
+        wifiP2pManager.discoverPeers(ch, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {
+                Log.d(TAG, "Discovery started successfully")
+                notifyCallbacks { onDiscoveryStarted() }
+                // Also trigger DNS-SD service discovery in background to resolve HyperDrop aliases
+                runCatching {
+                    val req = WifiP2pDnsSdServiceRequest.newInstance()
+                    wifiP2pManager.addServiceRequest(ch, req, null)
+                    wifiP2pManager.discoverServices(ch, null)
+                }
+            }
+
+            override fun onFailure(reason: Int) {
+                Log.w(TAG, "Discovery failed: $reason (retryAttempt=$retryAttempt)")
+                if (reason == WifiP2pManager.BUSY && retryAttempt < 3) {
+                    handler.postDelayed({
+                        performDiscoverPeers(ch, retryAttempt + 1)
+                    }, 550L * (retryAttempt + 1))
+                } else if (reason != WifiP2pManager.BUSY) {
                     notifyCallbacks { onDiscoveryFailed(reason) }
                 }
-            })
-        }
+            }
+        })
     }
 
     private fun stopDiscovery() {
@@ -270,14 +414,8 @@ class WifiDirectService : Service() {
     }
 
     private fun createGroup() {
-        val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        }
-        
-        if (!hasPermission) {
-            Log.w(TAG, "Missing permission for Wi-Fi Direct group creation")
+        if (!hasWifiDirectPermission()) {
+            Log.w(TAG, "Missing permission for Wi-Fi Direct hosting")
             return
         }
 
@@ -285,84 +423,67 @@ class WifiDirectService : Service() {
         serviceScope.launch {
             startReceiveServer()
         }
-        
+
         channel?.let { ch ->
+            ensureDnsSdConfigured(ch)
             wifiP2pManager.requestGroupInfo(ch) { existingGroup ->
-                if (existingGroup != null && existingGroup.isGroupOwner) {
-                    Log.d(TAG, "Already group owner, keeping existing group and refreshing discovery")
+                if (existingGroup != null && (!existingGroup.isGroupOwner || existingGroup.clientList.isNotEmpty())) {
+                    Log.d(TAG, "Already in active peer group, keeping existing group and refreshing discovery")
+                    hasConnectedPeerInGroup = true
+                    connectedClientMacs.clear()
+                    existingGroup.clientList?.forEach { client ->
+                        if (!client.deviceAddress.isNullOrBlank()) {
+                            connectedClientMacs.add(client.deviceAddress)
+                        }
+                    }
                     wifiP2pManager.requestConnectionInfo(ch) { info ->
                         if (info != null && info.groupFormed) {
                             currentConnection = info
                             notifyCallbacks { onConnected(info) }
                         }
                     }
-                    startDiscovery()
+                    performDiscoverPeers(ch, retryAttempt = 1)
                 } else if (existingGroup != null) {
+                    // Remove empty solo group so this receiver enters standard P2P Listen+Search mode
+                    // on social channels (1, 6, 11) and is 100% discoverable by all Android phones.
+                    hasConnectedPeerInGroup = false
+                    connectedClientMacs.clear()
                     wifiP2pManager.removeGroup(ch, object : WifiP2pManager.ActionListener {
                         override fun onSuccess() {
-                            createGroupInternal(ch)
+                            handler.postDelayed({ performDiscoverPeers(ch, retryAttempt = 1) }, 250L)
                         }
                         override fun onFailure(reason: Int) {
-                            createGroupInternal(ch)
+                            performDiscoverPeers(ch, retryAttempt = 1)
                         }
                     })
                 } else {
-                    createGroupInternal(ch)
+                    performDiscoverPeers(ch, retryAttempt = 1)
                 }
             }
         }
-    }
-
-    private fun createGroupInternal(ch: WifiP2pManager.Channel) {
-        val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        }
-        if (!hasPermission) return
-
-        wifiP2pManager.createGroup(ch, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() {
-                Log.d(TAG, "Group created successfully")
-                // Keep peer discovery active so senders on all Android OEMs can discover this host
-                handler.postDelayed({ startDiscovery() }, 350L)
-            }
-
-            override fun onFailure(reason: Int) {
-                Log.e(TAG, "Failed to create group: $reason")
-                if (reason == WifiP2pManager.BUSY) {
-                    // Fallback to active peer discovery so incoming P2P connections still succeed
-                    handler.postDelayed({ startDiscovery() }, 400L)
-                }
-            }
-        })
     }
 
     private fun connectToDevice(deviceAddress: String, isRetry: Boolean = false) {
-        val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        }
-        
-        if (!hasPermission) {
+        if (!hasWifiDirectPermission()) {
             Log.w(TAG, "Missing permission for Wi-Fi Direct connection")
             notifyCallbacks { onConnectionFailed(-1) }
             return
         }
-        
+
         val config = WifiP2pConfig().apply {
             this.deviceAddress = deviceAddress
             wps.setup = WpsInfo.PBC
-            // Sender prefers Client role (0) so Receiver (or existing Group Owner) owns 192.168.49.1
+            // Sender prefers Client role (0) so Receiver owns 192.168.49.1
             groupOwnerIntent = 0
         }
-        
+
         channel?.let { ch ->
             if (!isRetry) {
                 wifiP2pManager.requestGroupInfo(ch) { existingGroup ->
                     if (existingGroup != null && existingGroup.isGroupOwner && existingGroup.clientList.isEmpty()) {
                         Log.d(TAG, "Removing empty local group before connecting to peer $deviceAddress")
+                        hasConnectedPeerInGroup = false
+                        connectedClientMacs.clear()
                         wifiP2pManager.removeGroup(ch, object : WifiP2pManager.ActionListener {
                             override fun onSuccess() {
                                 handler.postDelayed({ connectToDevice(deviceAddress, isRetry = true) }, 250L)
@@ -395,7 +516,7 @@ class WifiDirectService : Service() {
                                     notifyCallbacks { onConnectionFailed(r) }
                                 }
                             })
-                        }, 450L)
+                        }, 550L)
                     } else {
                         notifyCallbacks { onConnectionFailed(reason) }
                     }
@@ -415,10 +536,13 @@ class WifiDirectService : Service() {
 
     private fun disconnect() {
         cancelActiveTransfer()
+        hasConnectedPeerInGroup = false
+        connectedClientMacs.clear()
         channel?.let { ch ->
             wifiP2pManager.removeGroup(ch, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
                     Log.d(TAG, "Disconnected from group")
+                    isNfcTrustedSession = false
                     clientAddress = null
                     lastAcceptedPeerAddress = null
                     notifyCallbacks { onDisconnected() }
@@ -426,6 +550,10 @@ class WifiDirectService : Service() {
 
                 override fun onFailure(reason: Int) {
                     Log.e(TAG, "Failed to disconnect: $reason")
+                    isNfcTrustedSession = false
+                    clientAddress = null
+                    lastAcceptedPeerAddress = null
+                    notifyCallbacks { onDisconnected() }
                 }
             })
         }
@@ -438,35 +566,89 @@ class WifiDirectService : Service() {
     private fun sendClientRegistrationPing(groupOwnerHostAddress: String?) {
         val hostAddr = groupOwnerHostAddress ?: return
         serviceScope.launch {
-            repeat(3) { attempt ->
-                if (attempt > 0) delay(350L * attempt)
+            repeat(8) { attempt ->
+                if (attempt > 0) delay(300L * attempt)
                 try {
                     Socket().use { pingSocket ->
                         pingSocket.tcpNoDelay = true
                         pingSocket.soTimeout = 3_000
                         pingSocket.connect(InetSocketAddress(hostAddr, 8988), 3_000)
                         val out = DataOutputStream(pingSocket.getOutputStream())
-                        out.writeInt(-1) // Magic ping header
+                        out.writeInt(HEADER_MAGIC_PING)
                         out.flush()
                         pingSocket.getInputStream().read()
-                        Log.d(TAG, "📍 Client IP registration ping succeeded to $hostAddr")
+                        Log.d(TAG, "📍 Client IP registration ping succeeded to $hostAddr (attempt ${attempt + 1})")
                         return@launch
                     }
                 } catch (e: Exception) {
-                    Log.d(TAG, "Client IP registration ping attempt ${attempt + 1} failed: ${e.message}")
+                    Log.d(TAG, "Client IP registration ping attempt ${attempt + 1}/8 failed: ${e.message}")
                 }
             }
         }
     }
 
     /**
-     * Send a file to the connected peer using a synchronized header + approval + completion ACK protocol.
-     *
-     * Both group owner AND client can send files:
-     * - Client → sends to groupOwnerAddress (192.168.49.1)
-     * - Group Owner → sends to clientAddress (learned from registration ping or incoming connection)
+     * Fallback ARP lookup on Group Owner in case the Client's registration ping was delayed.
      */
-    private suspend fun sendFile(filePath: String, fileName: String, fileSize: Long) {
+    private fun resolveClientAddressFromArp(): String? {
+        return try {
+            val arpFile = File("/proc/net/arp")
+            if (!arpFile.exists()) return null
+            arpFile.useLines { lines ->
+                for (line in lines.drop(1)) {
+                    val parts = line.trim().split(Regex("\\s+"))
+                    if (parts.size >= 4) {
+                        val ip = parts[0]
+                        val mac = parts[3]
+                        if (ip.startsWith("192.168.49.") && ip != "192.168.49.1" && mac != "00:00:00:00:00:00") {
+                            Log.d(TAG, "📍 Resolved client IP from ARP table: $ip ($mac)")
+                            return@useLines ip
+                        }
+                    }
+                }
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun acquireWifiLock(tagSuffix: String): WifiManager.WifiLock? {
+        return runCatching {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wm?.createWifiLock(mode, "seamless:hyperdrop_$tagSuffix")?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }.getOrNull()
+    }
+
+    private fun acquireWakeLock(tagSuffix: String): PowerManager.WakeLock? {
+        return runCatching {
+            val pm = applicationContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "seamless:hyperdrop_wake_$tagSuffix")?.apply {
+                setReferenceCounted(false)
+                acquire(10 * 60 * 1000L) // Max 10 minutes
+            }
+        }.getOrNull()
+    }
+
+    /**
+     * Send a file to the connected peer using a synchronized V2 header + approval + completion ACK protocol.
+     */
+    private suspend fun sendFile(
+        filePath: String,
+        fileName: String,
+        fileSize: Long,
+        fileIndex: Int = 1,
+        totalFiles: Int = 1,
+        senderName: String = "Nearby Device"
+    ) {
         val connection = currentConnection
         if (connection == null || !connection.groupFormed) {
             Log.e(TAG, "No active connection for file transfer")
@@ -474,20 +656,21 @@ class WifiDirectService : Service() {
             return
         }
 
-        // Determine target address based on our role (waiting briefly if Group Owner is waiting for Client ping)
+        // Determine target address based on our role
         val targetAddress = if (connection.isGroupOwner) {
-            var addr = clientAddress
+            var addr = clientAddress ?: resolveClientAddressFromArp()
             var waitAttempts = 0
-            while (addr == null && waitAttempts < 10) {
+            while (addr == null && waitAttempts < 24) {
                 delay(250L)
-                addr = clientAddress
+                addr = clientAddress ?: resolveClientAddressFromArp()
                 waitAttempts++
             }
             if (addr == null) {
                 Log.e(TAG, "Client address not yet known — wait for client to connect first")
-                notifyCallbacks { onFileTransferFailed(fileName, "Peer not ready yet — please retry in a moment") }
+                notifyCallbacks { onFileTransferFailed(fileName, "Peer not ready yet — please tap Retry") }
                 return
             }
+            clientAddress = addr
             Log.d(TAG, "Group owner sending to client at $addr")
             addr
         } else {
@@ -500,27 +683,52 @@ class WifiDirectService : Service() {
             return
         }
 
+        val wifiLock = acquireWifiLock("tx")
+        val wakeLock = acquireWakeLock("tx")
         var inputStream: InputStream? = null
         var outputStream: DataOutputStream? = null
         var socket: Socket? = null
+        var tempStagedFile: File? = null
 
         try {
             var effectiveFileSize = fileSize
-            // Support both direct file paths and content URIs (zero-copy)
             if (filePath.startsWith("content://")) {
                 val uri = android.net.Uri.parse(filePath)
                 if (effectiveFileSize <= 0L) {
-                    contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
-                        if (afd.length > 0L) effectiveFileSize = afd.length
+                    runCatching {
+                        contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                            if (pfd.statSize > 0L) effectiveFileSize = pfd.statSize
+                        }
+                    }
+                }
+                if (effectiveFileSize <= 0L) {
+                    runCatching {
+                        contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                            if (afd.length > 0L) effectiveFileSize = afd.length
+                        }
                     }
                 }
                 val rawStream = contentResolver.openInputStream(uri)
                 if (rawStream == null) {
-                    notifyCallbacks { onFileTransferFailed(fileName, "Could not open content URI") }
+                    notifyCallbacks { onFileTransferFailed(fileName, "Could not open selected file") }
                     return
                 }
-                inputStream = BufferedInputStream(rawStream, BUFFER_SIZE)
-                Log.d(TAG, "📂 Streaming directly from content URI: $filePath ($effectiveFileSize bytes)")
+                // Fallback for virtual/cloud ContentProviders that do not report file size upfront
+                if (effectiveFileSize <= 0L) {
+                    val staged = File(cacheDir, "hyperdrop_stage_${System.currentTimeMillis()}_${File(fileName).name}")
+                    rawStream.use { input ->
+                        FileOutputStream(staged).use { output ->
+                            input.copyTo(output, BUFFER_SIZE)
+                        }
+                    }
+                    tempStagedFile = staged
+                    effectiveFileSize = staged.length()
+                    inputStream = BufferedInputStream(FileInputStream(staged), BUFFER_SIZE)
+                    Log.d(TAG, "📂 Staged unknown-length content URI: $filePath ($effectiveFileSize bytes)")
+                } else {
+                    inputStream = BufferedInputStream(rawStream, BUFFER_SIZE)
+                    Log.d(TAG, "📂 Streaming directly from content URI: $filePath ($effectiveFileSize bytes)")
+                }
             } else {
                 val file = File(filePath)
                 if (!file.exists()) {
@@ -534,9 +742,14 @@ class WifiDirectService : Service() {
                 Log.d(TAG, "📂 Streaming from file: $filePath ($effectiveFileSize bytes)")
             }
 
+            if (effectiveFileSize <= 0L) {
+                notifyCallbacks { onFileTransferFailed(fileName, "Cannot send empty (0 byte) file") }
+                return
+            }
+
             // Connect with retry in case receiver's ServerSocket is still binding after group formation
             var lastConnectError: Exception? = null
-            for (attempt in 0 until 3) {
+            for (attempt in 0 until 5) {
                 if (attempt > 0) delay(350L * attempt)
                 try {
                     val candidate = Socket()
@@ -549,7 +762,7 @@ class WifiDirectService : Service() {
                     break
                 } catch (e: Exception) {
                     lastConnectError = e
-                    Log.w(TAG, "Socket connect attempt ${attempt + 1}/3 failed: ${e.message}")
+                    Log.w(TAG, "Socket connect attempt ${attempt + 1}/5 failed: ${e.message}")
                 }
             }
 
@@ -560,16 +773,22 @@ class WifiDirectService : Service() {
 
             Log.d(TAG, "⚡ TURBO: Socket connected with ${SOCKET_SEND_BUFFER / 1024}KB send buffer")
 
-            // 1. Send header: [nameLength:int][nameBytes][fileSize:long]
+            // 1. Send V2 header: [HEADER_MAGIC_V2:int][nameLength:int][nameBytes][fileSize:long][fileIndex:int][totalFiles:int][senderLen:int][senderBytes]
             val nameBytes = fileName.toByteArray(Charsets.UTF_8)
+            val senderBytes = senderName.toByteArray(Charsets.UTF_8)
+            outputStream.writeInt(HEADER_MAGIC_V2)
             outputStream.writeInt(nameBytes.size)
             outputStream.write(nameBytes)
             outputStream.writeLong(effectiveFileSize)
+            outputStream.writeInt(fileIndex)
+            outputStream.writeInt(totalFiles)
+            outputStream.writeInt(senderBytes.size)
+            outputStream.write(senderBytes)
             outputStream.flush()
-            Log.d(TAG, "📤 Sent file header: $fileName, size=$effectiveFileSize — awaiting recipient approval...")
+            Log.d(TAG, "📤 Sent V2 file header: $fileName ($fileIndex/$totalFiles), size=$effectiveFileSize — awaiting recipient approval...")
 
             // 2. Wait for 1-byte recipient approval (1 = accepted, 0 = rejected)
-            activeSocket.soTimeout = 35_000
+            activeSocket.soTimeout = 65_000
             val approvalByte = activeSocket.getInputStream().read()
             if (approvalByte != 1) {
                 val reason = if (approvalByte == 0) "Transfer declined by recipient" else "Recipient did not respond in time"
@@ -584,7 +803,7 @@ class WifiDirectService : Service() {
             var totalBytesSent = 0L
             var lastReportedProgress = -1
 
-            notifyCallbacks { onFileTransferStarted(fileName, effectiveFileSize) }
+            notifyCallbacks { onFileTransferStarted(fileName, effectiveFileSize, fileIndex, totalFiles) }
 
             // 3. Stream file payload
             while (inputStream.read(buffer).also { bytesRead = it } != -1) {
@@ -596,7 +815,7 @@ class WifiDirectService : Service() {
 
                 val safeTotalBytes = if (effectiveFileSize > 0L) effectiveFileSize else maxOf(totalBytesSent, 1L)
                 val progress = ((totalBytesSent * 100) / safeTotalBytes).toInt().coerceIn(0, 100)
-                
+
                 if (progress - lastReportedProgress >= PROGRESS_REPORT_INTERVAL || progress >= 100) {
                     lastReportedProgress = progress
                     notifyCallbacks { onFileTransferProgress(fileName, progress, totalBytesSent) }
@@ -607,15 +826,15 @@ class WifiDirectService : Service() {
 
             // 4. Wait for 1-byte completion ACK (2) confirming recipient flushed file to disk
             try {
-                activeSocket.soTimeout = 10_000
+                activeSocket.soTimeout = 12_000
                 val ackByte = activeSocket.getInputStream().read()
                 Log.d(TAG, "📥 Received completion ACK ($ackByte) for $fileName")
             } catch (e: Exception) {
                 Log.w(TAG, "Completion ACK read warning (bytes already flushed): ${e.message}")
             }
 
-            notifyCallbacks { onFileTransferCompleted(fileName) }
-            Log.d(TAG, "✅ File transfer completed: $fileName ($totalBytesSent bytes)")
+            notifyCallbacks { onFileTransferCompleted(fileName, fileIndex, totalFiles) }
+            Log.d(TAG, "✅ File transfer completed: $fileName ($totalBytesSent bytes, $fileIndex/$totalFiles)")
 
         } catch (e: Exception) {
             Log.e(TAG, "Error during file transfer", e)
@@ -631,6 +850,9 @@ class WifiDirectService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "Error closing streams", e)
             }
+            runCatching { tempStagedFile?.delete() }
+            runCatching { if (wifiLock?.isHeld == true) wifiLock.release() }
+            runCatching { if (wakeLock?.isHeld == true) wakeLock.release() }
         }
     }
 
@@ -666,7 +888,7 @@ class WifiDirectService : Service() {
                     socket.receiveBufferSize = SOCKET_RECV_BUFFER
                     socket.sendBufferSize = SOCKET_SEND_BUFFER
                     socket.soTimeout = SOCKET_TIMEOUT
-                    
+
                     serviceScope.launch {
                         handleIncomingFile(socket)
                     }
@@ -685,38 +907,100 @@ class WifiDirectService : Service() {
         var safeFileName = "unknown"
         var outFile: File? = null
         var transferComplete = false
+        val wifiLock = acquireWifiLock("rx")
+        val wakeLock = acquireWakeLock("rx")
+
         try {
             // Capture the client's IP for bidirectional transfer
             val remoteAddr = (socket.remoteSocketAddress as? InetSocketAddress)?.address?.hostAddress
             if (remoteAddr != null) {
                 clientAddress = remoteAddr
+                hasConnectedPeerInGroup = true
                 Log.d(TAG, "📍 Captured peer address: $remoteAddr")
             }
-            
+
             inputStream = DataInputStream(BufferedInputStream(socket.getInputStream(), BUFFER_SIZE))
             val socketOut = socket.getOutputStream()
-            
-            // Read file header: name length (4 bytes)
-            val nameLength = inputStream.readInt()
-            if (nameLength == -1) {
-                // Client IP registration ping
+
+            // Read first integer (either HEADER_MAGIC_PING, HEADER_MAGIC_V2, or legacy nameLength)
+            val firstInt = inputStream.readInt()
+            if (firstInt == HEADER_MAGIC_PING) {
                 socketOut.write(1)
                 socketOut.flush()
                 Log.d(TAG, "📍 Handled client IP registration ping from $remoteAddr")
+                val conn = currentConnection
+                if (conn != null && conn.groupFormed && conn.isGroupOwner) {
+                    notifyCallbacks { onConnected(conn) }
+                }
                 return
             }
-            if (nameLength <= 0 || nameLength > 4096) {
-                Log.e(TAG, "Invalid incoming file name length: $nameLength")
+
+            val nameLength: Int
+            val rawFileName: String
+            val fileSize: Long
+            var fileIndex = 1
+            var totalFiles = 1
+            var senderName = "Nearby Device"
+
+            if (firstInt == HEADER_MAGIC_V2) {
+                nameLength = inputStream.readInt()
+                if (nameLength <= 0 || nameLength > 4096) {
+                    Log.e(TAG, "Invalid incoming V2 file name length: $nameLength")
+                    socketOut.write(0)
+                    socketOut.flush()
+                    return
+                }
+                val nameBytes = ByteArray(nameLength)
+                inputStream.readFully(nameBytes)
+                rawFileName = String(nameBytes, Charsets.UTF_8)
+                fileSize = inputStream.readLong()
+                fileIndex = inputStream.readInt().coerceAtLeast(1)
+                totalFiles = inputStream.readInt().coerceAtLeast(1)
+                val senderLen = inputStream.readInt()
+                if (senderLen in 1..512) {
+                    val senderBytes = ByteArray(senderLen)
+                    inputStream.readFully(senderBytes)
+                    senderName = String(senderBytes, Charsets.UTF_8)
+                }
+            } else {
+                nameLength = firstInt
+                if (nameLength <= 0 || nameLength > 4096) {
+                    Log.e(TAG, "Invalid incoming file name length: $nameLength")
+                    socketOut.write(0)
+                    socketOut.flush()
+                    return
+                }
+                val nameBytes = ByteArray(nameLength)
+                inputStream.readFully(nameBytes)
+                rawFileName = String(nameBytes, Charsets.UTF_8)
+                fileSize = inputStream.readLong()
+            }
+
+            val baseSafeName = File(rawFileName).name.ifBlank { "received_file_${System.currentTimeMillis()}" }
+            if (fileSize <= 0L || fileSize > 10L * 1024 * 1024 * 1024) {
+                Log.e(TAG, "Invalid incoming file size: $fileSize")
                 socketOut.write(0)
                 socketOut.flush()
                 return
             }
 
-            val nameBytes = ByteArray(nameLength)
-            inputStream.readFully(nameBytes)
-            val rawFileName = String(nameBytes, Charsets.UTF_8)
-            safeFileName = File(rawFileName).name.ifBlank { "received_file_${System.currentTimeMillis()}" }
-            val fileSize = inputStream.readLong()
+            // Resolve target output path upfront so safeFileName stays consistent across all callbacks
+            val targetDir = File(getExternalFilesDir(null), "received_files")
+            if (!targetDir.exists()) targetDir.mkdirs()
+            var resolvedFile = File(targetDir, baseSafeName)
+            if (resolvedFile.exists()) {
+                val dotIndex = baseSafeName.lastIndexOf('.')
+                val base = if (dotIndex > 0) baseSafeName.substring(0, dotIndex) else baseSafeName
+                val ext = if (dotIndex > 0) baseSafeName.substring(dotIndex) else ""
+                var counter = 1
+                while (resolvedFile.exists()) {
+                    resolvedFile = File(targetDir, "$base ($counter)$ext")
+                    counter++
+                }
+            }
+            outFile = resolvedFile
+            safeFileName = resolvedFile.name
+
             isTransferCancelled = false
             activeTransferSocket = socket
 
@@ -724,19 +1008,22 @@ class WifiDirectService : Service() {
             val now = System.currentTimeMillis()
             val isRecentlyApprovedPeer = remoteAddr != null &&
                 remoteAddr == lastAcceptedPeerAddress &&
-                (now - lastAcceptedTimestamp) < 60_000L
+                (now - lastAcceptedTimestamp) < 120_000L
 
             if (isNfcTrustedSession || isRecentlyApprovedPeer) {
-                Log.d(TAG, "✅ Auto-accepting file from trusted/approved session: $safeFileName")
+                Log.d(TAG, "✅ Auto-accepting file from trusted/approved session: $safeFileName ($fileIndex/$totalFiles)")
+                isNfcTrustedSession = false
             } else {
-                Log.d(TAG, "🔒 Requesting user confirmation for: $safeFileName ($fileSize bytes)")
-                notifyCallbacks { onFileTransferRequested(safeFileName, fileSize) }
-                
+                Log.d(TAG, "🔒 Requesting user confirmation for: $safeFileName ($fileSize bytes, $fileIndex/$totalFiles) from $senderName")
+                notifyCallbacks {
+                    onFileTransferRequested(safeFileName, fileSize, fileIndex, totalFiles, senderName)
+                }
+
                 // Wait for UI to confirm or reject
                 val deferred = CompletableDeferred<Boolean>()
                 pendingConfirmation = deferred
                 val accepted = try {
-                    withTimeout(30_000) {
+                    withTimeout(60_000) {
                         deferred.await()
                     }
                 } catch (e: Exception) {
@@ -747,7 +1034,7 @@ class WifiDirectService : Service() {
                         pendingConfirmation = null
                     }
                 }
-                
+
                 if (!accepted) {
                     Log.w(TAG, "❌ File transfer rejected by user or timeout: $safeFileName")
                     runCatching {
@@ -768,29 +1055,13 @@ class WifiDirectService : Service() {
             socketOut.write(1)
             socketOut.flush()
 
-            val targetDir = File(getExternalFilesDir(null), "received_files")
-            if (!targetDir.exists()) targetDir.mkdirs()
-            var resolvedFile = File(targetDir, safeFileName)
-            if (resolvedFile.exists()) {
-                val dotIndex = safeFileName.lastIndexOf('.')
-                val base = if (dotIndex > 0) safeFileName.substring(0, dotIndex) else safeFileName
-                val ext = if (dotIndex > 0) safeFileName.substring(dotIndex) else ""
-                var counter = 1
-                while (resolvedFile.exists()) {
-                    resolvedFile = File(targetDir, "$base ($counter)$ext")
-                    counter++
-                }
-            }
-            outFile = resolvedFile
-            safeFileName = resolvedFile.name
-
             fileOutputStream = BufferedOutputStream(FileOutputStream(resolvedFile), BUFFER_SIZE)
 
             val buffer = ByteArray(BUFFER_SIZE)
             var totalBytesRead = 0L
             var lastReportedProgress = -1
 
-            notifyCallbacks { onFileTransferStarted(safeFileName, fileSize) }
+            notifyCallbacks { onFileTransferStarted(safeFileName, fileSize, fileIndex, totalFiles) }
 
             while (totalBytesRead < fileSize) {
                 if (isTransferCancelled) {
@@ -810,6 +1081,9 @@ class WifiDirectService : Service() {
             }
 
             fileOutputStream.flush()
+            fileOutputStream.close()
+            fileOutputStream = null
+
             if (fileSize > 0L && totalBytesRead < fileSize) {
                 throw IOException("Incomplete transfer ($totalBytesRead / $fileSize bytes)")
             }
@@ -820,14 +1094,19 @@ class WifiDirectService : Service() {
                 lastAcceptedTimestamp = System.currentTimeMillis()
             }
 
-            // Send 1-byte completion ACK (2) to sender
+            // Send 1-byte completion ACK (2) to sender immediately
             runCatching {
                 socketOut.write(2)
                 socketOut.flush()
             }
 
-            notifyCallbacks { onFileTransferCompleted(safeFileName) }
-            Log.d(TAG, "✅ Received file saved to: ${resolvedFile.absolutePath}")
+            // Also publish received file to public Downloads/Seamless in background so it is visible in Gallery/Files
+            serviceScope.launch {
+                exportToPublicDownloads(resolvedFile)
+            }
+
+            notifyCallbacks { onFileTransferCompleted(safeFileName, fileIndex, totalFiles) }
+            Log.d(TAG, "✅ Received file saved to: ${resolvedFile.absolutePath} ($fileIndex/$totalFiles)")
         } catch (e: Exception) {
             Log.e(TAG, "Error receiving file", e)
             notifyCallbacks { onFileTransferFailed(safeFileName, e.message ?: "Receive failed") }
@@ -845,6 +1124,58 @@ class WifiDirectService : Service() {
             if (!transferComplete) {
                 runCatching { outFile?.takeIf { it.exists() }?.delete() }
             }
+            runCatching { if (wifiLock?.isHeld == true) wifiLock.release() }
+            runCatching { if (wakeLock?.isHeld == true) wakeLock.release() }
+        }
+    }
+
+    /**
+     * Automatically export a received file to public Downloads/Seamless so the user
+     * can access it immediately in their system Gallery, Files, and Downloads apps.
+     */
+    private fun exportToPublicDownloads(sourceFile: File) {
+        if (!sourceFile.exists() || sourceFile.length() <= 0L) return
+        try {
+            val ext = sourceFile.extension.lowercase(Locale.getDefault())
+            val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, sourceFile.name)
+                    put(MediaStore.Downloads.MIME_TYPE, mime)
+                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Seamless")
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val resolver = contentResolver
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+                if (uri != null) {
+                    resolver.openOutputStream(uri)?.use { out ->
+                        FileInputStream(sourceFile).use { input ->
+                            input.copyTo(out, BUFFER_SIZE)
+                        }
+                    }
+                    contentValues.clear()
+                    contentValues.put(MediaStore.Downloads.IS_PENDING, 0)
+                    resolver.update(uri, contentValues, null, null)
+                    Log.d(TAG, "📂 Auto-exported received file to Downloads/Seamless: ${sourceFile.name}")
+                }
+            } else {
+                val downloadsDir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "Seamless"
+                )
+                if (!downloadsDir.exists()) downloadsDir.mkdirs()
+                val destFile = File(downloadsDir, sourceFile.name)
+                sourceFile.copyTo(destFile, overwrite = true)
+                MediaScannerConnection.scanFile(
+                    this,
+                    arrayOf(destFile.absolutePath),
+                    arrayOf(mime),
+                    null
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Auto-export to public Downloads note: ${e.message}")
         }
     }
 
@@ -892,48 +1223,91 @@ class WifiDirectService : Service() {
                 }
 
                 WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
-                    val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        ActivityCompat.checkSelfPermission(this@WifiDirectService, Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED
-                    } else {
-                        ActivityCompat.checkSelfPermission(this@WifiDirectService, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-                    }
-
-                    if (!hasPermission) {
+                    if (!hasWifiDirectPermission()) {
                         Log.w(TAG, "Missing permission for Wi‑Fi Direct peer discovery callback")
                         return
                     }
 
                     wifiP2pManager.requestPeers(channel) { peers ->
                         Log.d(TAG, "Peers discovered: ${peers.deviceList.size}")
-                        
+
                         if (peers.deviceList.isNotEmpty()) {
                             lastDeviceFoundTime = System.currentTimeMillis()
                             discoveryRetryCount = 0
                         }
-                        
-                        notifyCallbacks { onPeersDiscovered(peers.deviceList) }
+
+                        val enrichedPeers = peers.deviceList.map { rawPeer ->
+                            val copy = WifiP2pDevice(rawPeer)
+                            val addr = copy.deviceAddress?.lowercase(Locale.US)
+                            val dnsAlias = if (addr != null) dnsSdAliases[addr] else null
+                            if (!dnsAlias.isNullOrBlank()) {
+                                copy.deviceName = dnsAlias
+                            }
+                            copy
+                        }
+
+                        notifyCallbacks { onPeersDiscovered(enrichedPeers) }
                     }
                 }
 
                 WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
                     @Suppress("DEPRECATION")
                     val wifiP2pInfo = intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_INFO) as? WifiP2pInfo
+                    @Suppress("DEPRECATION")
+                    val wifiP2pGroup = intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_GROUP) as? WifiP2pGroup
 
                     currentConnection = wifiP2pInfo
 
                     if (wifiP2pInfo?.groupFormed == true) {
-                        Log.d(TAG, "Connected to group: ${wifiP2pInfo.groupOwnerAddress} (isGroupOwner=${wifiP2pInfo.isGroupOwner})")
+                        Log.d(TAG, "P2P group formed: ${wifiP2pInfo.groupOwnerAddress} (isGroupOwner=${wifiP2pInfo.isGroupOwner})")
                         // Start receive server on BOTH roles (owner + client)
                         serviceScope.launch {
                             startReceiveServer()
                         }
-                        // If we are the client, send an immediate IP registration ping to the group owner
                         if (!wifiP2pInfo.isGroupOwner) {
+                            // We are Client — we are definitely connected to the Group Owner
+                            hasConnectedPeerInGroup = true
                             sendClientRegistrationPing(wifiP2pInfo.groupOwnerAddress?.hostAddress)
+                            notifyCallbacks { onConnected(wifiP2pInfo) }
+                        } else {
+                            // We are Group Owner — verify whether an actual Client is connected
+                            val directClients = wifiP2pGroup?.clientList.orEmpty()
+                            if (directClients.isNotEmpty()) {
+                                hasConnectedPeerInGroup = true
+                                connectedClientMacs.clear()
+                                directClients.forEach { c ->
+                                    if (!c.deviceAddress.isNullOrBlank()) {
+                                        connectedClientMacs.add(c.deviceAddress)
+                                    }
+                                }
+                                notifyCallbacks { onConnected(wifiP2pInfo) }
+                            } else {
+                                val ch = channel
+                                if (ch != null && hasWifiDirectPermission()) {
+                                    wifiP2pManager.requestGroupInfo(ch) { groupInfo ->
+                                        val clients = groupInfo?.clientList.orEmpty()
+                                        if (clients.isNotEmpty() || clientAddress != null) {
+                                            hasConnectedPeerInGroup = true
+                                            connectedClientMacs.clear()
+                                            clients.forEach { c ->
+                                                if (!c.deviceAddress.isNullOrBlank()) {
+                                                    connectedClientMacs.add(c.deviceAddress)
+                                                }
+                                            }
+                                            notifyCallbacks { onConnected(wifiP2pInfo) }
+                                        } else {
+                                            hasConnectedPeerInGroup = false
+                                            Log.d(TAG, "Autonomous group has 0 clients — waiting for peer connection before firing onConnected")
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        notifyCallbacks { onConnected(wifiP2pInfo) }
                     } else {
                         Log.d(TAG, "Disconnected from group")
+                        isNfcTrustedSession = false
+                        hasConnectedPeerInGroup = false
+                        connectedClientMacs.clear()
                         clientAddress = null
                         lastAcceptedPeerAddress = null
                         notifyCallbacks { onDisconnected() }
@@ -967,9 +1341,24 @@ interface WifiDirectCallback {
     fun onConnected(connectionInfo: WifiP2pInfo) {}
     fun onDisconnected() {}
     fun onThisDeviceChanged(device: WifiP2pDevice) {}
-    fun onFileTransferRequested(fileName: String, fileSize: Long) {} // Request user permission
-    fun onFileTransferStarted(fileName: String, fileSize: Long) {}
+    fun onFileTransferRequested(
+        fileName: String,
+        fileSize: Long,
+        fileIndex: Int = 1,
+        totalFiles: Int = 1,
+        senderName: String = "Nearby Device"
+    ) {}
+    fun onFileTransferStarted(
+        fileName: String,
+        fileSize: Long,
+        fileIndex: Int = 1,
+        totalFiles: Int = 1
+    ) {}
     fun onFileTransferProgress(fileName: String, progress: Int, bytesTransferred: Long) {}
-    fun onFileTransferCompleted(fileName: String) {}
+    fun onFileTransferCompleted(
+        fileName: String,
+        fileIndex: Int = 1,
+        totalFiles: Int = 1
+    ) {}
     fun onFileTransferFailed(fileName: String, error: String) {}
 }

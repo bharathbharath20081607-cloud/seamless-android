@@ -141,7 +141,7 @@ class ProfileManager private constructor(private val context: Context) {
             
             // Copy stream
             destFile.outputStream().use { output ->
-                inputStream.copyTo(output)
+                inputStream.use { input -> input.copyTo(output) }
             }
             
             // Return file URI

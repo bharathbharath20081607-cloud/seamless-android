@@ -283,10 +283,16 @@ class SyncDatabase private constructor(context: Context) :
      */
     fun cleanupDisconnectedPeers(connectedPeerIds: Set<String>) {
         val db = writableDatabase
-        db.execSQL("""
-            UPDATE $TABLE_SYNC_SESSIONS SET $COL_SYNC_STATE = 'idle'
-            WHERE $COL_PEER_ID NOT IN (${connectedPeerIds.joinToString(",") { "'$it'" }})
-        """)
+        // SECURITY: parameterized query (no string interpolation); also safe for an empty set
+        if (connectedPeerIds.isEmpty()) {
+            db.execSQL("UPDATE $TABLE_SYNC_SESSIONS SET $COL_SYNC_STATE = 'idle'")
+        } else {
+            val placeholders = connectedPeerIds.joinToString(",") { "?" }
+            db.execSQL(
+                "UPDATE $TABLE_SYNC_SESSIONS SET $COL_SYNC_STATE = 'idle' WHERE $COL_PEER_ID NOT IN ($placeholders)",
+                connectedPeerIds.toTypedArray()
+            )
+        }
     }
 
     /**

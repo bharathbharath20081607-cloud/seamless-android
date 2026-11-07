@@ -440,7 +440,7 @@ fun DeviceDiscoveryScreen(
                     IconButton(
                         onClick = {
                             viewModel.stopDeviceDiscovery()
-                            viewModel.startDeviceDiscovery()
+                            if (isHosting) viewModel.startHosting() else viewModel.startDeviceDiscovery()
                         }
                     ) {
                         Icon(
@@ -635,7 +635,7 @@ fun DeviceDiscoveryScreen(
                             EmptyDeviceState(
                                 onScanAgain = {
                                     viewModel.stopDeviceDiscovery()
-                                    viewModel.startDeviceDiscovery()
+                                    if (isHosting) viewModel.startHosting() else viewModel.startDeviceDiscovery()
                                 }
                             )
                         }
@@ -727,7 +727,7 @@ fun DeviceDiscoveryScreen(
 
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            text = "Device wants to send you a file:",
+                                            text = if (request.totalFiles > 1) "${request.senderName} wants to send ${request.totalFiles} files:" else "${request.senderName} wants to send you a file:",
                                             style = HyperDropTypography.BodySmall
                                         )
                                         Spacer(modifier = Modifier.height(HyperDropSpacing.xs))

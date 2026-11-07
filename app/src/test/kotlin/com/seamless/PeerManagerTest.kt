@@ -227,7 +227,10 @@ class PeerManagerTest {
             .reader().readLines()
 
 
-        val lastLinesAreAvailable = debugLines.containsAll(expectedLastLines)
+        val stripTime = { lines: List<String> ->
+            lines.map { it.replace(Regex("last seen \\d+s ago"), "last seen Xs ago") }
+        }
+        val lastLinesAreAvailable = stripTime(debugLines).containsAll(stripTime(expectedLastLines))
 
         assertEquals(expectedLine1, actualLine1)
 

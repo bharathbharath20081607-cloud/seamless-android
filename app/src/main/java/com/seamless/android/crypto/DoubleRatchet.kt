@@ -226,12 +226,27 @@ class DoubleRatchet private constructor(
         // Try skipped message keys first
         val skippedKey = trySkippedMessageKeys(header, headerBytes)
         if (skippedKey != null) {
-            val plaintext = aeadDecrypt(skippedKey, message.ciphertext, message.nonce, headerBytes)
+            val plaintext = try {
+                aeadDecrypt(skippedKey, message.ciphertext, message.nonce, headerBytes)
+            } catch (e: Exception) {
+                skippedMessageKeys[Pair(header.dhPublicKey.clone(), header.messageNumber)] = skippedKey
+                throw e
+            }
             skippedKey.fill(0)
             return plaintext
         }
         
         // Check if we need to perform a DH ratchet step
+        val prevRootKey = rootKey.clone()
+        val prevSendingChainKey = sendingChainKey?.clone()
+        val prevReceivingChainKey = receivingChainKey?.clone()
+        val prevDhKeyPair = dhKeyPair
+        val prevRemoteDH = remoteDHPublicKey?.clone()
+        val prevSendNum = sendMessageNumber
+        val prevRecvNum = receiveMessageNumber
+        val prevChainLen = previousSendingChainLength
+        val prevSkipped = HashMap(skippedMessageKeys)
+        try {
         if (remoteDHPublicKey == null || !header.dhPublicKey.contentEquals(remoteDHPublicKey)) {
             skipMessageKeys(header.previousChainLength)
             performDHRatchet(header.dhPublicKey)
@@ -256,6 +271,19 @@ class DoubleRatchet private constructor(
         messageKey.fill(0)
         
         return plaintext
+        } catch (e: Exception) {
+            rootKey = prevRootKey
+            sendingChainKey = prevSendingChainKey
+            receivingChainKey = prevReceivingChainKey
+            dhKeyPair = prevDhKeyPair
+            remoteDHPublicKey = prevRemoteDH
+            sendMessageNumber = prevSendNum
+            receiveMessageNumber = prevRecvNum
+            previousSendingChainLength = prevChainLen
+            skippedMessageKeys.clear()
+            skippedMessageKeys.putAll(prevSkipped)
+            throw e
+        }
     }
     
     /**
@@ -714,16 +742,23 @@ data class RatchetMessage(
         fun decode(data: ByteArray): RatchetMessage {
             val buffer = ByteBuffer.wrap(data)
             
+            // SECURITY: validate every attacker-controlled length before allocating
+            require(data.size >= 12) { "RatchetMessage too short" }
             val headerSize = buffer.int
+            require(headerSize in 1..buffer.remaining()) { "Invalid headerSize: $headerSize" }
             val headerBytes = ByteArray(headerSize)
             buffer.get(headerBytes)
             val header = RatchetHeader.decode(headerBytes)
             
+            require(buffer.remaining() >= 4) { "Truncated RatchetMessage" }
             val nonceSize = buffer.int
+            require(nonceSize in 1..buffer.remaining()) { "Invalid nonceSize: $nonceSize" }
             val nonce = ByteArray(nonceSize)
             buffer.get(nonce)
             
+            require(buffer.remaining() >= 4) { "Truncated RatchetMessage" }
             val ciphertextSize = buffer.int
+            require(ciphertextSize in 0..buffer.remaining()) { "Invalid ciphertextSize: $ciphertextSize" }
             val ciphertext = ByteArray(ciphertextSize)
             buffer.get(ciphertext)
             

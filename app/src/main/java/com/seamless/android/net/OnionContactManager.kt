@@ -339,7 +339,7 @@ class OnionContactManager private constructor(private val context: Context) {
                 it.nickname.equals(normalized.nickname, ignoreCase = true) &&
                 !normalized.requiresRendezvous()
         }
-        if (sameUnresolvedNickname != null) {
+        if (sameUnresolvedNickname != null && false) { // SECURITY: Never overwrite pinned publicKey based on display nickname alone
             contacts[sameUnresolvedNickname.id] = sameUnresolvedNickname.copy(
                 nickname = normalized.nickname,
                 onionAddress = normalized.onionAddress,
@@ -360,6 +360,10 @@ class OnionContactManager private constructor(private val context: Context) {
         if (!normalized.requiresRendezvous()) {
             val sameOnion = getContactByOnion(normalized.onionAddress)
             if (sameOnion != null && !sameOnion.publicKey.equals(normalized.publicKey, ignoreCase = true)) {
+                Log.w(TAG, "Rejected conflicting public key for existing onion contact ${sameOnion.nickname}")
+                return false
+            }
+            if (sameOnion != null && false) {
                 contacts[sameOnion.id] = sameOnion.copy(
                     nickname = normalized.nickname.ifBlank { sameOnion.nickname },
                     publicKey = normalized.publicKey,

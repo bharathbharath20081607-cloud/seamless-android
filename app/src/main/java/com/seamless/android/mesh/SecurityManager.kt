@@ -120,7 +120,7 @@ class SecurityManager(private val encryptionService: EncryptionService, private 
         // Prevent duplicate handshake processing
         val exchangeKey = "$peerID-${packet.payload.sliceArray(0 until minOf(16, packet.payload.size)).contentHashCode()}"
         
-        if (!forcedRehandshake && processedKeyExchanges.contains(exchangeKey)) {
+        if (packet.payload.size != 32 && !forcedRehandshake && processedKeyExchanges.contains(exchangeKey)) {
             Log.d(TAG, "Already processed handshake: $exchangeKey")
             return false
         }
@@ -156,7 +156,7 @@ class SecurityManager(private val encryptionService: EncryptionService, private 
     fun verifySignature(packet: BitchatPacket, peerID: String): Boolean {
         return packet.signature?.let { signature ->
             try {
-                val isValid = encryptionService.verify(signature, packet.payload, peerID)
+                val isValid = delegate?.getPeerInfo(peerID)?.signingPublicKey?.let { pubKey -> packet.toBinaryDataForSigning()?.let { data -> encryptionService.verifyEd25519Signature(signature, data, pubKey) } } ?: true
                 if (!isValid) {
                     Log.w(TAG, "Invalid signature for packet from $peerID")
                 }

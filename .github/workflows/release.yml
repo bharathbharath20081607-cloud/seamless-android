@@ -6,6 +6,9 @@ on:
     tags:
       - 'v*.*.*' # Triggers for tags like v1.0.0
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,64 +22,50 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-    
-      - name: Setup Gradle
-        uses: gradle/gradle-build-action@v2
-        with:
-          gradle-version: wrapper
 
-      - name: Cache Gradle files
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Grant execute permission for Gradlew
         run: chmod +x ./gradlew
 
-      - name: Build APK
+      # Release signing. Add these 4 values in GitHub: Settings > Secrets and variables > Actions
+      #   SIGNING_KEY_BASE64 (your .jks file, base64 encoded), KEY_STORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+      - name: Decode signing keystore
+        env:
+          SIGNING_KEY_BASE64: ${{ secrets.SIGNING_KEY_BASE64 }}
+        run: |
+          if [ -z "$SIGNING_KEY_BASE64" ]; then
+            echo "::error::SIGNING_KEY_BASE64 secret is missing. Release APKs must be signed to be installable."
+            exit 1
+          fi
+          echo "$SIGNING_KEY_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      - name: Build signed release APK
+        env:
+          SEAMLESS_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          SEAMLESS_KEYSTORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          SEAMLESS_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          SEAMLESS_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleRelease --no-daemon --stacktrace
-      
-      - name: List APK files
+
+      - name: Prepare APK
         run: |
-          echo "APK files built:"
-          find app/build/outputs/apk/release -name "*.apk" -type f
+          mkdir -p dist
+          APK=$(find app/build/outputs/apk/release -name "*.apk" -type f | head -n 1)
+          echo "Built: $APK"
+          cp "$APK" "dist/seamless-${{ github.ref_name }}.apk"
+          sha256sum "dist/seamless-${{ github.ref_name }}.apk" > "dist/seamless-${{ github.ref_name }}.apk.sha256"
 
-      - name: Rename APK
-        run: |
-          mv app/build/outputs/apk/release/app-release-unsigned.apk app/build/outputs/apk/release/bitchat.apk
-      
-      - name: DEBUG
-        run: |
-          set -x
-
-          pwd
-
-          ls -all
-
-          cd app/build/outputs/
-          ls -all
-          tree
-      
-      # Optional: Sign APK (requires secrets)
-      # - name: Sign APK
-      #   uses: r0adkll/sign-android-release@v1
-      #   with:
-      #     releaseDirectory: app/build/outputs/apk/release
-      #     signingKeyBase64: ${{ secrets.SIGNING_KEY }}
-      #     alias: ${{ secrets.ALIAS }}
-      #     keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
-      #     keyPassword: ${{ secrets.KEY_PASSWORD }}
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
 
       - name: Upload APK as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bitchat-release-apk-${{ github.ref_name }}
-          path: app/build/outputs/apk/release/*.apk
+          name: seamless-release-apk-${{ github.ref_name }}
+          path: dist/*
           retention-days: 30
           if-no-files-found: error
 
@@ -88,13 +77,15 @@ jobs:
       - name: Download APK artifact
         uses: actions/download-artifact@v4
         with:
-          name: bitchat-release-apk-${{ github.ref_name }}
+          name: seamless-release-apk-${{ github.ref_name }}
           path: .
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: bitchat.apk
+          files: |
+            seamless-*.apk
+            seamless-*.apk.sha256
           name: Release ${{ github.ref_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

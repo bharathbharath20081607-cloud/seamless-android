@@ -777,6 +777,7 @@ class MainActivity : OrientationAwareActivity() {
     
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        nfcHandoverService.handleNfcIntent(intent)
         // Handle notification intents when app is already running
         if (mainViewModel.onboardingState.value == OnboardingState.COMPLETE) {
             handleNotificationIntent(intent)

@@ -219,6 +219,7 @@ class TorDaemonManager private constructor(private val application: Application)
 
             // Start Tor
             wrapper.start()
+            applyIpv6Preference(wrapper)
             
             // Enable networking
             wrapper.enableNetwork(true)
@@ -598,6 +599,7 @@ class TorDaemonManager private constructor(private val application: Application)
         try {
             val wrapper = torWrapper
             if (wrapper != null && wrapper.isTorRunning) {
+                applyIpv6Preference(wrapper)
                 wrapper.enableNetwork(enable)
                 Log.i(TAG, "🔌 Tor networking ${if (enable) "enabled" else "disabled"}")
                 
@@ -675,6 +677,46 @@ class TorDaemonManager private constructor(private val application: Application)
     }
     
     // ===== Bridge Configuration =====
+
+    /**
+     * Enables IPv6 guard connections only when the active network has a real
+     * global IPv6 default route. Many mobile carriers and home routers hand out
+     * IPv6 addresses with broken routing, which makes Tor loop on
+     * "No route to host (os error 113)" and stay at 0% bootstrap.
+     */
+    private fun applyIpv6Preference(wrapper: TorWrapper) {
+        val hasIpv6 = hasUsableIpv6Route()
+        try {
+            wrapper.enableIpv6(hasIpv6)
+            Log.i(TAG, "IPv6 guard connections ${if (hasIpv6) "enabled" else "disabled (IPv4 only)"}")
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not apply IPv6 preference: ${e.message}")
+        }
+    }
+
+    private fun hasUsableIpv6Route(): Boolean {
+        return try {
+            val cm = application.getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
+                as? android.net.ConnectivityManager ?: return false
+            val network = cm.activeNetwork ?: return false
+            val props = cm.getLinkProperties(network) ?: return false
+            val hasGlobalV6 = props.linkAddresses.any { la ->
+                val addr = la.address
+                addr is java.net.Inet6Address && !addr.isLinkLocalAddress &&
+                    !addr.isSiteLocalAddress && !addr.isLoopbackAddress &&
+                    (addr.address[0].toInt() and 0xFE) != 0xFC // exclude ULA fc00::/7
+            }
+            val hasV6Default = props.routes.any { route ->
+                route.destination.address is java.net.Inet6Address &&
+                    route.destination.prefixLength == 0
+            }
+            val hasV4 = props.linkAddresses.any { it.address is java.net.Inet4Address }
+            // IPv6-only networks (NAT64/464XLAT) must keep IPv6 on.
+            (hasGlobalV6 && hasV6Default) || !hasV4
+        } catch (e: Exception) {
+            false
+        }
+    }
     
     /**
      * Write bridge/PT configuration to daemon's torrc before starting.

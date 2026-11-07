@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.sp
 import com.seamless.android.net.OnionContactManager
 import com.seamless.android.ui.theme.SeamlessTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * AddContactActivity - Handles seamless:// deep links for adding P2P contacts
@@ -42,7 +43,8 @@ class AddContactActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         
         val contactLink = intent?.data?.toString() ?: ""
-        Log.i(TAG, "Received deep link: $contactLink")
+        // SECURITY: never log the link itself (contains .onion address, public key, nickname)
+        Log.i(TAG, "Received contact deep link (length=${contactLink.length})")
         
         setContent {
             SeamlessTheme {
@@ -76,34 +78,37 @@ fun AddContactScreen(
     val context = LocalContext.current
     val contactManager = remember { OnionContactManager.getInstance(context) }
     
+    // SECURITY: a deep link can be fired by any web page or app, so we only PARSE it here
+    // and require an explicit user tap on "Add" before anything is saved.
+    var pendingContact by remember { mutableStateOf<OnionContactManager.OnionContact?>(null) }
+    val scope = rememberCoroutineScope()
+
     LaunchedEffect(contactLink) {
         if (contactLink.isNotEmpty()) {
             try {
                 val contact = OnionContactManager.OnionContact.fromShareableLink(contactLink)
-                
                 if (contact != null) {
-                    contactName = contact.nickname
-                    val success = contactManager.addContact(contact)
-                    
-                    if (success) {
-                        contactAdded = true
-                    } else {
-                        errorMessage = "Contact already exists"
-                    }
+                    contactName = contact.nickname.take(64)
+                    pendingContact = contact
                 } else {
                     errorMessage = "Invalid contact link"
                 }
             } catch (e: Exception) {
-                Log.e("AddContactScreen", "Error adding contact: ${e.message}")
-                errorMessage = "Failed to add contact: ${e.message}"
+                Log.e("AddContactScreen", "Error parsing contact link: ${e.javaClass.simpleName}")
+                errorMessage = "Invalid contact link"
             }
-            
             isProcessing = false
-            delay(2000)
-            onComplete(contactAdded)
         } else {
             errorMessage = "No contact link provided"
             isProcessing = false
+        }
+    }
+
+    // After a successful, user-confirmed add: show success briefly then continue.
+    LaunchedEffect(contactAdded) {
+        if (contactAdded) {
+            delay(1500)
+            onComplete(true)
         }
     }
     
@@ -156,6 +161,56 @@ fun AddContactScreen(
                         )
                     }
                     
+                    pendingContact != null && !contactAdded -> {
+                        Text(
+                            text = "Add this contact?",
+                            color = Color.White,
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = contactName,
+                            color = Color(0xFF00D4AA),
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "Only add people you trust. This link was opened from outside the app.",
+                            color = Color.White.copy(alpha = 0.7f),
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(24.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Button(
+                                onClick = { onComplete(false) },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF94A3B8))
+                            ) { Text("Cancel") }
+                            Button(
+                                onClick = {
+                                    val contact = pendingContact
+                                    pendingContact = null
+                                    if (contact != null) {
+                                        scope.launch {
+                                            try {
+                                                if (contactManager.addContact(contact)) {
+                                                    contactAdded = true
+                                                } else {
+                                                    errorMessage = "Contact already exists"
+                                                }
+                                            } catch (e: Exception) {
+                                                errorMessage = "Failed to add contact"
+                                            }
+                                        }
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00D4AA))
+                            ) { Text("Add") }
+                        }
+                    }
+
                     contactAdded -> {
                         Icon(
                             imageVector = Icons.Default.CheckCircle,

@@ -86,7 +86,7 @@ public class Blake2bMessageDigest extends MessageDigest implements Destroyable {
 			buf[offset++] = (byte)(value >> 48);
 			buf[offset++] = (byte)(value >> 56);
 		}
-		return 32;
+		return 64;
 	}
 
 	@Override

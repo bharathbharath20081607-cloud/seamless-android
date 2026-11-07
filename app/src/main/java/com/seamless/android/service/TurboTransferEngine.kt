@@ -141,6 +141,11 @@ class TurboTransferEngine(private val context: Context) {
         // Reset speed tracking
         lastBytesTransferred = 0
         lastTimestamp = System.currentTimeMillis()
+        val wifiLock = runCatching {
+            val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY else android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            wm?.createWifiLock(mode, "seamless:hyperdrop_tx")?.apply { setReferenceCounted(false); acquire() }
+        }.getOrNull()
         
         try {
             // Strategy: Try NAN Data Path first (fastest), fallback to Wi-Fi Direct
@@ -172,9 +177,11 @@ class TurboTransferEngine(private val context: Context) {
             
             // Perform the actual transfer
             performSend(socket, file, fileName)
+            runCatching { if (wifiLock?.isHeld == true) wifiLock.release() }
             true
             
         } catch (e: Exception) {
+            runCatching { if (wifiLock?.isHeld == true) wifiLock.release() }
             Log.e(TAG, "Transfer failed: ${e.message}", e)
             callback?.onTransferFailed(fileName, e.message ?: "Transfer failed")
             false
@@ -440,10 +447,13 @@ class TurboTransferEngine(private val context: Context) {
         DataInputStream(BufferedInputStream(socket.getInputStream(), TRANSFER_BUFFER_SIZE)).use { input ->
             // Read header
             val nameLength = input.readInt()
+            // SECURITY: bound attacker-controlled sizes before allocating / writing
+            if (nameLength !in 1..4096) throw java.io.IOException("Invalid file name length: $nameLength")
             val nameBytes = ByteArray(nameLength)
             input.readFully(nameBytes)
             val fileName = String(nameBytes, Charsets.UTF_8)
             val fileSize = input.readLong()
+            if (fileSize <= 0L || fileSize > 8L * 1024 * 1024 * 1024) throw java.io.IOException("Invalid file size: $fileSize")
             
             Log.d(TAG, "📥 Receiving: $fileName, size=$fileSize")
             

@@ -297,7 +297,7 @@ class SecureQueueDatabase private constructor(context: Context) {
             // Calculate exponential backoff with jitter
             val baseDelay = 5000L
             val maxDelay = 300000L
-            val delay = minOf(baseDelay * (1 shl retryCount) + (Math.random() * 1000).toLong(), maxDelay)
+            val delay = minOf(baseDelay * (1L shl minOf(retryCount, 10)) + (Math.random() * 1000).toLong(), maxDelay) // SECURITY/BUG: Long shift, clamped (Int shift overflowed)
             val nextRetry = now + delay
             
             db.execSQL(

@@ -348,7 +348,7 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
         // Ignore stale announcements older than STALE_PEER_TIMEOUT
         val now = System.currentTimeMillis()
         val age = now - packet.timestamp.toLong()
-        if (age > com.seamless.android.util.AppConstants.Mesh.STALE_PEER_TIMEOUT_MS) {
+        if (kotlin.math.abs(age) > 86_400_000L) {
             Log.w(TAG, "Ignoring stale ANNOUNCE from ${peerID.take(8)} (age=${age}ms > ${com.seamless.android.util.AppConstants.Mesh.STALE_PEER_TIMEOUT_MS}ms)")
             return false
         }
@@ -510,6 +510,10 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
         // Enforce: accept public messages from verified peers or packets carrying an Ed25519 signature,
         // and proactively request an ANNOUNCE if we missed the peer's initial announcement.
         val peerInfo = delegate?.getPeerInfo(peerID)
+        if (peerInfo?.signingPublicKey != null && packet.signature != null && delegate?.verifySignature(packet, peerID) == false) {
+            Log.w(TAG, "🚫 Dropping public message with invalid Ed25519 signature from ${peerID.take(8)}...")
+            return
+        }
         if (peerInfo == null || !peerInfo.isVerifiedNickname) {
             delegate?.sendAnnouncementToPeer(peerID)
             if (packet.signature == null) {
@@ -677,6 +681,11 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
         val peerID = routed.peerID ?: "unknown"
         val content = String(packet.payload, Charsets.UTF_8)
         
+        val peerInfo = delegate?.getPeerInfo(peerID)
+        if (peerInfo?.signingPublicKey != null && packet.signature != null && delegate?.verifySignature(packet, peerID) == false) {
+            Log.w(TAG, "🚫 Ignoring forged LEAVE packet for ${peerID.take(8)}...")
+            return
+        }
         if (content.startsWith("#")) {
             // Channel leave
             delegate?.onChannelLeave(content, peerID)

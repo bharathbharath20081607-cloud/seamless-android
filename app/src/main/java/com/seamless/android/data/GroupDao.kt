@@ -82,7 +82,7 @@ interface GroupDao {
         WHERE id IN (
             SELECT id FROM group_messages 
             GROUP BY groupId 
-            HAVING timestamp = MAX(timestamp)
+            HAVING timestamp = MAX(timestamp) OR id = (SELECT g2.id FROM group_messages g2 WHERE g2.groupId = group_messages.groupId ORDER BY g2.timestamp DESC LIMIT 1)
         )
         ORDER BY timestamp DESC
     """)

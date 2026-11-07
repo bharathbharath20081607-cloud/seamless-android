@@ -73,7 +73,7 @@ data class FragmentPayload(
          */
         fun generateFragmentID(): ByteArray {
             val fragmentID = ByteArray(FRAGMENT_ID_SIZE)
-            kotlin.random.Random.nextBytes(fragmentID)
+            java.security.SecureRandom().nextBytes(fragmentID)
             return fragmentID
         }
     }
@@ -120,7 +120,7 @@ data class FragmentPayload(
     fun isValid(): Boolean {
         return fragmentID.size == FRAGMENT_ID_SIZE &&
                index >= 0 &&
-               total > 0 &&
+               total in 1..512 &&
                index < total &&
                data.isNotEmpty()
     }

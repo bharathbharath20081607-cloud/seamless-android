@@ -47,9 +47,9 @@ fun AppLockScreen(
     )
 
     fun authenticate() {
-        val activity = context as? FragmentActivity ?: run {
+        val activity = findFragmentActivity(context) ?: run {
             Log.e("AppLockScreen", "Context is not a FragmentActivity")
-            onUnlocked() // Fail-open to avoid locking user out
+            authError = "Unable to show the unlock prompt. Please try again." // SECURITY: fail closed
             return
         }
 
@@ -60,8 +60,14 @@ fun AppLockScreen(
         )
 
         if (canAuth != BiometricManager.BIOMETRIC_SUCCESS) {
-            // Device has no biometrics or credential — fail-open
-            onUnlocked()
+            // SECURITY: only skip the lock when the device genuinely has no screen lock/biometrics
+            // (otherwise the user would be locked out forever). Transient errors must NOT unlock.
+            if (canAuth == BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED ||
+                canAuth == BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE) {
+                onUnlocked()
+            } else {
+                authError = "Biometric authentication is currently unavailable. Please try again."
+            }
             return
         }
 
@@ -198,4 +204,11 @@ fun AppLockScreen(
             }
         }
     }
+}
+
+/** Unwraps ContextWrapper/ContextThemeWrapper layers to find the hosting FragmentActivity. */
+private tailrec fun findFragmentActivity(context: android.content.Context): FragmentActivity? = when (context) {
+    is FragmentActivity -> context
+    is android.content.ContextWrapper -> findFragmentActivity(context.baseContext)
+    else -> null
 }

@@ -126,7 +126,10 @@ class GlobalExceptionHandler private constructor(
             logError(throwable, "UncaughtException on ${thread.name}")
             
             // Check if this is a recoverable error
-            if (isRecoverableError(throwable)) {
+            // Never swallow exceptions on the main thread: if the main Looper dies without the
+            // process exiting, the app freezes in a zombie state. Only background threads may recover.
+            val isMainThread = thread === android.os.Looper.getMainLooper().thread
+            if (!isMainThread && isRecoverableError(throwable)) {
                 Log.w(TAG, "⚠️ Recoverable error detected, attempting to continue...")
                 // For recoverable errors, log and don't crash
                 return

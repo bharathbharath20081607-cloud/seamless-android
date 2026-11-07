@@ -243,15 +243,15 @@ object OnionMessageProtocol {
                     val buffer = ByteBuffer.wrap(data)
                     
                     val textLen = buffer.getShort().toInt() and 0xFFFF
-                    val textBytes = ByteArray(textLen)
+                    val textBytes = ByteArray(safeLen(buffer, textLen))
                     buffer.get(textBytes)
                     
                     val replyLen = buffer.getShort().toInt() and 0xFFFF
-                    val replyBytes = ByteArray(replyLen)
+                    val replyBytes = ByteArray(safeLen(buffer, replyLen))
                     buffer.get(replyBytes)
                     
                     val attachLen = buffer.getShort().toInt() and 0xFFFF
-                    val attachBytes = ByteArray(attachLen)
+                    val attachBytes = ByteArray(safeLen(buffer, attachLen))
                     buffer.get(attachBytes)
                     
                     ChatMessage(
@@ -516,22 +516,22 @@ object OnionMessageProtocol {
                     
                     val onionLen = buffer.getShort().toInt() and 0xFFFF
                     if (onionLen !in 1..96 || onionLen > buffer.remaining()) return null
-                    val onionBytes = ByteArray(onionLen)
+                    val onionBytes = ByteArray(safeLen(buffer, onionLen))
                     buffer.get(onionBytes)
                     
                     val nickLen = buffer.getShort().toInt() and 0xFFFF
                     if (nickLen !in 1..160 || nickLen > buffer.remaining()) return null
-                    val nickBytes = ByteArray(nickLen)
+                    val nickBytes = ByteArray(safeLen(buffer, nickLen))
                     buffer.get(nickBytes)
                     
                     val keyLen = buffer.getShort().toInt() and 0xFFFF
                     if (keyLen != 64 || keyLen > buffer.remaining()) return null
-                    val keyBytes = ByteArray(keyLen)
+                    val keyBytes = ByteArray(safeLen(buffer, keyLen))
                     buffer.get(keyBytes)
                     val avatarId = if (buffer.hasRemaining()) {
                         val avatarLength = buffer.get().toInt() and 0xFF
                         if (avatarLength !in 1..16 || avatarLength > buffer.remaining()) return null
-                        String(ByteArray(avatarLength).also { buffer.get(it) }, Charsets.UTF_8)
+                        String(ByteArray(safeLen(buffer, avatarLength)).also { buffer.get(it) }, Charsets.UTF_8)
                     } else {
                         "aurora"
                     }
@@ -607,7 +607,7 @@ object OnionMessageProtocol {
             val originalMessageId = UUID(msgIdHigh, msgIdLow)
             
             val senderLen = buffer.getShort().toInt() and 0xFFFF
-            val senderBytes = ByteArray(senderLen)
+            val senderBytes = ByteArray(safeLen(buffer, senderLen))
             buffer.get(senderBytes)
             val senderOnion = String(senderBytes)
             
@@ -655,13 +655,13 @@ object OnionMessageProtocol {
                 return try {
                     val buffer = ByteBuffer.wrap(data)
                     val idsLen = buffer.getInt()
-                    val idsBytes = ByteArray(idsLen)
+                    val idsBytes = ByteArray(safeLen(buffer, idsLen))
                     buffer.get(idsBytes)
                     val ids = String(idsBytes, Charsets.UTF_8).split("\n").filter { it.isNotEmpty() }
 
                     val gcsLen = buffer.getInt()
                     val gcsData = if (gcsLen > 0) {
-                        ByteArray(gcsLen).also { buffer.get(it) }
+                        ByteArray(safeLen(buffer, gcsLen)).also { buffer.get(it) }
                     } else null
 
                     val gcsP = buffer.getInt()
@@ -702,7 +702,7 @@ object OnionMessageProtocol {
                 return try {
                     val buffer = ByteBuffer.wrap(data)
                     val idsLen = buffer.getInt()
-                    val idsBytes = ByteArray(idsLen)
+                    val idsBytes = ByteArray(safeLen(buffer, idsLen))
                     buffer.get(idsBytes)
                     val ids = String(idsBytes, Charsets.UTF_8).split("\n").filter { it.isNotEmpty() }
                     SyncRequest(ids)
@@ -741,10 +741,11 @@ object OnionMessageProtocol {
                 return try {
                     val buffer = ByteBuffer.wrap(data)
                     val count = buffer.getInt()
+                    if (count < 0 || count > buffer.remaining() / 4) return null
                     val frames = mutableListOf<ByteArray>()
                     for (i in 0 until count) {
                         val size = buffer.getInt()
-                        val frameData = ByteArray(size)
+                        val frameData = ByteArray(safeLen(buffer, size))
                         buffer.get(frameData)
                         frames.add(frameData)
                     }
@@ -776,7 +777,7 @@ object OnionMessageProtocol {
                 return try {
                     val buffer = ByteBuffer.wrap(data)
                     val idsLen = buffer.getInt()
-                    val idsBytes = ByteArray(idsLen)
+                    val idsBytes = ByteArray(safeLen(buffer, idsLen))
                     buffer.get(idsBytes)
                     val ids = String(idsBytes, Charsets.UTF_8).split("\n").filter { it.isNotEmpty() }
                     SyncAck(ids)
@@ -1018,11 +1019,11 @@ object OnionMessageProtocol {
                     val buffer = java.nio.ByteBuffer.wrap(data)
 
                     val senderLen = buffer.getShort().toInt() and 0xFFFF
-                    val senderBytes = ByteArray(senderLen)
+                    val senderBytes = ByteArray(safeLen(buffer, senderLen))
                     buffer.get(senderBytes)
 
                     val mailboxLen = buffer.getShort().toInt() and 0xFFFF
-                    val mailboxBytes = ByteArray(mailboxLen)
+                    val mailboxBytes = ByteArray(safeLen(buffer, mailboxLen))
                     buffer.get(mailboxBytes)
 
                     val capabilities = if (buffer.remaining() >= 4) buffer.getInt() else 0
@@ -1095,10 +1096,10 @@ object OnionMessageProtocol {
         return try {
             val buffer = java.nio.ByteBuffer.wrap(payload)
             val folderLen = buffer.getShort().toInt() and 0xFFFF
-            val folderBytes = ByteArray(folderLen)
+            val folderBytes = ByteArray(safeLen(buffer, folderLen))
             buffer.get(folderBytes)
             val payloadLen = buffer.getInt()
-            val encryptedPayload = ByteArray(payloadLen)
+            val encryptedPayload = ByteArray(safeLen(buffer, payloadLen))
             buffer.get(encryptedPayload)
             Pair(String(folderBytes, Charsets.UTF_8), encryptedPayload)
         } catch (e: Exception) {
@@ -1108,3 +1109,9 @@ object OnionMessageProtocol {
     }
 }
 
+
+/** SECURITY: validates an attacker-controlled length field before allocating a buffer for it. */
+private fun safeLen(buffer: java.nio.ByteBuffer, len: Int): Int {
+    if (len < 0 || len > buffer.remaining()) throw IllegalArgumentException("Invalid length field: $len")
+    return len
+}

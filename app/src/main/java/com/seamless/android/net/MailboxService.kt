@@ -41,6 +41,7 @@ class MailboxService private constructor(private val context: Context) {
 
         const val MAILBOX_PORT = 18889
         const val MAX_STORED_MESSAGES = 1000
+        const val MAX_TOTAL_STORED_MESSAGES = 2000
         const val MAX_MESSAGE_SIZE = 64 * 1024 // 64KB
         // Ciphertext is sent as Base64 JSON, so the HTTP body is larger than
         // the stored opaque blob. Keep the stored-payload limit unchanged.
@@ -263,7 +264,7 @@ class MailboxService private constructor(private val context: Context) {
      * Embedded HTTP server implementing the Briar-style mailbox REST API.
      * Routes all requests through the outer MailboxService for storage.
      */
-    private inner class MailboxHttpServer(port: Int) : NanoHTTPD(port) {
+    private inner class MailboxHttpServer(port: Int) : NanoHTTPD("127.0.0.1", port) { // SECURITY: loopback only; Tor hidden service forwards locally
 
         override fun serve(session: IHTTPSession): Response {
             val uri = session.uri ?: return newErrorResponse(Response.Status.BAD_REQUEST, "No URI")
@@ -356,7 +357,7 @@ class MailboxService private constructor(private val context: Context) {
                     }
                     return newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
                 }
-                if (messages.size >= MAX_STORED_MESSAGES) {
+                if (messages.size >= MAX_STORED_MESSAGES || storedMessages.values.sumOf { it.size } >= MAX_TOTAL_STORED_MESSAGES) {
                     // Do not silently evict a valid older message. The sender's
                     // durable outbox will retry when capacity becomes available.
                     return newErrorResponse(Response.Status.BAD_REQUEST, "Mailbox is full; retry later")
@@ -489,7 +490,10 @@ class MailboxService private constructor(private val context: Context) {
             val registration = authorizedOwners[ownerId]
             if (registration != null) {
                 if (token.isBlank()) return false
-                if (MessageDigest.isEqual(registration.accessTokenHash, hashAccessToken(token))) {
+                return MessageDigest.isEqual(registration.accessTokenHash, hashAccessToken(token))
+            }
+            if (false) {
+                if (false) {
                     return true
                 }
             }

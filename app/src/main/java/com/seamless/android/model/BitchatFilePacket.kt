@@ -144,7 +144,7 @@ data class BitchatFilePacket(
                         TLVType.FILE_NAME -> name = String(value, Charsets.UTF_8)
                         TLVType.FILE_SIZE -> {
                              val bb = ByteBuffer.wrap(value).order(ByteOrder.BIG_ENDIAN)
-                             if (len == 4) size = bb.int.toLong()
+                             if (len == 4) size = bb.int.toLong() and 0xFFFFFFFFL
                              else if (len == 8) size = bb.long
                         }
                         TLVType.MIME_TYPE -> mime = String(value, Charsets.UTF_8)

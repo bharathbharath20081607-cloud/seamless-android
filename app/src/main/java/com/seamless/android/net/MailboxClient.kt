@@ -85,6 +85,10 @@ class MailboxClient private constructor(private val context: Context) {
     // Registered mailboxes
     private val mailboxes = mutableListOf<RegisteredMailbox>()
     private val mutex = Mutex()
+    // A manual wake-up can arrive while the periodic poll is in flight. One
+    // serialized poll prevents the same mailbox entry being fetched and
+    // delivered twice before its receipt deletion completes.
+    private val pollMutex = Mutex()
 
     // Polling state
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -125,7 +129,7 @@ class MailboxClient private constructor(private val context: Context) {
     // ===== OkHttp client (routed through Tor SOCKS5) =====
 
     private val httpClient: OkHttpClient
-        get() = OkHttpProvider.httpClient()
+        get() = OkHttpProvider.torOnionHttpClient(context)
 
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
@@ -230,6 +234,21 @@ class MailboxClient private constructor(private val context: Context) {
     }
 
     /**
+     * Poll immediately after a mailbox is learned or Tor reconnects instead
+     * of making an offline message wait for the next periodic interval.
+     */
+    fun requestImmediatePoll() {
+        if (encryptionService == null) return
+        scope.launch {
+            try {
+                pollAllMailboxes()
+            } catch (e: Exception) {
+                Log.w(TAG, "Immediate mailbox poll failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
      * Stop automatic polling
      */
     fun stopPolling() {
@@ -241,7 +260,7 @@ class MailboxClient private constructor(private val context: Context) {
     /**
      * Poll all registered mailboxes via GET /api/files/{folderId}
      */
-    suspend fun pollAllMailboxes(): List<FetchedMessage> {
+    suspend fun pollAllMailboxes(): List<FetchedMessage> = pollMutex.withLock {
         val allMessages = mutableListOf<FetchedMessage>()
         // Registration can change when Tor recreates the local hidden service.
         // Use one locked snapshot so the poller never observes a half-mutated list.
@@ -287,7 +306,7 @@ class MailboxClient private constructor(private val context: Context) {
             }
         }
 
-        return allMessages
+        allMessages
     }
 
     /**

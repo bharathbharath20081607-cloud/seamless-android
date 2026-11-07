@@ -96,12 +96,6 @@ class SymmetricState implements Destroyable {
 		System.arraycopy(h, 0, ck, 0, hashLength);
 		
 		// LOGGING: Initial symmetric state after protocol name initialization (matching iOS)
-		Log.d(TAG, "=== ANDROID SYMMETRIC STATE INITIALIZED ===");
-		Log.d(TAG, "Protocol: " + protocolName);
-		Log.d(TAG, "Initial hash (h): " + bytesToHex(h));
-		Log.d(TAG, "Initial chaining key (ck): " + bytesToHex(ck));
-		Log.d(TAG, "Hash length: " + h.length);
-		Log.d(TAG, "=========================================");
 	}
 
 	/**
@@ -137,10 +131,6 @@ class SymmetricState implements Destroyable {
 		// LOGGING: Before mixKey operation (matching iOS)
 		byte[] inputData = new byte[length];
 		System.arraycopy(data, offset, inputData, 0, length);
-		Log.d(TAG, "*** Android mixKey() BEFORE ***");
-		Log.d(TAG, "Input data (" + length + " bytes): " + bytesToHex(inputData));
-		Log.d(TAG, "Current CK: " + bytesToHex(ck));
-		Log.d(TAG, "Current Hash: " + bytesToHex(h));
 		
 		int keyLength = cipher.getKeyLength();
 		byte[] tempKey = new byte [keyLength];
@@ -152,10 +142,6 @@ class SymmetricState implements Destroyable {
 		}
 		
 		// LOGGING: After mixKey operation (matching iOS)
-		Log.d(TAG, "*** Android mixKey() AFTER ***");
-		Log.d(TAG, "New CK: " + bytesToHex(ck));
-		Log.d(TAG, "Hash unchanged: " + bytesToHex(h));
-		Log.d(TAG, "Cipher now has key: " + (cipher.getMACLength() > 0));
 	}
 
 	/**
@@ -170,15 +156,10 @@ class SymmetricState implements Destroyable {
 		// LOGGING: Before mixHash operation (matching iOS)
 		byte[] inputData = new byte[length];
 		System.arraycopy(data, offset, inputData, 0, length);
-		Log.d(TAG, "*** Android mixHash() BEFORE ***");
-		Log.d(TAG, "Input data (" + length + " bytes): " + bytesToHex(inputData));
-		Log.d(TAG, "Current Hash: " + bytesToHex(h));
 		
 		hashTwo(h, 0, h.length, data, offset, length, h, 0, h.length);
 		
 		// LOGGING: After mixHash operation (matching iOS)
-		Log.d(TAG, "*** Android mixHash() AFTER ***");
-		Log.d(TAG, "New Hash: " + bytesToHex(h));
 	}
 
 	/**

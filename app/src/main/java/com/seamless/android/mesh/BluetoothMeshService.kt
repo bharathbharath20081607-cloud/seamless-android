@@ -36,6 +36,9 @@ class BluetoothMeshService(private val context: Context) {
     
     companion object {
         private const val TAG = "BluetoothMeshService"
+        // Undelivered messages/photos/voice notes are parked (never silently dropped)
+        // and flushed automatically on the next secure session with that peer.
+        private const val MAX_PARKED_PER_PEER = 200
         private val MAX_TTL: UByte = com.seamless.android.util.AppConstants.MESSAGE_TTL_HOPS
 
         @Volatile
@@ -257,7 +260,20 @@ class BluetoothMeshService(private val context: Context) {
                             val info = peerManager.getPeerInfo(peerID)
                             val isDirectlyConnected = info?.isDirectConnection == true
                             
-                            if (!hasSession && isDirectlyConnected) {
+                            val hasParked = synchronized(pendingMessagesQueue) { !pendingMessagesQueue[peerID].isNullOrEmpty() } ||
+                                synchronized(pendingFilesQueue) { !pendingFilesQueue[peerID].isNullOrEmpty() } ||
+                                synchronized(pendingMeshMessagesQueue) { !pendingMeshMessagesQueue[peerID].isNullOrEmpty() } ||
+                                synchronized(pendingMeshMediaQueue) { !pendingMeshMediaQueue[peerID].isNullOrEmpty() }
+                            if (hasSession && hasParked) {
+                                flushPendingMessages(peerID)
+                                flushPendingFiles(peerID)
+                                flushPendingMeshMessages(peerID)
+                                flushPendingMeshMedia(peerID)
+                            } else if (!hasSession && (isDirectlyConnected || hasParked)) {
+                                // Deterministic stagger: higher peerID waits so the lower one initiates first (avoids glare)
+                                if (myPeerID.lowercase() > peerID.lowercase()) delay(1500)
+                                if (hasEstablishedSession(peerID)) return@forEach
+                                if (encryptionService.getSessionState(peerID) is com.seamless.android.noise.NoiseSession.NoiseSessionState.Handshaking) return@forEach
                                 Log.d(TAG, "🤝 Auto-initiating Noise handshake with directly connected peer: $peerID")
                                 initiateNoiseHandshake(peerID)
                             }
@@ -545,6 +561,7 @@ class BluetoothMeshService(private val context: Context) {
                                 flushPendingMessages(peerID)
                                 flushPendingFiles(peerID)
                                 flushPendingMeshMessages(peerID)
+                                flushPendingMeshMedia(peerID)
                             }
                         }
                     }
@@ -561,24 +578,25 @@ class BluetoothMeshService(private val context: Context) {
             
             override fun handleAnnounce(routed: RoutedPacket) {
                 serviceScope.launch {
-                    // Process the announce
-                    val isFirst = messageHandler.handleAnnounce(routed)
-
-                    // Map device address -> peerID on first announce seen over this device connection
+                    // Map device address -> peerID before handleAnnounce so onPeerListUpdated sees direct connection
                     val deviceAddress = routed.relayAddress
                     val pid = routed.peerID
                     if (deviceAddress != null && pid != null) {
-                        // First ANNOUNCE over a device connection defines a direct neighbor.
-                        if (!connectionManager.hasSeenFirstAnnounce(deviceAddress)) {
-                            // Bind or rebind this device address to the announcing peer
-                            connectionManager.addressPeerMap[deviceAddress] = pid
+                        val isDirectHop = routed.packet.ttl == MAX_TTL || !connectionManager.hasSeenFirstAnnounce(deviceAddress)
+                        if (isDirectHop) {
+                            connectionManager.addressPeerMap[deviceAddress] = pid.lowercase()
                             connectionManager.noteAnnounceReceived(deviceAddress)
-                            Log.d(TAG, "Mapped device $deviceAddress to peer $pid on FIRST-ANNOUNCE for this connection")
-
-                            // Mark as directly connected (upgrades from routed if needed)
+                            Log.d(TAG, "Mapped device $deviceAddress to peer $pid on ANNOUNCE for this connection")
                             try { peerManager.setDirectConnection(pid, true) } catch (_: Exception) { }
+                        }
+                    }
 
-                            // Initial sync for this newly direct peer
+                    // Process the announce
+                    val isFirst = messageHandler.handleAnnounce(routed)
+
+                    if (deviceAddress != null && pid != null) {
+                        try { peerManager.setDirectConnection(pid, true) } catch (_: Exception) { }
+                        if (isFirst) {
                             try { gossipSyncManager.scheduleInitialSyncToPeer(pid, 1_000) } catch (_: Exception) { }
                         }
                     }
@@ -1301,13 +1319,16 @@ class BluetoothMeshService(private val context: Context) {
                 val staleThreshold = System.currentTimeMillis() - (5 * 60 * 1000)
                 peerManager.clearInactivePeers(staleThreshold)
                 
-                // Restart Bluetooth services to rediscover peers
-                connectionManager.restartServices()
-                
-                // PRODUCTION FIX: Wait longer for BLE stack to fully stabilize.
-                // The previous 1s delay was often not enough for scanning to discover
-                // and connect to a peer before the announce was broadcast.
-                delay(2000)
+                // Preserve active BLE connections when resuming from photo picker, camera, or background!
+                // Only perform a full destructive restart if the GATT server is not active.
+                if (connectionManager.getActiveConnectionCount() > 0 || connectionManager.isGattServerActive()) {
+                    Log.i(TAG, "🔄 Preserving ${connectionManager.getActiveConnectionCount()} active BLE connection(s); ensuring discovery active")
+                    connectionManager.ensureDiscoveryActive()
+                    delay(300)
+                } else {
+                    connectionManager.restartServices()
+                    delay(2000)
+                }
                 
                 // Send fresh broadcast announce to let peers know we're back
                 sendBroadcastAnnounce()
@@ -1646,9 +1667,12 @@ class BluetoothMeshService(private val context: Context) {
                 com.seamless.android.model.NoisePayloadType.MESH_IMAGE
             }
 
-            val CHUNK_SIZE = 24 * 1024 // 24KB chunks
+            val CHUNK_SIZE = 16 * 1024 // 16KB chunks for fast, reliable BLE delivery
             val totalChunks = if (fileData.size <= CHUNK_SIZE) 1 else (fileData.size + CHUNK_SIZE - 1) / CHUNK_SIZE
             val transferId = messageId.ifBlank { java.util.UUID.randomUUID().toString() }
+            if (totalChunks > 1) {
+                TransferProgressManager.start(transferId, totalChunks)
+            }
 
             for (chunkIndex in 0 until totalChunks) {
                 val start = chunkIndex * CHUNK_SIZE
@@ -1679,10 +1703,17 @@ class BluetoothMeshService(private val context: Context) {
                     payload = encrypted,
                     ttl = com.seamless.android.util.AppConstants.MESSAGE_TTL_HOPS
                 )
-                connectionManager.broadcastPacketAwait(RoutedPacket(signPacketBeforeBroadcast(packet), transferId = transferId))
+                val wireTransferId = if (totalChunks == 1) transferId else sha256Hex(encodedFile)
+                connectionManager.broadcastPacketAwait(RoutedPacket(signPacketBeforeBroadcast(packet), transferId = wireTransferId))
+                if (totalChunks > 1) {
+                    TransferProgressManager.progress(transferId, chunkIndex + 1, totalChunks)
+                }
                 if (totalChunks > 1 && chunkIndex < totalChunks - 1) {
                     delay(40L)
                 }
+            }
+            if (totalChunks > 1) {
+                TransferProgressManager.complete(transferId, totalChunks)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to send mesh media to $memberPeerID: ${e.message}")
@@ -1718,6 +1749,13 @@ class BluetoothMeshService(private val context: Context) {
             serviceScope.launch {
                 delay(5000)
                 flushPendingMeshMedia(peerID, retryCount + 1)
+            }
+        } else {
+            Log.w(TAG, "⏸️ Parking ${mediaToSend.size} pending mesh media for $peerID until the next secure session")
+            synchronized(pendingMeshMediaQueue) {
+                val queue = pendingMeshMediaQueue.getOrPut(peerID) { mutableListOf() }
+                queue.addAll(0, mediaToSend)
+                while (queue.size > MAX_PARKED_PER_PEER) queue.removeAt(0)
             }
         }
     }
@@ -1879,7 +1917,12 @@ class BluetoothMeshService(private val context: Context) {
                 flushPendingMessages(peerID, retryCount + 1)
             }
         } else {
-            Log.w(TAG, "⚠️ Dropping ${messagesToSend.size} pending messages for $peerID after 6 retries")
+            Log.w(TAG, "⏸️ Parking ${messagesToSend.size} pending messages for $peerID until the next secure session")
+            synchronized(pendingMessagesQueue) {
+                val queue = pendingMessagesQueue.getOrPut(peerID) { mutableListOf() }
+                queue.addAll(0, messagesToSend)
+                while (queue.size > MAX_PARKED_PER_PEER) queue.removeAt(0)
+            }
         }
     }
     
@@ -1916,7 +1959,12 @@ class BluetoothMeshService(private val context: Context) {
                 flushPendingFiles(peerID, retryCount + 1)
             }
         } else {
-            Log.w(TAG, "⚠️ Dropping ${filesToSend.size} pending files for $peerID after 6 retries")
+            Log.w(TAG, "⏸️ Parking ${filesToSend.size} pending files for $peerID until the next secure session")
+            synchronized(pendingFilesQueue) {
+                val queue = pendingFilesQueue.getOrPut(peerID) { mutableListOf() }
+                queue.addAll(0, filesToSend)
+                while (queue.size > MAX_PARKED_PER_PEER) queue.removeAt(0)
+            }
         }
     }
     
@@ -1984,7 +2032,12 @@ class BluetoothMeshService(private val context: Context) {
                 flushPendingMeshMessages(peerID, retryCount + 1)
             }
         } else {
-            Log.w(TAG, "⚠️ Dropping ${messagesToSend.size} pending mesh messages for $peerID after 6 retries")
+            Log.w(TAG, "⏸️ Parking ${messagesToSend.size} pending mesh messages for $peerID until the next secure session")
+            synchronized(pendingMeshMessagesQueue) {
+                val queue = pendingMeshMessagesQueue.getOrPut(peerID) { mutableListOf() }
+                queue.addAll(0, messagesToSend)
+                while (queue.size > MAX_PARKED_PER_PEER) queue.removeAt(0)
+            }
         }
     }
     

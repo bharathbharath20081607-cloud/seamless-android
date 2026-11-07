@@ -48,8 +48,27 @@ android {
         includeInBundle = false
     }
 
+    // Release signing: credentials come from environment variables ONLY (never hardcode secrets).
+    // If they are not set (e.g. a normal debug build) the release build stays unsigned.
+    val releaseKeystorePath = System.getenv("SEAMLESS_KEYSTORE_PATH")
+    signingConfigs {
+        if (!releaseKeystorePath.isNullOrBlank()) {
+            create("release") {
+                storeFile = file(releaseKeystorePath)
+                storePassword = System.getenv("SEAMLESS_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("SEAMLESS_KEY_ALIAS")
+                keyPassword = System.getenv("SEAMLESS_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (!releaseKeystorePath.isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("release")
+            } else {
+                signingConfig = signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

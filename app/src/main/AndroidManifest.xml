@@ -24,6 +24,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
     
     <!-- Microphone for voice notes -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -116,20 +117,20 @@
         <service
             android:name=".service.MeshForegroundService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="connectedDevice|remoteMessaging" />
             
         <!-- Onion P2P Service for zero-server long-distance messaging via Tor -->
         <service
             android:name=".service.OnionMessageService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="connectedDevice|remoteMessaging" />
 
         <!-- Tor Foreground Service — keeps Tor alive, handles Doze/network changes -->
         <service
             android:name=".service.TorForegroundService"
             android:exported="false"
             android:stopWithTask="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="remoteMessaging|dataSync" />
 
         <!-- Boot auto-restart — resumes Tor if it was enabled before reboot -->
         <receiver

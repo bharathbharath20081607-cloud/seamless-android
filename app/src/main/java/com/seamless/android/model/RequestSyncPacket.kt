@@ -75,7 +75,7 @@ data class RequestSyncPacket(
             val pp = p ?: return null
             val mm = m ?: return null
             val dd = payload ?: return null
-            if (pp < 1 || mm <= 0L) return null
+            if (pp !in 1..30 || mm <= 0L) return null // SECURITY: bound Golomb parameter (prevents shift overflow / CPU abuse)
             return RequestSyncPacket(pp, mm, dd)
         }
     }

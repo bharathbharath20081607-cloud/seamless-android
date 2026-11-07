@@ -28,7 +28,32 @@ object PrivacyPreferenceManager {
     val disappearingTtlMs: StateFlow<Long> = _disappearingTtlMs
 
     private fun prefs(context: Context): SharedPreferences =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        run {
+            val plain = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            try {
+                val masterKey = androidx.security.crypto.MasterKey.Builder(context, androidx.security.crypto.MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+                    .setKeyScheme(androidx.security.crypto.MasterKey.KeyScheme.AES256_GCM)
+                    .build()
+                val encrypted = androidx.security.crypto.EncryptedSharedPreferences.create(
+                    context,
+                    "${PREFS_NAME}_encrypted",
+                    masterKey,
+                    androidx.security.crypto.EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                    androidx.security.crypto.EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+                )
+                if (plain.all.isNotEmpty()) {
+                    val editor = encrypted.edit()
+                    if (plain.contains(KEY_APP_LOCK_ENABLED)) editor.putBoolean(KEY_APP_LOCK_ENABLED, plain.getBoolean(KEY_APP_LOCK_ENABLED, false))
+                    if (plain.contains(KEY_INCOGNITO_MODE)) editor.putBoolean(KEY_INCOGNITO_MODE, plain.getBoolean(KEY_INCOGNITO_MODE, false))
+                    if (plain.contains(KEY_DISAPPEARING_TTL)) editor.putLong(KEY_DISAPPEARING_TTL, plain.getLong(KEY_DISAPPEARING_TTL, 0L))
+                    editor.apply()
+                    plain.edit().clear().apply()
+                }
+                encrypted
+            } catch (_: Exception) {
+                plain
+            }
+        }
 
     fun init(context: Context) {
         val p = prefs(context)

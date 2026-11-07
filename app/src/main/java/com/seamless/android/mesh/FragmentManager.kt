@@ -142,6 +142,13 @@ class FragmentManager {
             
             // iOS: if incomingFragments[fragmentID] == nil
             if (!incomingFragments.containsKey(fragmentIDString)) {
+                if (incomingFragments.size >= 32) {
+                    val oldestKey = fragmentMetadata.entries.minByOrNull { it.value.third }?.key
+                    if (oldestKey != null) {
+                        incomingFragments.remove(oldestKey)
+                        fragmentMetadata.remove(oldestKey)
+                    }
+                }
                 incomingFragments[fragmentIDString] = java.util.concurrent.ConcurrentHashMap()
             }
             fragmentMetadata[fragmentIDString] = Triple(
@@ -159,15 +166,16 @@ class FragmentManager {
                 Log.d(TAG, "All fragments received for $fragmentIDString, reassembling...")
                 
                 // iOS reassembly logic: for i in 0..<total { if let fragment = fragments[i] { reassembled.append(fragment) } }
-                val reassembledData = mutableListOf<Byte>()
+                val reassembledStream = java.io.ByteArrayOutputStream(fragmentPayload.total * MAX_FRAGMENT_SIZE)
                 for (i in 0 until fragmentPayload.total) {
                     fragmentMap[i]?.let { data ->
-                        reassembledData.addAll(data.asIterable())
+                        reassembledStream.write(data)
                     }
                 }
                 
                 // Decode the original packet bytes we reassembled, so flags/compression are preserved - iOS fix
-                val originalPacket = BitchatPacket.fromBinaryData(reassembledData.toByteArray())
+                val reassembledBytes = reassembledStream.toByteArray()
+                val originalPacket = BitchatPacket.fromBinaryData(reassembledBytes)
                 if (originalPacket != null) {
                     // iOS cleanup: incomingFragments.removeValue(forKey: fragmentID)
                     incomingFragments.remove(fragmentIDString)
@@ -177,7 +185,7 @@ class FragmentManager {
                     // We already relayed the incoming fragments; setting TTL=0 ensures
                     // PacketRelayManager will skip relaying this reconstructed packet.
                     val suppressedTtlPacket = originalPacket.copy(ttl = 0u.toUByte())
-                    Log.d(TAG, "Successfully reassembled original (${reassembledData.size} bytes); set TTL=0 to suppress relay")
+                    Log.d(TAG, "Successfully reassembled original (${reassembledBytes.size} bytes); set TTL=0 to suppress relay")
                     return suppressedTtlPacket
                 } else {
                     val metadata = fragmentMetadata[fragmentIDString]

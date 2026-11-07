@@ -55,6 +55,10 @@ object NostrProofOfWork {
         if (minimumDifficulty <= 0) return true
         
         // Require explicit nonce tag to recognize PoW per NIP-13 intent
+        if (!event.id.equals(event.computeEventIdHex(), ignoreCase = true)) {
+            Log.w(TAG, "Event ID does not match computed SHA-256 hash during PoW validation")
+            return false
+        }
         if (!hasNonce(event)) {
             Log.w(TAG, "Event ${event.id.take(16)}... missing nonce tag; treating as no PoW")
             return false

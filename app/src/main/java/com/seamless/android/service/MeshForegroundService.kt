@@ -67,7 +67,6 @@ class MeshForegroundService : Service() {
                 Log.d(TAG, "Starting foreground service")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start foreground service", e)
-                e.printStackTrace()
             }
         }
         
@@ -78,7 +77,6 @@ class MeshForegroundService : Service() {
                 Log.d(TAG, "Stopping foreground service")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to stop foreground service", e)
-                e.printStackTrace()
             }
         }
     }
@@ -138,8 +136,10 @@ class MeshForegroundService : Service() {
         }
         
         fun removeDelegate(id: String) {
-            connectedDelegates.remove(id)
-            if (primaryDelegate == connectedDelegates[id]) {
+            // BUG FIX: the old code removed the entry first, then compared against a lookup that
+            // was always null, so the primary delegate was never cleared (leaked destroyed UI).
+            val removedDelegate = connectedDelegates.remove(id)
+            if (removedDelegate != null && primaryDelegate === removedDelegate) {
                 primaryDelegate = connectedDelegates.values.firstOrNull()
                 meshService?.delegate = primaryDelegate
             }
@@ -166,7 +166,6 @@ class MeshForegroundService : Service() {
             startTorLifecycleMonitoring()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create service", e)
-            e.printStackTrace()
             stopSelf()
         }
     }
@@ -308,7 +307,20 @@ class MeshForegroundService : Service() {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            try {
+                if (Build.VERSION.SDK_INT >= 34) {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+                    )
+                } else {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            } catch (fallbackError: Exception) {
+                Log.w(TAG, "Could not start foreground service: ${fallbackError.message}")
+                stopSelf()
+            }
         }
     }
     
@@ -337,8 +349,6 @@ class MeshForegroundService : Service() {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize mesh service", e)
-                e.printStackTrace()
-                
                 // Retry after delay
                 delay(5000)
                 if (isRunning) {

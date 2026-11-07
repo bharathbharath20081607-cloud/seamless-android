@@ -83,6 +83,17 @@ object NostrProtocol {
             
             Log.v(TAG, "Successfully opened seal")
             
+            // SECURITY (NIP-17/59): the rumor is unsigned, so authenticity relies on the seal.
+            // Seal must be kind 13, validly signed, and signed by the same key the rumor claims.
+            if (seal.kind != NostrKind.SEAL || !seal.isValidSignature()) {
+                Log.w(TAG, "Rejected message: invalid seal")
+                return null
+            }
+            if (!seal.pubkey.equals(rumor.pubkey, ignoreCase = true)) {
+                Log.w(TAG, "Rejected message: seal/rumor pubkey mismatch (possible impersonation)")
+                return null
+            }
+            
             Triple(rumor.content, rumor.pubkey, rumor.createdAt)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to decrypt private message: ${e.message}")

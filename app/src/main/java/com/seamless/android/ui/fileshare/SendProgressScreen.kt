@@ -2,6 +2,8 @@ package com.seamless.android.ui.fileshare
 
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -114,18 +116,19 @@ fun SendProgressScreen(
         HyperDropBackground {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(HyperDropSpacing.xxxl),
+                verticalArrangement = Arrangement.spacedBy(HyperDropSpacing.lg),
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(paddingValues)
-                    .padding(HyperDropSpacing.xxl)
+                    .padding(HyperDropSpacing.lg)
+                    .verticalScroll(rememberScrollState())
             ) {
                 // Animated UFO Tractor Beam
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(350.dp) // Taller area for the beam
+                        .height(210.dp) // Responsive area for the beam
                 ) {
                     // Confetti burst on completion
                     if (isComplete) {
@@ -277,7 +280,7 @@ fun SendProgressScreen(
                     }
                 }
                 
-                Spacer(modifier = Modifier.weight(1f))
+                Spacer(modifier = Modifier.height(HyperDropSpacing.md))
                 
                 // Action buttons
                 Column(

@@ -17,6 +17,12 @@ class NoiseSessionManager(
     }
     
     private val sessions = ConcurrentHashMap<String, NoiseSession>()
+    private val localPeerID: String = try {
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(localStaticPublicKey)
+            .take(8)
+            .joinToString("") { "%02x".format(it) }
+    } catch (_: Exception) { "" }
     
     // Callbacks
     var onSessionEstablished: ((String, ByteArray) -> Unit)? = null
@@ -56,6 +62,8 @@ class NoiseSessionManager(
         Log.d(TAG, "initiateHandshake($peerID)")
 
         // Remove any existing session first
+        val existing = getSession(peerID)
+        if (existing != null && existing.isHandshaking() && (System.currentTimeMillis() - existing.getCreationTime() < 4000L)) { Log.d(TAG, "Handshake already in progress with $peerID (<4s old), skipping duplicate initiation"); throw IllegalStateException("Handshake already in progress with $peerID") }
         removeSession(peerID)
         
         // Create new session as initiator
@@ -89,7 +97,10 @@ class NoiseSessionManager(
             
             // If no session exists, or if we have an unestablished session and receive a fresh 32-byte Msg 1
             // (simultaneous handshake glare), create a new responder session to accept the peer's initiation.
-            if (session == null || (!session.isEstablished() && message.size == 32)) {
+            if (message.size == 32 && session != null && session.isHandshaking() && localPeerID.isNotEmpty() && localPeerID.lowercase() < peerID.lowercase()) { Log.d(TAG, "⚡ Glare tie-breaker won by local ($localPeerID < $peerID), keeping INITIATOR"); return null }
+            if (session != null && session.isEstablished() && message.size != 32) { Log.d(TAG, "Ignoring late handshake msg (${message.size}B) for established session $peerID"); return null }
+            if (session == null && message.size != 32) { Log.w(TAG, "Ignoring non-initial handshake msg (${message.size}B) with no session for $peerID"); return null }
+            if (session == null || message.size == 32) {
                 Log.d(TAG, "Creating new RESPONDER session for $peerID (glare=${session != null})")
                 session = NoiseSession(
                     peerID = peerID,

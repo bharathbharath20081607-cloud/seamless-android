@@ -130,6 +130,10 @@ class ChannelManager(
         // Or simply accept it and try to use it.
         // For now, we'll accept it and store the key.
         // In a real system, we might want to verify against a known commitment or try to decrypt a challenge.
+        if (password.isBlank()) return false
+        val derivedKey = deriveChannelKey(password, channel)
+        channelPasswords[channel] = password
+        channelKeys[channel] = derivedKey
         return true
     }
     

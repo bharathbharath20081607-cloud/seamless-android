@@ -45,7 +45,11 @@ class OnionMessageQueue private constructor(private val context: Context) {
         // Retry configuration
         const val BASE_RETRY_DELAY_MS = 2_500L        // 2.5 seconds fast initial retry
         const val MAX_RETRY_DELAY_MS = 300_000L       // 5 minutes
-        const val MAX_RETRY_ATTEMPTS = 50             // ~4 hours of retries
+        // Delivery is intentionally bounded by MESSAGE_TTL_MS rather than a
+        // small attempt count. A Tor peer can be legitimately unreachable for
+        // many hours (offline, Doze, or an onion-service rendezvous failure),
+        // and treating that as a terminal send failure loses user data.
+        const val MAX_RETRY_ATTEMPTS = Int.MAX_VALUE
         const val BACKOFF_MULTIPLIER = 1.8
         // Unacknowledged frames are retransmitted on an escalating schedule
         // (10s, 15s, 22s, 34s ... capped) so a slow circuit is not flooded
@@ -278,7 +282,29 @@ class OnionMessageQueue private constructor(private val context: Context) {
      */
     suspend fun markSent(messageId: String) = mutex.withLock {
         updateMessageState(messageId, OnionMessageProtocol.DeliveryState.SENT)
-        deliveryStatus[messageId]?.sentAt = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        findMessage(messageId)?.lastAttemptAt = now
+        deliveryStatus[messageId]?.sentAt = now
+        saveToDisk()
+    }
+
+    /**
+     * A mailbox already holds a durable copy, so there is nothing useful to
+     * upload again while we wait for its end-to-end ACK. Keep the frame in the
+     * outbox and schedule a normal ACK/direct retry instead. This avoids
+     * filling a peer's mailbox with duplicate encrypted blobs after a network
+     * outage or process restart.
+     */
+    suspend fun deferAcknowledgementRetry(messageId: String) = mutex.withLock {
+        val message = findMessage(messageId) ?: return@withLock
+        if (message.state == OnionMessageProtocol.DeliveryState.DELIVERED ||
+            message.state == OnionMessageProtocol.DeliveryState.FAILED
+        ) return@withLock
+
+        message.retryCount = message.retryCount.coerceAtMost(10_000 - 1) + 1
+        message.state = OnionMessageProtocol.DeliveryState.SENT
+        message.lastAttemptAt = System.currentTimeMillis()
+        deliveryStatus[messageId]?.state = OnionMessageProtocol.DeliveryState.SENT
         saveToDisk()
     }
 
@@ -348,15 +374,17 @@ class OnionMessageQueue private constructor(private val context: Context) {
                 message.retryCount++
                 message.lastAttemptAt = System.currentTimeMillis()
                 
-                if (message.retryCount >= MAX_RETRY_ATTEMPTS) {
-                    // Move to failed state
+                if (isExpired(message, message.lastAttemptAt)) {
+                    // A terminal failure is only valid after the explicit
+                    // retention window has elapsed. Offline is a normal
+                    // state for a Tor messenger, not a failed delivery.
                     message.state = OnionMessageProtocol.DeliveryState.FAILED
                     deliveryStatus[messageId]?.apply {
                         state = OnionMessageProtocol.DeliveryState.FAILED
                         failReason = reason
                     }
                     emitUpdate(messageId, OnionMessageProtocol.DeliveryState.FAILED)
-                    Log.e(TAG, "❌ Message $messageId failed after ${message.retryCount} attempts: $reason")
+                    Log.e(TAG, "❌ Message $messageId expired after ${message.retryCount} attempts: $reason")
                 } else {
                     // Schedule retry with exponential backoff
                     val delay = calculateBackoff(message.retryCount)
@@ -558,16 +586,22 @@ class OnionMessageQueue private constructor(private val context: Context) {
     }
 
     private fun isDueForDelivery(message: QueuedMessage, now: Long): Boolean {
+        if (isExpired(message, now)) return false
         return when (message.state) {
             OnionMessageProtocol.DeliveryState.PENDING -> message.nextRetryAt <= now
             OnionMessageProtocol.DeliveryState.SENT -> {
-                message.lastAttemptAt > 0L &&
-                    now - message.lastAttemptAt >= ackRetryDelay(message.retryCount) &&
-                    message.retryCount < MAX_RETRY_ATTEMPTS
+                // Older persisted queues can contain SENT frames without an
+                // attempt timestamp. Treat those as due instead of leaving a
+                // message permanently stuck on a single tick.
+                message.lastAttemptAt <= 0L ||
+                    now - message.lastAttemptAt >= ackRetryDelay(message.retryCount)
             }
             else -> false
         }
     }
+
+    private fun isExpired(message: QueuedMessage, now: Long): Boolean =
+        now - message.createdAt >= MESSAGE_TTL_MS
     
     private fun removeFromQueue(messageId: String) {
         for (queue in queues.values) {
@@ -635,11 +669,19 @@ class OnionMessageQueue private constructor(private val context: Context) {
     private suspend fun cleanup() = mutex.withLock {
         val now = System.currentTimeMillis()
         var removed = 0
+        val expiredIds = mutableListOf<String>()
         
         for (queue in queues.values) {
-            val toRemove = queue.filter { 
-                now - it.createdAt > MESSAGE_TTL_MS ||
-                it.state == OnionMessageProtocol.DeliveryState.FAILED
+            val toRemove = queue.filter {
+                val expired = isExpired(it, now)
+                if (expired && it.state != OnionMessageProtocol.DeliveryState.DELIVERED) {
+                    expiredIds += it.id
+                    deliveryStatus[it.id]?.apply {
+                        state = OnionMessageProtocol.DeliveryState.FAILED
+                        failReason = "Delivery window expired"
+                    }
+                }
+                expired || it.state == OnionMessageProtocol.DeliveryState.FAILED
             }
             removed += toRemove.size
             queue.removeAll(toRemove.toSet())
@@ -655,6 +697,7 @@ class OnionMessageQueue private constructor(private val context: Context) {
         }
         
         if (removed > 0) {
+            expiredIds.forEach { emitUpdate(it, OnionMessageProtocol.DeliveryState.FAILED) }
             Log.d(TAG, "🧹 Cleaned up $removed old messages")
             saveToDisk()
         }

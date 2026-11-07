@@ -140,6 +140,12 @@ class Curve25519DHState implements DHState {
 		if (!(publicDH instanceof Curve25519DHState))
 			throw new IllegalArgumentException("Incompatible DH algorithms");
 		Curve25519.eval(sharedKey, offset, privateKey, ((Curve25519DHState)publicDH).publicKey);
+		// SECURITY: reject all-zero output (low-order point attack, RFC 7748 section 6.1)
+		int zeroCheck = 0;
+		for (int i = 0; i < 32; ++i)
+			zeroCheck |= (sharedKey[offset + i] & 0xFF);
+		if (zeroCheck == 0)
+			throw new IllegalStateException("Invalid Curve25519 shared secret (low-order point)");
 	}
 
 	@Override

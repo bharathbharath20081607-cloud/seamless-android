@@ -111,10 +111,12 @@ class NostrTransport(
     private fun startConnectionMonitor() {
         transportScope.launch {
             try {
-                NostrRelayManager.getInstance(context).isConnected.observeForever { connected ->
-                    if (connected) {
-                        Log.i(TAG, "🌐 Relay connected - processing pending messages")
-                        processMessageQueue()
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    NostrRelayManager.getInstance(context).isConnected.observeForever { connected ->
+                        if (connected) {
+                            Log.i(TAG, "🌐 Relay connected - processing pending messages")
+                            processMessageQueue()
+                        }
                     }
                 }
             } catch (e: Exception) {
