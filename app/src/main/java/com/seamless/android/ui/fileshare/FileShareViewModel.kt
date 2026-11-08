@@ -635,6 +635,27 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
             }
         }
 
+        // Ensure fileName has a valid extension so received videos/images are recognized by media players
+        val dotIndex = fileName.lastIndexOf('.')
+        val existingExt = if (dotIndex > 0) fileName.substring(dotIndex + 1) else ""
+        if (existingExt.isBlank() || HyperDropUtils.mimeTypeFromExtension(existingExt) == null) {
+            var resolvedExt = runCatching {
+                HyperDropUtils.extensionFromMimeType(resolver.getType(uri))
+            }.getOrNull()
+
+            if (resolvedExt.isNullOrBlank()) {
+                resolvedExt = runCatching {
+                    val header = ByteArray(64)
+                    val read = resolver.openInputStream(uri)?.use { it.read(header) } ?: 0
+                    if (read >= 4) HyperDropUtils.detectExtensionAndMimeFromBytes(header, read)?.first else null
+                }.getOrNull()
+            }
+
+            if (!resolvedExt.isNullOrBlank()) {
+                fileName = "${fileName.trimEnd('.')}.$resolvedExt"
+            }
+        }
+
         return fileName to fileSize
     }
 
@@ -835,10 +856,14 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun markBatchFileCompleted(fileName: String) {
         val files = _batchTransferFiles.value?.toMutableList() ?: return
-        val index = files.indexOfFirst { it.fileName == fileName && it.status == BatchFileStatus.TRANSFERRING }
+        val index = files.indexOfFirst {
+            it.status == BatchFileStatus.TRANSFERRING &&
+                (it.fileName == fileName || fileName.startsWith(it.fileName + "."))
+        }
 
         if (index >= 0) {
             files[index] = files[index].copy(
+                fileName = fileName,
                 progress = 100,
                 status = BatchFileStatus.COMPLETED
             )
@@ -1141,17 +1166,19 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
         var fileSize = 0L
 
         val updatedHistory = currentHistory.map { transfer ->
-            if (transfer.fileName == fileName && transfer.status == TransferStatus.IN_PROGRESS) {
+            if (transfer.status == TransferStatus.IN_PROGRESS &&
+                (transfer.fileName == fileName || fileName.startsWith(transfer.fileName + "."))
+            ) {
                 transferDirection = transfer.direction
                 fileSize = transfer.fileSize
-                transfer.copy(status = TransferStatus.COMPLETED)
+                transfer.copy(fileName = fileName, status = TransferStatus.COMPLETED)
             } else {
                 transfer
             }
         }
         _transferHistory.value = updatedHistory
 
-        _currentTransfer.value = _currentTransfer.value?.copy(progress = 100)
+        _currentTransfer.value = _currentTransfer.value?.copy(fileName = fileName, progress = 100)
         markBatchFileCompleted(fileName)
 
         if (transferDirection == TransferDirection.SENDING) {

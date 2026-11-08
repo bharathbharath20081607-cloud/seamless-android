@@ -151,6 +151,14 @@ fun DeviceDiscoveryScreen(
     // Determine if transfer is complete or failed
     val isComplete = lastTransferResult?.success == true
     val isFailed = lastTransferResult?.success == false
+    var previewReceivedFile by remember { mutableStateOf<java.io.File?>(null) }
+
+    previewReceivedFile?.let { fileToPreview ->
+        HyperDropMediaPreviewDialog(
+            file = fileToPreview,
+            onDismiss = { previewReceivedFile = null }
+        )
+    }
 
     // Step-by-step system back navigation for progress/waiting states and device discovery
     androidx.activity.compose.BackHandler {
@@ -257,6 +265,20 @@ fun DeviceDiscoveryScreen(
                         viewModel.resetBatchTransfer()
                         viewModel.dismissTransferScreen()
                         onBackClick()
+                    },
+                    onOpenFile = { receivedName ->
+                        if (receivedName.isNotBlank()) {
+                            val file = HyperDropUtils.findReceivedFile(context, receivedName)
+                            if (file != null && file.exists()) {
+                                if (HyperDropUtils.isVideoFile(file) || HyperDropUtils.isImageFile(file)) {
+                                    previewReceivedFile = file
+                                } else {
+                                    HyperDropUtils.openFileExternally(context, file)
+                                }
+                            } else {
+                                android.widget.Toast.makeText(context, "File not found", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        }
                     }
                 )
             } else {
@@ -287,25 +309,18 @@ fun DeviceDiscoveryScreen(
                         onBackClick()
                     },
                     onOpenFile = {
-                        val receivedName = currentTransfer?.fileName ?: lastTransferResult?.fileName ?: incomingRequest?.fileName
+                        val receivedName = lastTransferResult?.fileName ?: currentTransfer?.fileName ?: incomingRequest?.fileName
                         if (!receivedName.isNullOrBlank()) {
-                            try {
-                                val file = java.io.File(java.io.File(context.getExternalFilesDir(null), "received_files"), receivedName)
-                                if (file.exists()) {
-                                    val uri = androidx.core.content.FileProvider.getUriForFile(
-                                        context,
-                                        "${context.packageName}.fileprovider",
-                                        file
-                                    )
-                                    val mime = android.webkit.MimeTypeMap.getSingleton()
-                                        .getMimeTypeFromExtension(file.extension.lowercase()) ?: "*/*"
-                                    val openIntent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
-                                        setDataAndType(uri, mime)
-                                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                    }
-                                    context.startActivity(android.content.Intent.createChooser(openIntent, "Open file"))
+                            val file = HyperDropUtils.findReceivedFile(context, receivedName)
+                            if (file != null && file.exists()) {
+                                if (HyperDropUtils.isVideoFile(file) || HyperDropUtils.isImageFile(file)) {
+                                    previewReceivedFile = file
+                                } else {
+                                    HyperDropUtils.openFileExternally(context, file)
                                 }
-                            } catch (_: Exception) { }
+                            } else {
+                                android.widget.Toast.makeText(context, "File not found", android.widget.Toast.LENGTH_SHORT).show()
+                            }
                         }
                     }
                 )

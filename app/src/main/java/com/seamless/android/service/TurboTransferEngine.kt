@@ -507,6 +507,7 @@ class TurboTransferEngine(private val context: Context) {
                 throw e
             }
             
+            outFile = com.seamless.android.ui.fileshare.HyperDropUtils.ensureFileExtension(outFile)
             Log.i(TAG, "✅ Received: ${outFile.name} saved to ${outFile.absolutePath}")
             callback?.onTransferCompleted(outFile.name)
         }

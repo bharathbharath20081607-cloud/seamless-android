@@ -3,6 +3,7 @@ package com.seamless.android.ui.fileshare
 
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -47,7 +48,8 @@ fun BatchReceiveProgressScreen(
     onAccept: () -> Unit = {},
     onReject: () -> Unit = {},
     onCancel: () -> Unit,
-    onDone: () -> Unit
+    onDone: () -> Unit,
+    onOpenFile: ((String) -> Unit)? = null
 ) {
     // Calculate overall batch progress for UFO
     val batchProgress = remember(files) {
@@ -273,7 +275,10 @@ fun BatchReceiveProgressScreen(
                                     file = file,
                                     isCurrentFile = index == currentFileIndex && 
                                             file.status == FileShareViewModel.BatchFileStatus.TRANSFERRING,
-                                    index = index
+                                    index = index,
+                                    onClick = if (file.status == FileShareViewModel.BatchFileStatus.COMPLETED && onOpenFile != null) {
+                                        { onOpenFile(file.fileName) }
+                                    } else null
                                 )
                             }
                         }
@@ -393,7 +398,8 @@ fun BatchReceiveProgressScreen(
 private fun BatchFileItemRow(
     file: FileShareViewModel.BatchFileInfo,
     isCurrentFile: Boolean,
-    index: Int = 0
+    index: Int = 0,
+    onClick: (() -> Unit)? = null
 ) {
     val statusColor = when (file.status) {
         FileShareViewModel.BatchFileStatus.COMPLETED -> HyperDropColors.SuccessGreen
@@ -440,6 +446,9 @@ private fun BatchFileItemRow(
                 scaleY = scale
             }
             .clip(RoundedCornerShape(12.dp))
+            .then(
+                if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+            )
             .background(
                 if (isCurrentFile) HyperDropColors.PrimaryCyan.copy(alpha = 0.1f * pulseAlpha)
                 else Color.Transparent
@@ -485,6 +494,14 @@ private fun BatchFileItemRow(
                             fontWeight = FontWeight.Medium
                         )
                     )
+                } else if (file.status == FileShareViewModel.BatchFileStatus.COMPLETED && onClick != null) {
+                    Text(
+                        text = " • Tap to open",
+                        style = HyperDropTypography.Caption.copy(
+                            color = HyperDropColors.PrimaryCyan,
+                            fontWeight = FontWeight.Medium
+                        )
+                    )
                 }
             }
             
@@ -520,5 +537,3 @@ private fun BatchFileItemRow(
         )
     }
 }
-
-

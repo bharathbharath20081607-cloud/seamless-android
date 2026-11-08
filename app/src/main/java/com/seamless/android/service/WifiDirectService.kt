@@ -1089,6 +1089,12 @@ class WifiDirectService : Service() {
             }
             transferComplete = true
 
+            // Ensure extensionless files receive their real extension (e.g. .mp4, .jpg) via magic-byte inspection
+            val finalFile = com.seamless.android.ui.fileshare.HyperDropUtils.ensureFileExtension(resolvedFile)
+            resolvedFile = finalFile
+            outFile = finalFile
+            safeFileName = finalFile.name
+
             // Refresh batch approval timestamp so subsequent queued files in a batch auto-stream seamlessly
             if (remoteAddr != null) {
                 lastAcceptedTimestamp = System.currentTimeMillis()
@@ -1136,8 +1142,7 @@ class WifiDirectService : Service() {
     private fun exportToPublicDownloads(sourceFile: File) {
         if (!sourceFile.exists() || sourceFile.length() <= 0L) return
         try {
-            val ext = sourceFile.extension.lowercase(Locale.getDefault())
-            val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+            val mime = com.seamless.android.ui.fileshare.HyperDropUtils.resolveMimeType(sourceFile)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val contentValues = ContentValues().apply {

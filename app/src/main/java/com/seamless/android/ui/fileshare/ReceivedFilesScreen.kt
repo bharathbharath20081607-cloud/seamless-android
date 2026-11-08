@@ -66,6 +66,7 @@ fun ReceivedFilesScreen(
 
     // Track file pending permanent deletion after swipe
     var pendingDeleteFile by remember { mutableStateOf<ReceivedFile?>(null) }
+    var previewFile by remember { mutableStateOf<File?>(null) }
 
     // Auto-refresh when navigating back to this screen
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
@@ -83,7 +84,8 @@ fun ReceivedFilesScreen(
 
     LaunchedEffect(refreshKey) {
         val dir = File(context.getExternalFilesDir(null), "received_files")
-        val files = dir.listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
+        val files = dir.listFiles()?.map { HyperDropUtils.ensureFileExtension(it) }
+            ?.sortedByDescending { it.lastModified() } ?: emptyList()
         receivedFiles = files.map { file ->
             val sizeBytes = file.length()
             val sizeLabel = HyperDropUtils.formatFileSize(sizeBytes)
@@ -99,6 +101,13 @@ fun ReceivedFilesScreen(
                 lastModifiedMillis = file.lastModified()
             )
         }
+    }
+
+    previewFile?.let { fileToPreview ->
+        HyperDropMediaPreviewDialog(
+            file = fileToPreview,
+            onDismiss = { previewFile = null }
+        )
     }
 
     Scaffold(
@@ -285,36 +294,25 @@ fun ReceivedFilesScreen(
                                     ReceivedFileItem(
                                         file = file,
                                         onFileClick = {
-                                            openReceivedFile(context, file)
+                                            val rawFile = File(file.path)
+                                            val targetFile = HyperDropUtils.ensureFileExtension(rawFile)
+                                            if (!targetFile.exists()) {
+                                                android.widget.Toast.makeText(
+                                                    context,
+                                                    "File not found",
+                                                    android.widget.Toast.LENGTH_SHORT
+                                                ).show()
+                                            } else if (HyperDropUtils.isVideoFile(targetFile) || HyperDropUtils.isImageFile(targetFile)) {
+                                                previewFile = targetFile
+                                            } else {
+                                                HyperDropUtils.openFileExternally(context, targetFile)
+                                            }
                                         },
                                         onDownloadClick = {
                                             saveToDownloads(context, file)
                                         },
                                         onShareClick = {
-                                            val f = File(file.path)
-                                            if (f.exists()) {
-                                                try {
-                                                    val fileUri = FileProvider.getUriForFile(
-                                                        context,
-                                                        context.packageName + ".fileprovider",
-                                                        f
-                                                    )
-                                                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                                        type = "*/*"
-                                                        putExtra(Intent.EXTRA_STREAM, fileUri)
-                                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                                    }
-                                                    context.startActivity(
-                                                        Intent.createChooser(shareIntent, "Share via")
-                                                    )
-                                                } catch (e: Exception) {
-                                                    android.widget.Toast.makeText(
-                                                        context,
-                                                        "Error sharing file: ${e.message}",
-                                                        android.widget.Toast.LENGTH_SHORT
-                                                    ).show()
-                                                }
-                                            }
+                                            HyperDropUtils.shareFile(context, File(file.path))
                                         }
                                     )
                                 }
@@ -464,75 +462,20 @@ private fun getFileIcon(fileType: String): androidx.compose.ui.graphics.vector.I
     }
 }
 
-private fun openReceivedFile(context: android.content.Context, file: ReceivedFile) {
-    val f = File(file.path)
-    if (!f.exists()) {
-        android.widget.Toast.makeText(context, "File not found", android.widget.Toast.LENGTH_SHORT).show()
-        return
-    }
-
-    try {
-        val uri: Uri = FileProvider.getUriForFile(
-            context,
-            context.packageName + ".fileprovider",
-            f
-        )
-
-        val ext = f.extension.lowercase(Locale.getDefault())
-        val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
-
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, mime)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-
-        // Check if any app can handle this intent before starting
-        if (intent.resolveActivity(context.packageManager) != null) {
-            context.startActivity(Intent.createChooser(intent, "Open with"))
-        } else {
-            // No app can handle this file type
-            android.widget.Toast.makeText(
-                context, 
-                "No app found to open this file type", 
-                android.widget.Toast.LENGTH_SHORT
-            ).show()
-        }
-    } catch (e: android.content.ActivityNotFoundException) {
-        android.widget.Toast.makeText(
-            context, 
-            "No app found to open this file", 
-            android.widget.Toast.LENGTH_SHORT
-        ).show()
-    } catch (e: IllegalArgumentException) {
-        // FileProvider couldn't find a valid path
-        android.widget.Toast.makeText(
-            context, 
-            "Cannot access this file", 
-            android.widget.Toast.LENGTH_SHORT
-        ).show()
-    } catch (e: Exception) {
-        android.widget.Toast.makeText(
-            context, 
-            "Error opening file: ${e.message}", 
-            android.widget.Toast.LENGTH_SHORT
-        ).show()
-    }
-}
-
 /**
  * Save a received file to the public Downloads folder using MediaStore
  * This makes the file accessible in the system Files app
  */
 private fun saveToDownloads(context: android.content.Context, file: ReceivedFile) {
     try {
-        val sourceFile = File(file.path)
+        val rawFile = File(file.path)
+        val sourceFile = HyperDropUtils.ensureFileExtension(rawFile)
         if (!sourceFile.exists()) {
             android.widget.Toast.makeText(context, "File not found", android.widget.Toast.LENGTH_SHORT).show()
             return
         }
 
-        val ext = sourceFile.extension.lowercase(Locale.getDefault())
-        val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+        val mime = HyperDropUtils.resolveMimeType(sourceFile)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             // Android 10+ uses MediaStore for Downloads
@@ -599,20 +542,19 @@ private fun saveToDownloads(context: android.content.Context, file: ReceivedFile
     }
 }
 
-
-
 private fun inferFileType(file: File): String {
-    val ext = file.extension.lowercase(Locale.getDefault())
-    return when (ext) {
-        "jpg", "jpeg", "png", "gif", "webp", "bmp" -> "Image"
-        "mp4", "mkv", "webm", "avi", "mov" -> "Video"
-        "mp3", "wav", "flac", "m4a", "ogg" -> "Audio"
-        "pdf" -> "Document"
-        "doc", "docx", "txt", "rtf", "odt" -> "Document"
-        "xls", "xlsx", "csv" -> "Document"
-        "ppt", "pptx" -> "Document"
-        "zip", "rar", "7z" -> "Archive"
-        "apk" -> "App"
-        else -> "File"
+    return when {
+        HyperDropUtils.isImageFile(file) -> "Image"
+        HyperDropUtils.isVideoFile(file) -> "Video"
+        HyperDropUtils.isAudioFile(file.name) -> "Audio"
+        else -> {
+            val ext = file.extension.lowercase(Locale.getDefault())
+            when (ext) {
+                "pdf", "doc", "docx", "txt", "rtf", "odt", "xls", "xlsx", "csv", "ppt", "pptx" -> "Document"
+                "zip", "rar", "7z" -> "Archive"
+                "apk" -> "App"
+                else -> "File"
+            }
+        }
     }
 }
