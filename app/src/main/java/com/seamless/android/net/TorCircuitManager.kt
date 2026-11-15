@@ -350,6 +350,25 @@ class TorCircuitManager private constructor(private val context: Context) {
         activeConnection(canonicalizePeerKey(onionAddress)) != null
 
     /**
+     * Recycles an existing connection if it has not received any inbound frames within
+     * [silentThresholdMs]. Used by voice call setup and mid-call watchdogs to avoid
+     * pouring real-time call signals/audio into a half-open SOCKS socket.
+     */
+    suspend fun recycleIfSilent(onionAddress: String, silentThresholdMs: Long): Boolean = mutex.withLock {
+        val canonicalKey = canonicalizePeerKey(onionAddress)
+        val connection = connections[canonicalKey] ?: return@withLock false
+        val now = System.currentTimeMillis()
+        if (now - connection.lastReceivedAt <= silentThresholdMs) {
+            return@withLock false
+        }
+        Log.w(TAG, "♻️ Recycling silent connection to $canonicalKey (idle ${now - connection.lastReceivedAt}ms)")
+        connections.remove(canonicalKey)
+        closeConnection(connection)
+        updateStateFlow()
+        true
+    }
+
+    /**
      * Disconnect from a peer
      */
     suspend fun disconnect(onionAddress: String) = mutex.withLock {
@@ -413,11 +432,11 @@ class TorCircuitManager private constructor(private val context: Context) {
                     val now = System.currentTimeMillis()
                     val active = activeConnection(canonicalKey)
                     if (active != null) {
-                        // Keep our own outbound circuit only if it is demonstrably
-                        // alive (still *receiving*) and the deterministic tie-break
-                        // says outbound wins. Every other duplicate replaces the old
-                        // socket: a peer that redials usually saw the old one die.
-                        val activeHealthy = (now - active.lastReceivedAt) <= STALE_ACTIVE_GRACE_MS
+                        // Keep our own outbound circuit only if a simultaneous dial race
+                        // is happening right now (received traffic within 2.5s) and the
+                        // deterministic tie-break says outbound wins. Any redial after a
+                        // pause replaces the old socket so calls/messages never split-brain.
+                        val activeHealthy = (now - active.lastReceivedAt) <= 2_500L
                         val keepActive = !active.isIncoming && activeHealthy && !preferIncoming
                         if (keepActive) {
                             try { socket.close() } catch (_: Exception) {}
@@ -504,10 +523,11 @@ class TorCircuitManager private constructor(private val context: Context) {
                 val active = activeConnection(canonicalKey)
                 // If the peer reached us while we were dialing, the symmetric
                 // tie-break decides which of the two sockets survives.
-                val keepActive = active != null && (
-                    !active.isIncoming ||
-                        (preferIncoming(canonicalKey) && (now - active.lastReceivedAt) <= STALE_ACTIVE_GRACE_MS)
-                    )
+                // Because registerOutbound runs before any frame is written on `socket`,
+                // the remote peer has not registered `socket` yet. If an authenticated
+                // `active` connection is already receiving traffic (within 15s), always
+                // keep `active` so a slow background dial never kills a live call/chat socket.
+                val keepActive = active != null && (now - active.lastReceivedAt) <= 15_000L
                 if (keepActive) {
                     try { socket.close() } catch (_: Exception) {}
                     active

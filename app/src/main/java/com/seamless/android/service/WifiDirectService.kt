@@ -20,6 +20,7 @@ import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceRequest
 import android.os.*
 import android.provider.MediaStore
+import android.provider.Settings
 import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.core.app.ActivityCompat
@@ -96,9 +97,17 @@ class WifiDirectService : Service() {
     private var lastDeviceFoundTime = 0L
     private var discoveryRetryCount = 0
     private var isLocalServiceRegistered = false
+    private var isLocalServiceRegistrationInFlight = false
 
     // Map discovered peer MAC addresses to friendly HyperDrop aliases via DNS-SD
     private val dnsSdAliases = ConcurrentHashMap<String, String>()
+    // Service discovery can return an app peer before it appears in the generic peer list.
+    // Keep the generic list for address bookkeeping, but only expose verified
+    // HyperDrop services to the file-sharing UI.
+    private val p2pPeersByAddress = ConcurrentHashMap<String, WifiP2pDevice>()
+    private val servicePeersByAddress = ConcurrentHashMap<String, WifiP2pDevice>()
+    private var dnsSdServiceRequest: WifiP2pDnsSdServiceRequest? = null
+    private var isServiceRequestRegistrationInFlight = false
     private val connectedClientMacs = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var hasConnectedPeerInGroup: Boolean = false
 
@@ -243,6 +252,36 @@ class WifiDirectService : Service() {
         }
     }
 
+    /**
+     * Android still requires the system Location toggle for Wi-Fi Direct peer and
+     * service discovery. This is separate from the runtime Nearby devices grant.
+     */
+    private fun isLocationModeEnabled(): Boolean {
+        return try {
+            val locationManager = getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                locationManager?.isLocationEnabled == true
+            } else {
+                Settings.Secure.getInt(contentResolver, Settings.Secure.LOCATION_MODE, Settings.Secure.LOCATION_MODE_OFF) !=
+                    Settings.Secure.LOCATION_MODE_OFF
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to determine Location mode", e)
+            false
+        }
+    }
+
+    private fun publishDiscoveredPeers() {
+        val peers = LinkedHashMap<String, WifiP2pDevice>()
+        servicePeersByAddress.forEach { (address, peer) ->
+            val copy = WifiP2pDevice(peer)
+            val alias = address?.let { dnsSdAliases[it] }
+            if (!alias.isNullOrBlank()) copy.deviceName = alias
+            peers[address] = copy
+        }
+        notifyCallbacks { onPeersDiscovered(peers.values) }
+    }
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -276,8 +315,8 @@ class WifiDirectService : Service() {
      * Register a DNS-SD local service and response listeners so HyperDrop peers
      * can exchange friendly aliases and stay discoverable in P2P Listen state.
      */
-    private fun ensureDnsSdConfigured(ch: WifiP2pManager.Channel) {
-        if (!hasWifiDirectPermission()) return
+    private fun ensureDnsSdConfigured(ch: WifiP2pManager.Channel): Boolean {
+        if (!hasWifiDirectPermission()) return false
         try {
             val alias = HyperDropIdentity.getAlias(this)
             val model = HyperDropIdentity.getDeviceModel()
@@ -285,11 +324,11 @@ class WifiDirectService : Service() {
 
             wifiP2pManager.setDnsSdResponseListeners(
                 ch,
-                { _, _, srcDevice ->
-                    val addr = srcDevice?.deviceAddress?.lowercase(Locale.US)
-                    if (!addr.isNullOrBlank() && !srcDevice.deviceName.isNullOrBlank()) {
-                        dnsSdAliases.putIfAbsent(addr, srcDevice.deviceName)
-                    }
+                { instanceName, registrationType, srcDevice ->
+                    // Identity is confirmed by the TXT record below. Some OEMs
+                    // are strict about DNS-SD instance-name matching, so do not
+                    // discard a response before its record arrives.
+                    Log.d(TAG, "DNS-SD service response: $instanceName.$registrationType from ${srcDevice?.deviceAddress}")
                 },
                 { _, record, srcDevice ->
                     val addr = srcDevice?.deviceAddress?.lowercase(Locale.US) ?: return@setDnsSdResponseListeners
@@ -302,12 +341,18 @@ class WifiDirectService : Service() {
                             "⚡ $peerAlias"
                         }
                         dnsSdAliases[addr] = display
+                        servicePeersByAddress[addr] = WifiP2pDevice(srcDevice).apply {
+                            deviceName = display
+                        }
+                        publishDiscoveredPeers()
                         Log.d(TAG, "🎯 DNS-SD resolved peer $addr -> $display")
                     }
                 }
             )
 
             if (!isLocalServiceRegistered && visibility != HyperDropIdentity.VisibilityMode.HIDDEN) {
+                if (isLocalServiceRegistrationInFlight) return false
+                isLocalServiceRegistrationInFlight = true
                 val record = mapOf(
                     "alias" to alias,
                     "model" to model,
@@ -316,16 +361,30 @@ class WifiDirectService : Service() {
                 val serviceInfo = WifiP2pDnsSdServiceInfo.newInstance("_hyperdrop", "_tcp", record)
                 wifiP2pManager.addLocalService(ch, serviceInfo, object : WifiP2pManager.ActionListener {
                     override fun onSuccess() {
+                        isLocalServiceRegistrationInFlight = false
                         isLocalServiceRegistered = true
                         Log.d(TAG, "✅ Registered HyperDrop DNS-SD local service: $alias ($model)")
+                        // The Wi-Fi P2P framework processes one operation at a time.
+                        // Begin discovery only after registration has completed.
+                        handler.post { startDiscovery(retryAttempt = 1) }
                     }
                     override fun onFailure(reason: Int) {
-                        Log.d(TAG, "DNS-SD addLocalService note: $reason")
+                        isLocalServiceRegistrationInFlight = false
+                        Log.w(TAG, "DNS-SD addLocalService failed: $reason")
+                        if (reason == WifiP2pManager.BUSY) {
+                            handler.postDelayed({ startDiscovery(retryAttempt = 1) }, 650L)
+                        } else {
+                            notifyCallbacks { onDiscoveryFailed(reason) }
+                        }
                     }
                 })
+                return false
             }
+            return true
         } catch (e: Exception) {
             Log.w(TAG, "DNS-SD setup warning: ${e.message}")
+            notifyCallbacks { onDiscoveryFailed(WifiP2pManager.ERROR) }
+            return false
         }
     }
 
@@ -335,13 +394,18 @@ class WifiDirectService : Service() {
             notifyCallbacks { onDiscoveryFailed(-1) }
             return
         }
+        if (!isLocationModeEnabled()) {
+            Log.w(TAG, "Location mode is disabled; Android blocks Wi-Fi Direct discovery")
+            notifyCallbacks { onDiscoveryFailed(-2) }
+            return
+        }
 
         serviceScope.launch {
             startReceiveServer()
         }
 
         channel?.let { ch ->
-            ensureDnsSdConfigured(ch)
+            if (!ensureDnsSdConfigured(ch)) return
 
             // If we are sitting in a stale empty autonomous group (0 clients), remove it first
             // so the Wi-Fi P2P radio can scan social channels 1, 6, and 11 properly.
@@ -360,38 +424,68 @@ class WifiDirectService : Service() {
                             }
                         })
                     } else {
-                        performDiscoverPeers(ch, retryAttempt)
+                        startHyperDropServiceDiscovery(ch, retryAttempt)
                     }
                 }
                 return
             }
 
-            performDiscoverPeers(ch, retryAttempt)
+            startHyperDropServiceDiscovery(ch, retryAttempt)
         }
     }
 
-    private fun performDiscoverPeers(ch: WifiP2pManager.Channel, retryAttempt: Int) {
+    /**
+     * Discover only the registered HyperDrop service. Calling discoverPeers() and
+     * discoverServices() back-to-back makes the framework cancel one scan with
+     * BUSY on many phones, which was the source of intermittent invisible peers.
+     */
+    private fun startHyperDropServiceDiscovery(ch: WifiP2pManager.Channel, retryAttempt: Int) {
         if (!hasWifiDirectPermission()) return
 
-        wifiP2pManager.discoverPeers(ch, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() {
-                Log.d(TAG, "Discovery started successfully")
-                notifyCallbacks { onDiscoveryStarted() }
-                // Also trigger DNS-SD service discovery in background to resolve HyperDrop aliases
-                runCatching {
-                    val req = WifiP2pDnsSdServiceRequest.newInstance()
-                    wifiP2pManager.addServiceRequest(ch, req, null)
-                    wifiP2pManager.discoverServices(ch, null)
+        val request = dnsSdServiceRequest
+        if (request == null) {
+            if (isServiceRequestRegistrationInFlight) return
+            isServiceRequestRegistrationInFlight = true
+            // Ask for DNS-SD records broadly, then admit only records containing
+            // HyperDrop's identity fields. This avoids OEM-specific failures with
+            // a narrowly formatted instance-name query.
+            val newRequest = WifiP2pDnsSdServiceRequest.newInstance()
+            wifiP2pManager.addServiceRequest(ch, newRequest, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    isServiceRequestRegistrationInFlight = false
+                    dnsSdServiceRequest = newRequest
+                    discoverHyperDropServices(ch, retryAttempt)
                 }
+
+                override fun onFailure(reason: Int) {
+                    isServiceRequestRegistrationInFlight = false
+                    Log.w(TAG, "Could not register HyperDrop service request: $reason")
+                    if (reason == WifiP2pManager.BUSY && retryAttempt < 3) {
+                        handler.postDelayed({ startHyperDropServiceDiscovery(ch, retryAttempt + 1) }, 550L * (retryAttempt + 1))
+                    } else {
+                        notifyCallbacks { onDiscoveryFailed(reason) }
+                    }
+                }
+            })
+        } else {
+            discoverHyperDropServices(ch, retryAttempt)
+        }
+    }
+
+    private fun discoverHyperDropServices(ch: WifiP2pManager.Channel, retryAttempt: Int) {
+        wifiP2pManager.discoverServices(ch, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {
+                Log.d(TAG, "HyperDrop service discovery started successfully")
+                notifyCallbacks { onDiscoveryStarted() }
             }
 
             override fun onFailure(reason: Int) {
-                Log.w(TAG, "Discovery failed: $reason (retryAttempt=$retryAttempt)")
+                Log.w(TAG, "HyperDrop service discovery failed: $reason (retryAttempt=$retryAttempt)")
                 if (reason == WifiP2pManager.BUSY && retryAttempt < 3) {
                     handler.postDelayed({
-                        performDiscoverPeers(ch, retryAttempt + 1)
+                        discoverHyperDropServices(ch, retryAttempt + 1)
                     }, 550L * (retryAttempt + 1))
-                } else if (reason != WifiP2pManager.BUSY) {
+                } else {
                     notifyCallbacks { onDiscoveryFailed(reason) }
                 }
             }
@@ -400,6 +494,12 @@ class WifiDirectService : Service() {
 
     private fun stopDiscovery() {
         channel?.let { ch ->
+            dnsSdServiceRequest?.let { request ->
+                wifiP2pManager.removeServiceRequest(ch, request, null)
+            }
+            dnsSdServiceRequest = null
+            isServiceRequestRegistrationInFlight = false
+            servicePeersByAddress.clear()
             wifiP2pManager.stopPeerDiscovery(ch, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
                     Log.d(TAG, "Discovery stopped")
@@ -416,6 +516,12 @@ class WifiDirectService : Service() {
     private fun createGroup() {
         if (!hasWifiDirectPermission()) {
             Log.w(TAG, "Missing permission for Wi-Fi Direct hosting")
+            notifyCallbacks { onDiscoveryFailed(-1) }
+            return
+        }
+        if (!isLocationModeEnabled()) {
+            Log.w(TAG, "Location mode is disabled; Android blocks Wi-Fi Direct hosting discovery")
+            notifyCallbacks { onDiscoveryFailed(-2) }
             return
         }
 
@@ -425,7 +531,7 @@ class WifiDirectService : Service() {
         }
 
         channel?.let { ch ->
-            ensureDnsSdConfigured(ch)
+            if (!ensureDnsSdConfigured(ch)) return
             wifiP2pManager.requestGroupInfo(ch) { existingGroup ->
                 if (existingGroup != null && (!existingGroup.isGroupOwner || existingGroup.clientList.isNotEmpty())) {
                     Log.d(TAG, "Already in active peer group, keeping existing group and refreshing discovery")
@@ -442,7 +548,7 @@ class WifiDirectService : Service() {
                             notifyCallbacks { onConnected(info) }
                         }
                     }
-                    performDiscoverPeers(ch, retryAttempt = 1)
+                    startHyperDropServiceDiscovery(ch, retryAttempt = 1)
                 } else if (existingGroup != null) {
                     // Remove empty solo group so this receiver enters standard P2P Listen+Search mode
                     // on social channels (1, 6, 11) and is 100% discoverable by all Android phones.
@@ -450,14 +556,14 @@ class WifiDirectService : Service() {
                     connectedClientMacs.clear()
                     wifiP2pManager.removeGroup(ch, object : WifiP2pManager.ActionListener {
                         override fun onSuccess() {
-                            handler.postDelayed({ performDiscoverPeers(ch, retryAttempt = 1) }, 250L)
+                            handler.postDelayed({ startHyperDropServiceDiscovery(ch, retryAttempt = 1) }, 250L)
                         }
                         override fun onFailure(reason: Int) {
-                            performDiscoverPeers(ch, retryAttempt = 1)
+                            startHyperDropServiceDiscovery(ch, retryAttempt = 1)
                         }
                     })
                 } else {
-                    performDiscoverPeers(ch, retryAttempt = 1)
+                    startHyperDropServiceDiscovery(ch, retryAttempt = 1)
                 }
             }
         }
@@ -1185,6 +1291,16 @@ class WifiDirectService : Service() {
     }
 
     private fun cleanup() {
+        channel?.let { ch ->
+            dnsSdServiceRequest?.let { request ->
+                wifiP2pManager.removeServiceRequest(ch, request, null)
+            }
+            wifiP2pManager.clearLocalServices(ch, null)
+        }
+        dnsSdServiceRequest = null
+        isServiceRequestRegistrationInFlight = false
+        servicePeersByAddress.clear()
+        p2pPeersByAddress.clear()
         try {
             serverSocket?.close()
             serverSocket = null
@@ -1241,17 +1357,13 @@ class WifiDirectService : Service() {
                             discoveryRetryCount = 0
                         }
 
-                        val enrichedPeers = peers.deviceList.map { rawPeer ->
+                        p2pPeersByAddress.clear()
+                        peers.deviceList.forEach { rawPeer ->
                             val copy = WifiP2pDevice(rawPeer)
                             val addr = copy.deviceAddress?.lowercase(Locale.US)
-                            val dnsAlias = if (addr != null) dnsSdAliases[addr] else null
-                            if (!dnsAlias.isNullOrBlank()) {
-                                copy.deviceName = dnsAlias
-                            }
-                            copy
+                            if (!addr.isNullOrBlank()) p2pPeersByAddress[addr] = copy
                         }
-
-                        notifyCallbacks { onPeersDiscovered(enrichedPeers) }
+                        publishDiscoveredPeers()
                     }
                 }
 

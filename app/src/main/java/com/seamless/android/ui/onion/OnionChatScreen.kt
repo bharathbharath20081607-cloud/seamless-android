@@ -104,6 +104,14 @@ fun OnionChatScreen(
     var trustState by remember(contact.id) { mutableStateOf(contact.effectiveTrustState()) }
     var showTrustMenu by remember { mutableStateOf(false) }
     var startupRecoveryAttempted by remember(contact.id) { mutableStateOf(false) }
+    val callManager = remember { com.seamless.android.call.SeamlessCallManager.getInstance(context) }
+    val callMicPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            callManager.startOutgoingCall(contact)
+        } else {
+            Toast.makeText(context, "Microphone permission is required for voice calls", Toast.LENGTH_SHORT).show()
+        }
+    }
     val listState = rememberLazyListState()
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null || isSending) return@rememberLauncherForActivityResult
@@ -322,6 +330,44 @@ fun OnionChatScreen(
                         }
                     },
                     actions = {
+                        // Encrypted P2P + Tor Voice Call Button
+                        IconButton(
+                            onClick = {
+                                when {
+                                    trustState == TorContactTrustState.BLOCKED -> {
+                                        Toast.makeText(context, "Contact is blocked", Toast.LENGTH_SHORT).show()
+                                    }
+                                    trustState == TorContactTrustState.KEY_CHANGED -> {
+                                        Toast.makeText(context, "Verify this contact before calling", Toast.LENGTH_SHORT).show()
+                                    }
+                                    !contactAddressReady -> {
+                                        Toast.makeText(context, "Ask them to share their ready Tor contact first", Toast.LENGTH_SHORT).show()
+                                    }
+                                    else -> {
+                                        val hasMic = androidx.core.content.ContextCompat.checkSelfPermission(
+                                            context,
+                                            android.Manifest.permission.RECORD_AUDIO
+                                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                        if (hasMic) {
+                                            callManager.startOutgoingCall(contact)
+                                        } else {
+                                            callMicPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                                        }
+                                    }
+                                }
+                            }
+                        ) {
+                            Icon(
+                                Icons.Default.Call,
+                                contentDescription = "Encrypted Voice Call",
+                                tint = if (contactAddressReady && trustState != TorContactTrustState.BLOCKED) {
+                                    Color(0xFF00E676)
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                                }
+                            )
+                        }
+
                         Box {
                             IconButton(onClick = { showTrustMenu = true }) {
                                 Icon(

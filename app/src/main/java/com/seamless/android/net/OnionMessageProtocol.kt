@@ -68,7 +68,9 @@ object OnionMessageProtocol {
 
         // === Mailbox Protocol frame types ===
         MAILBOX_EXCHANGE(0x30),  // Exchange mailbox .onion addresses with peer
-        MAILBOX_STORE(0x31);     // Store-and-forward message via mailbox relay
+        MAILBOX_STORE(0x31),     // Store-and-forward message via mailbox relay
+        CALL_SIGNAL(0x40),       // Encrypted call signaling (OFFER, RINGING, ACCEPT, DECLINE, HANGUP, P2P_PROBE)
+        CALL_AUDIO(0x41);        // Compact real-time encrypted voice frame (fits inside 1 Tor cell)
         
         companion object {
             fun fromCode(code: Byte): FrameType? = values().find { it.code == code }
@@ -113,12 +115,13 @@ object OnionMessageProtocol {
         /**
          * Encode frame to fixed-size wire format
          */
-        fun encode(): ByteArray {
+        fun encode(padToFixedSize: Boolean = frameType != FrameType.CALL_AUDIO): ByteArray {
             require(payload.size <= MAX_PAYLOAD_SIZE) {
                 "Payload too large: ${payload.size} > $MAX_PAYLOAD_SIZE"
             }
             
-            val buffer = ByteBuffer.allocate(FRAME_SIZE)
+            val totalSize = if (padToFixedSize) FRAME_SIZE else (HEADER_SIZE + payload.size)
+            val buffer = ByteBuffer.allocate(totalSize)
             
             // Header
             buffer.put(version)
@@ -133,7 +136,7 @@ object OnionMessageProtocol {
             buffer.put(payload)
             
             // Random padding to fixed size (prevents traffic analysis)
-            val paddingSize = FRAME_SIZE - HEADER_SIZE - payload.size
+            val paddingSize = if (padToFixedSize) (FRAME_SIZE - HEADER_SIZE - payload.size) else 0
             if (paddingSize > 0) {
                 val padding = ByteArray(paddingSize)
                 secureRandom.nextBytes(padding)
@@ -156,7 +159,7 @@ object OnionMessageProtocol {
              * Decode frame from wire format
              */
             fun decode(data: ByteArray): OnionFrame? {
-                if (data.size != FRAME_SIZE) {
+                if (data.size < HEADER_SIZE || data.size > FRAME_SIZE) {
                     Log.e(TAG, "Invalid frame size: ${data.size}")
                     return null
                 }
@@ -184,7 +187,11 @@ object OnionMessageProtocol {
                     }
                     
                     val payloadLen = buffer.getShort().toInt() and 0xFFFF
-                    if (payloadLen > MAX_PAYLOAD_SIZE) {
+                    if (data.size != FRAME_SIZE && frameType != FrameType.CALL_AUDIO) {
+                        Log.e(TAG, "Invalid frame size ${data.size} for $frameType")
+                        return null
+                    }
+                    if (payloadLen > MAX_PAYLOAD_SIZE || payloadLen > buffer.remaining()) {
                         Log.e(TAG, "Invalid payload length: $payloadLen")
                         return null
                     }

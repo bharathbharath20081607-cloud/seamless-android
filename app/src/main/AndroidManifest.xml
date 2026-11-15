@@ -28,6 +28,8 @@
     
     <!-- Microphone for voice notes -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
     <!-- Wi-Fi Direct permissions -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -126,6 +128,10 @@
             android:foregroundServiceType="connectedDevice|remoteMessaging" />
 
         <!-- Tor Foreground Service — keeps Tor alive, handles Doze/network changes -->
+        <service
+            android:name=".service.CallForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|connectedDevice" />
         <service
             android:name=".service.TorForegroundService"
             android:exported="false"

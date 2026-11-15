@@ -38,6 +38,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Call
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.HourglassTop
@@ -395,6 +398,15 @@ private fun ContactCard(
     isOnline: Boolean,
     onClick: () -> Unit
 ) {
+    val context = LocalContext.current
+    val callManager = remember { com.seamless.android.call.SeamlessCallManager.getInstance(context) }
+    val micPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            callManager.startOutgoingCall(contact)
+        } else {
+            Toast.makeText(context, "Microphone permission is required for voice calls", Toast.LENGTH_SHORT).show()
+        }
+    }
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -437,6 +449,28 @@ private fun ContactCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+            }
+
+            if (!contact.requiresRendezvous() && contact.effectiveTrustState() != TorContactTrustState.BLOCKED) {
+                IconButton(
+                    onClick = {
+                        val hasMic = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.RECORD_AUDIO
+                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        if (hasMic) {
+                            callManager.startOutgoingCall(contact)
+                        } else {
+                            micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    }
+                ) {
+                    Icon(
+                        Icons.Default.Call,
+                        contentDescription = "Voice Call ${contact.nickname}",
+                        tint = OnionUi.Accent
+                    )
+                }
             }
         }
     }

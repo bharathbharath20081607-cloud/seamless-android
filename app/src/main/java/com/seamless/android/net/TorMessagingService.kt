@@ -907,6 +907,99 @@ class TorMessagingService private constructor(private val context: Context) {
         return pingPeer(contact.onionAddress)
     }
 
+    /**
+     * Send an encrypted real-time call signaling frame (OFFER, RINGING, ACCEPT, DECLINE, HANGUP)
+     * directly over the Tor peer circuit without storing in offline mailboxes.
+     */
+    suspend fun sendCallSignalFrame(recipientOnion: String, payload: ByteArray): Boolean {
+        return try {
+            val canonical = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(recipientOnion)
+                .ifBlank { recipientOnion.trim() }
+            val connection = circuitManager.getConnectionWithin(canonical, 45_000L) ?: return false
+            ensureReadLoop(canonical)
+            val currentConnId = circuitManager.getActiveConnectionId(canonical)
+            if (currentConnId != null && introducedConnectionIds[canonical] != currentConnId) {
+                peersIntroducedOnConnection.remove(canonical)
+            }
+            if (peersIntroducedOnConnection.add(canonical)) {
+                val myInfo = contactManager.getMyContactInfo()
+                if (myInfo.onionAddress.isNotBlank() && !myInfo.requiresRendezvous()) {
+                    val introFrame = OnionMessageProtocol.createContactExchangeFrame(
+                        myOnionAddress = myInfo.onionAddress,
+                        myNickname = myInfo.nickname,
+                        myPublicKey = myInfo.publicKey,
+                        myAvatarId = myInfo.avatarId,
+                        sequence = getSequenceManager(canonical).nextOutbound()
+                    )
+                    if (circuitManager.sendData(canonical, introFrame.encode())) {
+                        currentConnId?.let { introducedConnectionIds[canonical] = it }
+                        delay(40L)
+                    } else {
+                        peersIntroducedOnConnection.remove(canonical)
+                    }
+                } else {
+                    peersIntroducedOnConnection.remove(canonical)
+                }
+            }
+            val frame = OnionMessageProtocol.OnionFrame(
+                messageId = UUID.randomUUID(),
+                sequence = getSequenceManager(canonical).nextOutbound(),
+                timestamp = System.currentTimeMillis(),
+                frameType = OnionMessageProtocol.FrameType.CALL_SIGNAL,
+                payload = payload
+            )
+            val sent = circuitManager.sendData(canonical, encryptFrame(canonical, frame).encode())
+            if (sent) ensureReadLoop(canonical)
+            sent
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send CALL_SIGNAL to ${redactEndpoint(recipientOnion)}: ${e.message}")
+            false
+        }
+    }
+
+    private val lastAudioReconnectTriggerAt = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Send a compact real-time voice frame (fits inside 1 Tor cell, payload already
+     * AES-256-GCM encrypted in RAM with the call's ephemeral 256-bit session key).
+     */
+    suspend fun sendCallAudioFrame(
+        recipientOnion: String,
+        sequence: Long,
+        timestampMs: Long,
+        payload: ByteArray
+    ): Boolean {
+        return try {
+            val canonical = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(recipientOnion)
+                .ifBlank { recipientOnion.trim() }
+            if (!circuitManager.hasActiveConnection(canonical)) {
+                val now = System.currentTimeMillis()
+                val lastTry = lastAudioReconnectTriggerAt[canonical] ?: 0L
+                if (now - lastTry >= 2_500L) {
+                    lastAudioReconnectTriggerAt[canonical] = now
+                    scope.launch {
+                        if (circuitManager.getConnectionWithin(canonical, 15_000L) != null) {
+                            ensureReadLoop(canonical)
+                        }
+                    }
+                }
+                return false
+            }
+            ensureReadLoop(canonical)
+            val frame = OnionMessageProtocol.OnionFrame(
+                messageId = UUID.randomUUID(),
+                sequence = sequence,
+                timestamp = timestampMs,
+                frameType = OnionMessageProtocol.FrameType.CALL_AUDIO,
+                payload = payload
+            )
+            circuitManager.sendData(canonical, frame.encode(padToFixedSize = false))
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send CALL_AUDIO to ${redactEndpoint(recipientOnion)}: ${e.message}")
+            false
+        }
+    }
+
     /** Sends a short-lived direct presence hint. Typing is intentionally never queued. */
     fun setTyping(contactId: String, isTyping: Boolean) {
         val contact = contactManager.getContact(contactId) ?: return
@@ -1481,6 +1574,8 @@ class TorMessagingService private constructor(private val context: Context) {
     }
 
     private val peerInboundLocks = ConcurrentHashMap<String, Mutex>()
+    private val directTransportKeyCache = ConcurrentHashMap<String, ByteArray>()
+    @Volatile private var cachedLocalStaticKeyPair: Pair<ByteArray, ByteArray>? = null
     
     private suspend fun handleIncomingData(
         senderOnion: String,
@@ -1488,6 +1583,23 @@ class TorMessagingService private constructor(private val context: Context) {
         isAlreadyDecrypted: Boolean = false,
         allowOfflineTimestamp: Boolean = false
     ): Boolean {
+        if (data.size >= OnionMessageProtocol.HEADER_SIZE &&
+            data[33] == OnionMessageProtocol.FrameType.CALL_AUDIO.code
+        ) {
+            val fastFrame = OnionMessageProtocol.OnionFrame.decode(data)
+            if (fastFrame != null && fastFrame.frameType == OnionMessageProtocol.FrameType.CALL_AUDIO) {
+                markPeerResponsive(senderOnion)
+                val audioPayload = if (!isAlreadyDecrypted && isDirectSealedPayload(fastFrame.payload)) {
+                    val decryptedBytes = runCatching { decryptData(senderOnion, data) }.getOrNull()
+                    decryptedBytes?.let { OnionMessageProtocol.OnionFrame.decode(it)?.payload } ?: return false
+                } else {
+                    fastFrame.payload
+                }
+                com.seamless.android.call.SeamlessCallManager.getInstance(context)
+                    .onIncomingTorCallAudio(senderOnion, fastFrame.sequence, fastFrame.timestamp, audioPayload)
+                return true
+            }
+        }
         val lockKey = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(senderOnion)
             .ifBlank { senderOnion.lowercase() }
         val peerLock = peerInboundLocks.getOrPut(lockKey) { Mutex() }
@@ -1518,7 +1630,14 @@ class TorMessagingService private constructor(private val context: Context) {
                     return false
                 }
                 
-                // Check for duplicates
+                // Fast-path real-time voice frames before message deduplicator
+            if (frame.frameType == OnionMessageProtocol.FrameType.CALL_AUDIO) {
+                com.seamless.android.call.SeamlessCallManager.getInstance(context)
+                    .onIncomingTorCallAudio(senderOnion, frame.sequence, frame.timestamp, frame.payload)
+                return true
+            }
+
+            // Check for duplicates
                 if (deduplicator.isDuplicate(frame.messageId)) {
                     Log.d(TAG, "Ignoring duplicate contact exchange ${frame.messageId}")
                     return true
@@ -1542,6 +1661,13 @@ class TorMessagingService private constructor(private val context: Context) {
                 return false
             }
             
+            // Fast-path real-time voice frames before message deduplicator
+            if (frame.frameType == OnionMessageProtocol.FrameType.CALL_AUDIO) {
+                com.seamless.android.call.SeamlessCallManager.getInstance(context)
+                    .onIncomingTorCallAudio(senderOnion, frame.sequence, frame.timestamp, frame.payload)
+                return true
+            }
+
             // Check for duplicates
             if (deduplicator.isDuplicate(frame.messageId)) {
                 Log.d(TAG, "Ignoring duplicate message ${frame.messageId}")
@@ -1637,6 +1763,17 @@ class TorMessagingService private constructor(private val context: Context) {
                         deduplicator.forget(frame.messageId)
                         false
                     }
+                }
+                OnionMessageProtocol.FrameType.CALL_SIGNAL -> {
+                    Log.i(TAG, "📞 Received CALL_SIGNAL from ${redactEndpoint(senderOnion)}")
+                    com.seamless.android.call.SeamlessCallManager.getInstance(context)
+                        .onIncomingTorCallSignal(senderOnion, frame.payload)
+                    true
+                }
+                OnionMessageProtocol.FrameType.CALL_AUDIO -> {
+                    com.seamless.android.call.SeamlessCallManager.getInstance(context)
+                        .onIncomingTorCallAudio(senderOnion, frame.sequence, frame.timestamp, frame.payload)
+                    true
                 }
                 OnionMessageProtocol.FrameType.MAILBOX_STORE -> {
                     Log.d(TAG, "📬 Received MAILBOX_STORE from ${redactEndpoint(senderOnion)}")
@@ -2378,17 +2515,18 @@ class TorMessagingService private constructor(private val context: Context) {
         frame: OnionMessageProtocol.OnionFrame,
         peerPublicKey: ByteArray
     ): ByteArray {
-        val localKeyPair = SecureIdentityStateManager(context).loadStaticKey()
-            ?: throw IllegalStateException("Local static key unavailable")
-        val localPrivateKey = localKeyPair.first
-        val localPublicKey = localKeyPair.second
-        val sharedSecret = X25519.computeSharedSecret(localPrivateKey, peerPublicKey)
+
+
+        // Key is derived once and cached via getOrDeriveDirectTransportKey(peerPublicKey)
+
+
+        // Cached transport key eliminates per-frame Keystore and X25519 overhead
         val nonce = ByteArray(DIRECT_NONCE_SIZE).also { SecureRandom().nextBytes(it) }
         val aad = directFrameAad(frame)
         val sealedHeader = DIRECT_SEALED_MAGIC + byteArrayOf(DIRECT_SEALED_VERSION)
         val ciphertext = aesGcmEncrypt(
             plaintext = frame.payload,
-            key = deriveDirectTransportKey(sharedSecret, localPublicKey, peerPublicKey),
+            key = getOrDeriveDirectTransportKey(peerPublicKey),
             nonce = nonce,
             aad = aad + sealedHeader
         )
@@ -2426,20 +2564,34 @@ class TorMessagingService private constructor(private val context: Context) {
             val ciphertext = ByteArray(ciphertextSize)
             buffer.get(ciphertext)
 
-            val localKeyPair = SecureIdentityStateManager(context).loadStaticKey()
-                ?: throw IllegalStateException("Local static key unavailable")
-            val sharedSecret = X25519.computeSharedSecret(localKeyPair.first, peerPublicKey)
+    
+
+            // Key is derived once and cached via getOrDeriveDirectTransportKey(peerPublicKey)
+            // Key derived & cached in getOrDeriveDirectTransportKey
             val sealedHeader = DIRECT_SEALED_MAGIC + byteArrayOf(version)
 
             aesGcmDecrypt(
                 ciphertext = ciphertext,
-                key = deriveDirectTransportKey(sharedSecret, localKeyPair.second, peerPublicKey),
+                key = getOrDeriveDirectTransportKey(peerPublicKey),
                 nonce = nonce,
                 aad = directFrameAad(frame) + sealedHeader
             )
         } catch (e: Exception) {
             Log.w(TAG, "Direct sealed payload decrypt failed for ${frame.messageId}: ${e.message}")
             null
+        }
+    }
+
+    private fun getOrDeriveDirectTransportKey(peerPublicKey: ByteArray): ByteArray {
+        val cacheKey = peerPublicKey.joinToString("") { "%02x".format(it) }
+        directTransportKeyCache[cacheKey]?.let { return it }
+        val localKeyPair = cachedLocalStaticKeyPair
+            ?: SecureIdentityStateManager(context).loadStaticKey()?.also { cachedLocalStaticKeyPair = it }
+            ?: throw IllegalStateException("Local static key unavailable")
+        // Key is derived once and cached via getOrDeriveDirectTransportKey(peerPublicKey)
+        val sharedSecret = X25519.computeSharedSecret(localKeyPair.first, peerPublicKey)
+        return deriveDirectTransportKey(sharedSecret, localKeyPair.second, peerPublicKey).also {
+            directTransportKeyCache[cacheKey] = it
         }
     }
 

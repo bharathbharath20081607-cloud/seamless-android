@@ -33,7 +33,6 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
 
     companion object {
         private const val TAG = "FileShareViewModel"
-        private const val DISCOVERY_REFRESH_INTERVAL_MS = 10_000L // Rediscover every 10 seconds
         private const val DISCOVERY_TIMEOUT_MS = 30_000L // Show timeout message after 30 seconds
     }
 
@@ -41,50 +40,12 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
     private var discoveryJob: Job? = null
     private var filePreparationJob: Job? = null
 
-    // Wi-Fi Aware for instant discovery (like AirDrop)
-    private var wifiAwareService: com.seamless.android.service.WifiAwareService? = null
-    private var isWifiAwareAvailable = false
-
-    // Dual-Mode peer maps so Wi-Fi Direct and Wi-Fi Aware discoveries merge cleanly without overwriting
+    // Wi-Fi Direct is the transfer transport. Keep the displayed device list tied to
+    // peers that can actually be connected and receive a file.
     private val p2pPeersMap = java.util.concurrent.ConcurrentHashMap<String, WifiP2pDevice>()
-    private val awarePeersMap = java.util.concurrent.ConcurrentHashMap<String, String>() // peerId -> peerName
 
     private fun rebuildDiscoveredDevices() {
-        val merged = mutableListOf<WifiP2pDevice>()
-        val matchedAwareIds = mutableSetOf<String>()
-
-        // 1. Add all real Wi-Fi Direct peers (with valid MAC addresses)
-        for (p2p in p2pPeersMap.values) {
-            val cleanP2pName = p2p.deviceName.orEmpty().removePrefix("⚡ ").trim()
-            val matchingAwareEntry = awarePeersMap.entries.firstOrNull { (_, awareName) ->
-                val cleanAware = awareName.removePrefix("⚡ ").trim()
-                cleanP2pName.isNotEmpty() && cleanAware.isNotEmpty() && (
-                    cleanP2pName.equals(cleanAware, ignoreCase = true) ||
-                        cleanP2pName.contains(cleanAware, ignoreCase = true) ||
-                        cleanAware.contains(cleanP2pName, ignoreCase = true)
-                    )
-            }
-            val deviceCopy = WifiP2pDevice(p2p)
-            if (matchingAwareEntry != null) {
-                matchedAwareIds.add(matchingAwareEntry.key)
-                val awareDisplay = matchingAwareEntry.value
-                deviceCopy.deviceName = if (awareDisplay.startsWith("⚡")) awareDisplay else "⚡ $awareDisplay"
-            }
-            merged.add(deviceCopy)
-        }
-
-        // 2. Add any Wi-Fi Aware peers not yet matched to a Wi-Fi Direct MAC
-        for ((peerId, peerName) in awarePeersMap.entries) {
-            if (peerId in matchedAwareIds) continue
-            val synthetic = WifiP2pDevice().apply {
-                deviceAddress = peerId
-                deviceName = if (peerName.startsWith("⚡")) peerName else "⚡ $peerName"
-                status = WifiP2pDevice.AVAILABLE
-            }
-            merged.add(synthetic)
-        }
-
-        _discoveredDevices.postValue(merged)
+        _discoveredDevices.postValue(p2pPeersMap.values.map(::WifiP2pDevice))
     }
 
     private val _isWifiDirectEnabled = MutableLiveData(false)
@@ -264,79 +225,26 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
         discoveryJob?.cancel()
 
         p2pPeersMap.clear()
-        awarePeersMap.clear()
         _discoveredDevices.postValue(emptyList())
         _isDiscovering.postValue(true)
 
         val context = getApplication<Application>()
 
+        // Wi-Fi Direct discovery stays active until a connection is made or it is
+        // explicitly stopped. Re-starting it every few seconds competes with the
+        // DNS-SD scan and makes active HyperDrop phones intermittently vanish.
+        startDiscoveryInternal(context)
         discoveryJob = viewModelScope.launch {
-            var totalElapsed = 0L
-            var hasShownTimeoutMessage = false
-
-            while (coroutineContext[Job]?.isActive == true) {
-                startDiscoveryInternal(context)
-
-                delay(DISCOVERY_REFRESH_INTERVAL_MS)
-                totalElapsed += DISCOVERY_REFRESH_INTERVAL_MS
-
-                if (totalElapsed >= DISCOVERY_TIMEOUT_MS &&
-                    _discoveredDevices.value.isNullOrEmpty() &&
-                    !hasShownTimeoutMessage
-                ) {
-                    Log.w(TAG, "⏱️ Discovery timeout - no devices found after ${totalElapsed / 1000}s")
-                    _statusMessage.postValue("No devices found yet. Make sure nearby devices are in Receive mode.")
-                    hasShownTimeoutMessage = true
-                }
+            delay(DISCOVERY_TIMEOUT_MS)
+            if (_discoveredDevices.value.isNullOrEmpty()) {
+                Log.w(TAG, "⏱️ Discovery timeout - no devices found after ${DISCOVERY_TIMEOUT_MS / 1000}s")
+                _statusMessage.postValue("No HyperDrop devices found yet. Make sure the other phone is in Receive mode and system Location is on.")
             }
         }
     }
 
     private fun startDiscoveryInternal(context: Context) {
         startWifiDirectDiscovery()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-            com.seamless.android.service.WifiAwareService.isSupported(context)
-        ) {
-            Log.i(TAG, "🚀 Starting Wi-Fi Aware discovery (Dual-Mode)")
-
-            if (wifiAwareService == null) {
-                wifiAwareService = com.seamless.android.service.WifiAwareService(context)
-                wifiAwareService?.setCallback(object : com.seamless.android.service.WifiAwareService.Callback {
-                    override fun onDeviceDiscovered(peerId: String, peerName: String, peerHandle: Any) {
-                        Log.i(TAG, "🎯 Wi-Fi Aware: Found device: $peerName ($peerId)")
-                        awarePeersMap[peerId] = peerName
-                        rebuildDiscoveredDevices()
-                    }
-
-                    override fun onDeviceLost(peerId: String) {
-                        awarePeersMap.remove(peerId)
-                        rebuildDiscoveredDevices()
-                    }
-
-                    override fun onSessionReady() {
-                        Log.i(TAG, "✅ Wi-Fi Aware session ready - starting subscribe")
-                        isWifiAwareAvailable = true
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            wifiAwareService?.startSubscribing()
-                        }
-                    }
-
-                    override fun onError(message: String) {
-                        Log.e(TAG, "Wi-Fi Aware error: $message")
-                    }
-
-                    override fun onAwareUnavailable() {
-                        Log.w(TAG, "Wi-Fi Aware unavailable")
-                        isWifiAwareAvailable = false
-                    }
-                })
-            }
-
-            val deviceName = "${HyperDropIdentity.getAlias(context)} (${HyperDropIdentity.getDeviceModel()})"
-            wifiAwareService?.setDeviceName(deviceName)
-            wifiAwareService?.start()
-        }
     }
 
     private fun startWifiDirectDiscovery() {
@@ -366,50 +274,12 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
             _transferScreenState.value = TransferScreenState.NONE
         }
 
-        discoveryJob = viewModelScope.launch {
-            while (coroutineContext[Job]?.isActive == true) {
-                startHostingInternal(context)
-                delay(DISCOVERY_REFRESH_INTERVAL_MS)
-            }
-        }
+        // Register and advertise once. The platform keeps the local service
+        // visible; repeatedly rebuilding it interrupts nearby discovery.
+        startHostingInternal(context)
     }
 
     private fun startHostingInternal(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-            com.seamless.android.service.WifiAwareService.isSupported(context)
-        ) {
-            if (wifiAwareService == null) {
-                wifiAwareService = com.seamless.android.service.WifiAwareService(context)
-                wifiAwareService?.setCallback(object : com.seamless.android.service.WifiAwareService.Callback {
-                    override fun onDeviceDiscovered(peerId: String, peerName: String, peerHandle: Any) {
-                        Log.d(TAG, "Received connection from: $peerName")
-                        awarePeersMap[peerId] = peerName
-                        rebuildDiscoveredDevices()
-                    }
-                    override fun onDeviceLost(peerId: String) {
-                        awarePeersMap.remove(peerId)
-                        rebuildDiscoveredDevices()
-                    }
-                    override fun onSessionReady() {
-                        Log.i(TAG, "✅ Wi-Fi Aware ready - starting publish")
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            wifiAwareService?.startPublishing()
-                        }
-                    }
-                    override fun onError(message: String) {
-                        Log.e(TAG, "Aware error: $message")
-                    }
-                    override fun onAwareUnavailable() {
-                        Log.w(TAG, "Aware unavailable for hosting, using Wi-Fi Direct only")
-                    }
-                })
-            }
-
-            val deviceName = "${HyperDropIdentity.getAlias(context)} (${HyperDropIdentity.getDeviceModel()})"
-            wifiAwareService?.setDeviceName(deviceName)
-            wifiAwareService?.start()
-        }
-
         val intent = Intent(context, WifiDirectService::class.java).apply {
             action = WifiDirectService.ACTION_CREATE_GROUP
         }
@@ -420,8 +290,6 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
     fun stopDeviceDiscovery() {
         discoveryJob?.cancel()
         discoveryJob = null
-
-        wifiAwareService?.stop()
 
         val context = getApplication<Application>()
         val intent = Intent(context, WifiDirectService::class.java).apply {
@@ -435,20 +303,7 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
         if (deviceAddressOrAwareId.contains(":")) {
             return deviceAddressOrAwareId
         }
-        val awareName = awarePeersMap[deviceAddressOrAwareId]?.removePrefix("⚡ ")?.trim().orEmpty()
-        if (awareName.isNotEmpty()) {
-            val matchedByName = p2pPeersMap.values.firstOrNull { p2p ->
-                val p2pName = p2p.deviceName.orEmpty().removePrefix("⚡ ").trim()
-                p2pName.equals(awareName, ignoreCase = true) ||
-                    p2pName.contains(awareName, ignoreCase = true) ||
-                    awareName.contains(p2pName, ignoreCase = true)
-            }
-            if (matchedByName != null) return matchedByName.deviceAddress
-        }
-        if (p2pPeersMap.size == 1) {
-            return p2pPeersMap.values.first().deviceAddress
-        }
-        return null
+        return p2pPeersMap[deviceAddressOrAwareId]?.deviceAddress
     }
 
     fun connectToDevice(deviceAddress: String) {
@@ -488,33 +343,11 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
 
-        // Resolve synthetic Wi-Fi Aware ID to a real Wi-Fi Direct MAC address
-        if (!deviceAddress.contains(":")) {
-            if (resolvedTargetMac != null) {
-                performConnect(resolvedTargetMac)
-                return
-            }
-            val awareName = awarePeersMap[deviceAddress] ?: "device"
-            _statusMessage.postValue("Negotiating high-speed Wi-Fi Direct link with $awareName...")
-            startWifiDirectDiscovery()
-            viewModelScope.launch {
-                var resolvedMac: String? = null
-                repeat(15) {
-                    delay(300L)
-                    resolvedMac = resolveP2pMacAddress(deviceAddress)
-                    if (resolvedMac != null) return@repeat
-                }
-                val finalMac = resolvedMac
-                if (finalMac != null) {
-                    performConnect(finalMac)
-                } else {
-                    _errorMessage.postValue("Waiting for $awareName's Wi-Fi Direct channel — tap again in a moment.")
-                }
-            }
+        if (resolvedTargetMac == null) {
+            _errorMessage.postValue("That device is no longer available. Scan again and select it once it appears.")
             return
         }
-
-        performConnect(deviceAddress)
+        performConnect(resolvedTargetMac)
     }
 
     private fun performConnect(deviceAddress: String) {
@@ -948,6 +781,7 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
         _isDiscovering.value = false
         _errorMessage.value = when (reason) {
             -1 -> "Discovery failed: missing Nearby devices/location permission. Check app permissions."
+            -2 -> "Turn on the phone's system Location setting to find nearby HyperDrop devices."
             android.net.wifi.p2p.WifiP2pManager.BUSY -> "System is busy. Retrying scan..."
             android.net.wifi.p2p.WifiP2pManager.P2P_UNSUPPORTED -> "Wi-Fi Direct is not supported on this device."
             else -> "Device discovery failed (code $reason)."

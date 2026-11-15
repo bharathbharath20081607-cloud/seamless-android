@@ -468,20 +468,81 @@ private fun PrivateChatHeader(
 
         }
         
-        // Favorite button - positioned on the right
-        IconButton(
-            onClick = {
-                Log.d("ChatHeader", "Header toggle favorite: peerID=$peerID, currentFavorite=$isFavorite")
-                onToggleFavorite()
-            },
+        // Call + Favorite actions - positioned on the right
+        val headerContext = LocalContext.current
+        var pendingCallContact by remember { mutableStateOf<com.seamless.android.net.OnionContactManager.OnionContact?>(null) }
+        val headerMicPermLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            val target = pendingCallContact
+            pendingCallContact = null
+            if (granted && target != null) {
+                com.seamless.android.call.SeamlessCallManager.getInstance(headerContext)
+                    .startOutgoingCall(target)
+            } else if (!granted) {
+                android.widget.Toast.makeText(
+                    headerContext,
+                    "Microphone permission is required for voice calls",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.align(Alignment.CenterEnd)
         ) {
-            Icon(
-                imageVector = if (isFavorite) Icons.Filled.Star else Icons.Outlined.Star,
-                contentDescription = if (isFavorite) stringResource(R.string.cd_remove_favorite) else stringResource(R.string.cd_add_favorite),
-                modifier = Modifier.size(18.dp), // Slightly larger than sidebar icon
-                tint = if (isFavorite) Color(0xFFFFD700) else Color(0x87878700) // Yellow or grey
-            )
+            IconButton(
+                onClick = {
+                    val contactMgr = com.seamless.android.net.OnionContactManager.getInstance(headerContext)
+                    val matchedContact = contactMgr.getAllContacts().firstOrNull { c ->
+                        !c.requiresRendezvous() && (
+                            c.publicKey.equals(peerID, ignoreCase = true) ||
+                                c.id.equals(peerID, ignoreCase = true) ||
+                                c.nickname.equals(titleText, ignoreCase = true)
+                            )
+                    }
+                    if (matchedContact != null) {
+                        val hasMic = androidx.core.content.ContextCompat.checkSelfPermission(
+                            headerContext,
+                            android.Manifest.permission.RECORD_AUDIO
+                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        if (hasMic) {
+                            com.seamless.android.call.SeamlessCallManager.getInstance(headerContext)
+                                .startOutgoingCall(matchedContact)
+                        } else {
+                            pendingCallContact = matchedContact
+                            headerMicPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                        }
+                    } else {
+                        android.widget.Toast.makeText(
+                            headerContext,
+                            "Open Tor P2P Contacts to pair ${titleText}'s .onion address for long-distance voice calls",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Call,
+                    contentDescription = "Voice Call",
+                    modifier = Modifier.size(18.dp),
+                    tint = Color(0xFF00E676)
+                )
+            }
+
+            IconButton(
+                onClick = {
+                    Log.d("ChatHeader", "Header toggle favorite: peerID=$peerID, currentFavorite=$isFavorite")
+                    onToggleFavorite()
+                }
+            ) {
+                Icon(
+                    imageVector = if (isFavorite) Icons.Filled.Star else Icons.Outlined.Star,
+                    contentDescription = if (isFavorite) stringResource(R.string.cd_remove_favorite) else stringResource(R.string.cd_add_favorite),
+                    modifier = Modifier.size(18.dp), // Slightly larger than sidebar icon
+                    tint = if (isFavorite) Color(0xFFFFD700) else Color(0x87878700) // Yellow or grey
+                )
+            }
         }
     }
 }

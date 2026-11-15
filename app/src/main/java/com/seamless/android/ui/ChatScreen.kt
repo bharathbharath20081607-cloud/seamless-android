@@ -993,6 +993,9 @@ fun ChatScreen(viewModel: ChatViewModel) {
             )
         }
     }
+
+    // Global P2P + Tor Encrypted Voice Call Overlay (incoming & active calls)
+    com.seamless.android.ui.call.SeamlessCallOverlay()
 }
 
 @Composable
