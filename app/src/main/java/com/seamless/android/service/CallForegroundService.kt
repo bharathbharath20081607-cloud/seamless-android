@@ -43,6 +43,7 @@ class CallForegroundService : Service() {
         const val ACTION_ACCEPT_CALL = "com.seamless.android.call.ACTION_ACCEPT_CALL"
         const val ACTION_DECLINE_CALL = "com.seamless.android.call.ACTION_DECLINE_CALL"
         const val ACTION_END_CALL = "com.seamless.android.call.ACTION_END_CALL"
+        const val EXTRA_CALL_ACTION = "com.seamless.android.call.EXTRA_CALL_ACTION"
 
         fun start(context: Context) {
             try {
@@ -73,6 +74,7 @@ class CallForegroundService : Service() {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var stateCollectorJob: Job? = null
     private var cpuWakeLock: PowerManager.WakeLock? = null
+    private var screenWakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -87,6 +89,9 @@ class CallForegroundService : Service() {
                 if (session == null || session.state == CallState.IDLE) {
                     stopSelf()
                 } else {
+                    if (session.state == CallState.INCOMING_RINGING && session.state != lastState) {
+                        wakeScreenForIncomingCall()
+                    }
                     val notification = buildCallNotification()
                     if (session.state != lastState && session.state == CallState.ACTIVE) {
                         promoteToForeground(notification)
@@ -125,28 +130,38 @@ class CallForegroundService : Service() {
 
     private fun promoteToForeground(notification: Notification) {
         try {
+            val session = SeamlessCallManager.getInstance(applicationContext).sessionFlow.value
+            val isActiveOrDialing = session?.state == CallState.ACTIVE ||
+                session?.state == CallState.OUTGOING_DIALING ||
+                session?.state == CallState.OUTGOING_RINGING
+            val hasMicPerm = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                val hasMicPerm = ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.RECORD_AUDIO
-                ) == PackageManager.PERMISSION_GRANTED
-                val fgsType = if (hasMicPerm) {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                val fgsType = if (isActiveOrDialing && hasMicPerm) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING or
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
                 } else {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING or
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
                 }
                 startForeground(NOTIFICATION_ID, notification, fgsType)
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val hasMicPerm = ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.RECORD_AUDIO
-                ) == PackageManager.PERMISSION_GRANTED
-                val fgsType = if (hasMicPerm) {
+                val fgsType = if (isActiveOrDialing && hasMicPerm) {
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
                 } else {
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
                 }
                 startForeground(NOTIFICATION_ID, notification, fgsType)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                )
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
@@ -198,25 +213,22 @@ class CallForegroundService : Service() {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
 
         if (session?.state == CallState.INCOMING_RINGING) {
-            val hasMicPerm = ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
-            val acceptIntent = Intent(this, CallForegroundService::class.java).apply {
-                action = ACTION_ACCEPT_CALL
+            builder.setPriority(NotificationCompat.PRIORITY_MAX)
+            builder.setFullScreenIntent(contentPendingIntent, true)
+            val acceptActivityIntent = Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(EXTRA_CALL_ACTION, ACTION_ACCEPT_CALL)
             }
+            val acceptPi = PendingIntent.getActivity(
+                this,
+                1,
+                acceptActivityIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
             val declineIntent = Intent(this, CallForegroundService::class.java).apply {
                 action = ACTION_DECLINE_CALL
-            }
-            val acceptPi = if (hasMicPerm) {
-                PendingIntent.getService(
-                    this,
-                    1,
-                    acceptIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-            } else {
-                contentPendingIntent
             }
             val declinePi = PendingIntent.getService(
                 this,
@@ -269,6 +281,26 @@ class CallForegroundService : Service() {
         }
     }
 
+    private fun wakeScreenForIncomingCall() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            @Suppress("DEPRECATION")
+            val wl = pm.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                    PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                    PowerManager.ON_AFTER_RELEASE,
+                "Seamless:IncomingCallScreen"
+            ).apply {
+                setReferenceCounted(false)
+                acquire(30_000L)
+            }
+            screenWakeLock?.let { if (it.isHeld) runCatching { it.release() } }
+            screenWakeLock = wl
+        } catch (e: Exception) {
+            Log.w(TAG, "Screen WakeLock acquire failed: ${e.message}")
+        }
+    }
+
     private fun releaseWakeLock() {
         try {
             cpuWakeLock?.let {
@@ -276,5 +308,11 @@ class CallForegroundService : Service() {
             }
         } catch (_: Exception) {}
         cpuWakeLock = null
+        try {
+            screenWakeLock?.let {
+                if (it.isHeld) it.release()
+            }
+        } catch (_: Exception) {}
+        screenWakeLock = null
     }
 }

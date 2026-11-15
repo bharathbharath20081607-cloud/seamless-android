@@ -7,6 +7,7 @@ import android.content.Intent
 import android.util.Log
 import com.seamless.android.net.TorMode
 import com.seamless.android.net.TorPreferenceManager
+import com.seamless.android.service.MeshForegroundService
 import com.seamless.android.service.TorForegroundService
 
 /**
@@ -39,6 +40,10 @@ class BootCompletedReceiver : BroadcastReceiver() {
                 TorForegroundService.start(context)
             } else {
                 Log.d(TAG, "Tor was disabled — skipping auto-start")
+            }
+            if (MeshForegroundService.isBackgroundEnabled(context)) {
+                Log.i(TAG, "📡 Auto-starting MeshForegroundService on boot")
+                MeshForegroundService.start(context)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to check/restore Tor state: ${e.message}")

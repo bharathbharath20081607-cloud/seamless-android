@@ -118,6 +118,7 @@ class BluetoothMeshService(private val context: Context) {
     
     // Coroutines
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val lastAnnouncedToPeerAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
     
     init {
         setupDelegates()
@@ -598,6 +599,16 @@ class BluetoothMeshService(private val context: Context) {
                         try { peerManager.setDirectConnection(pid, true) } catch (_: Exception) { }
                         if (isFirst) {
                             try { gossipSyncManager.scheduleInitialSyncToPeer(pid, 1_000) } catch (_: Exception) { }
+                        }
+                    }
+                    if (pid != null) {
+                        val now = System.currentTimeMillis()
+                        val lastSent = lastAnnouncedToPeerAt[pid.lowercase()] ?: 0L
+                        if (isFirst || !peerManager.hasAnnouncedToPeer(pid) || (now - lastSent) > 3_000L) {
+                            serviceScope.launch {
+                                delay(150L)
+                                sendAnnouncementToPeer(pid)
+                            }
                         }
                     }
                     // Track for sync
@@ -1247,6 +1258,8 @@ class BluetoothMeshService(private val context: Context) {
                     if (!stillMapped) {
                         // Peer might still be reachable indirectly; mark as not-direct
                         try { peerManager.setDirectConnection(peer, false) } catch (_: Exception) { }
+                        peerManager.clearAnnouncedToPeer(peer)
+                        lastAnnouncedToPeerAt.remove(peer.lowercase())
                     }
                     // Verbose debug: device disconnected
                     try {
@@ -2200,7 +2213,10 @@ class BluetoothMeshService(private val context: Context) {
      * Send announcement to specific peer with TLV-encoded identity announcement - exactly like iOS
      */
     fun sendAnnouncementToPeer(peerID: String) {
-        if (peerManager.hasAnnouncedToPeer(peerID)) return
+        val normalizedPeer = peerID.lowercase()
+        val now = System.currentTimeMillis()
+        val last = lastAnnouncedToPeerAt[normalizedPeer] ?: 0L
+        if (peerManager.hasAnnouncedToPeer(peerID) && (now - last) < 2_500L) return
         
         val nickname = delegate?.getNickname() ?: myPeerID
         
@@ -2246,6 +2262,7 @@ class BluetoothMeshService(private val context: Context) {
         
         connectionManager.broadcastPacket(RoutedPacket(signedPacket))
         peerManager.markPeerAsAnnouncedTo(peerID)
+        lastAnnouncedToPeerAt[normalizedPeer] = now
         Log.d(TAG, "Sent iOS-compatible signed TLV peer announce to $peerID (${tlvPayload.size} bytes)")
 
         // Track announce for sync
@@ -2284,6 +2301,9 @@ class BluetoothMeshService(private val context: Context) {
     fun hasEstablishedSession(peerID: String): Boolean {
         return encryptionService.hasEstablishedSession(peerID)
     }
+
+    /** Count of active BLE transport links (GATT server subscribers + GATT client connections). */
+    fun getActiveConnectionCount(): Int = connectionManager.getActiveConnectionCount()
     
     /**
      * Get session state for a peer (for UI state display)

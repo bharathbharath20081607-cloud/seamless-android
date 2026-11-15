@@ -52,17 +52,18 @@ class TorCircuitManager private constructor(private val context: Context) {
         const val CONNECT_TIMEOUT_MS = 60_000       // 60 seconds for Tor circuits
         // Idle read timeout. A timeout before the first byte of a frame is
         // harmless; a timeout inside a frame is retried (see readFrame) so
-        // framing alignment is never lost.
-        const val READ_TIMEOUT_MS = 60_000
-        const val KEEPALIVE_INTERVAL_MS = 15_000L    // Keep an established peer session warm
+        // framing alignment is never lost. Kept at 15s (above KEEPALIVE_INTERVAL_MS)
+        // so dead sockets unblock promptly.
+        const val READ_TIMEOUT_MS = 15_000
+        const val KEEPALIVE_INTERVAL_MS = 10_000L    // Keep an established peer session warm
         const val CIRCUIT_HEALTH_CHECK_MS = 15_000L  // Health/liveness sweep
         // A healthy peer pings every KEEPALIVE_INTERVAL_MS and answers our pings, so
         // an established connection that has *received nothing* for this long is a
         // dead circuit even though the local SOCKS socket still looks open.
-        const val DEAD_CONNECTION_MS = 55_000L
-        // An existing connection that is still receiving traffic within this window
-        // is considered healthy when a duplicate connection arrives.
-        private const val STALE_ACTIVE_GRACE_MS = 50_000L
+        const val DEAD_CONNECTION_MS = 90_000L
+        // An existing connection that received frames within this window is considered
+        // healthy when a simultaneous dial or incoming socket arrives.
+        private const val ACTIVE_CONNECTION_HEALTHY_MS = 45_000L
         private const val SOCKET_BUFFER_BYTES = 65_536
         private const val STREAM_BUFFER_BYTES = 16_384
         // Mid-frame stall tolerance: this many consecutive read timeouts inside a
@@ -109,8 +110,10 @@ class TorCircuitManager private constructor(private val context: Context) {
         var input: DataInputStream? = null,
         var output: DataOutputStream? = null,
         @Volatile var state: ConnectionState = ConnectionState.DISCONNECTED,
+        val connectedAt: Long = System.currentTimeMillis(),
         @Volatile var lastActivity: Long = 0L,
         @Volatile var lastReceivedAt: Long = 0L,
+        @Volatile var hasReceivedFrame: Boolean = false,
         var reconnectAttempts: Int = 0,
         var lastError: String? = null,
         val isIncoming: Boolean = false
@@ -196,7 +199,7 @@ class TorCircuitManager private constructor(private val context: Context) {
             connection.lastActivity = System.currentTimeMillis()
             return connection
         }
-        return startDial(canonicalKey).await()
+        return awaitDialOrIncoming(canonicalKey, startDial(canonicalKey))
     }
 
     /**
@@ -211,7 +214,49 @@ class TorCircuitManager private constructor(private val context: Context) {
             return connection
         }
         val dial = startDial(canonicalKey)
-        return withTimeoutOrNull(budgetMs) { dial.await() }
+        return withTimeoutOrNull(budgetMs) { awaitDialOrIncoming(canonicalKey, dial) }
+    }
+
+    private suspend fun awaitDialOrIncoming(
+        canonicalKey: String,
+        dial: Deferred<PeerConnection?>
+    ): PeerConnection? = coroutineScope {
+        activeConnection(canonicalKey)?.let { existing ->
+            existing.lastActivity = System.currentTimeMillis()
+            return@coroutineScope existing
+        }
+
+        val winner = CompletableDeferred<PeerConnection?>()
+
+        val incomingJob = launch(start = CoroutineStart.UNDISPATCHED) {
+            _connectionEvents
+                .filter { it == canonicalKey }
+                .mapNotNull { activeConnection(canonicalKey) }
+                .first()
+                .let { conn ->
+                    conn.lastActivity = System.currentTimeMillis()
+                    winner.complete(conn)
+                }
+        }
+
+        activeConnection(canonicalKey)?.let { existing ->
+            existing.lastActivity = System.currentTimeMillis()
+            incomingJob.cancel()
+            return@coroutineScope existing
+        }
+
+        val dialObserverJob = launch {
+            val result = dial.await()
+            val resolved = result ?: activeConnection(canonicalKey)
+            winner.complete(resolved)
+        }
+
+        try {
+            winner.await()
+        } finally {
+            incomingJob.cancel()
+            dialObserverJob.cancel()
+        }
     }
 
     private fun startDial(canonicalKey: String): Deferred<PeerConnection?> {
@@ -236,11 +281,14 @@ class TorCircuitManager private constructor(private val context: Context) {
         var connection = getConnection(canonicalKey) ?: return false
         repeat(2) {
             try {
+                val packet = java.nio.ByteBuffer.allocate(4 + data.size)
+                    .putInt(data.size)
+                    .put(data)
+                    .array()
                 val written = writeLock.withLock {
                     withContext(Dispatchers.IO) {
                         connection.output?.let { out ->
-                            out.writeInt(data.size)
-                            out.write(data)
+                            out.write(packet)
                             out.flush()
                             connection.lastActivity = System.currentTimeMillis()
                             true
@@ -281,6 +329,7 @@ class TorCircuitManager private constructor(private val context: Context) {
                     val now = System.currentTimeMillis()
                     connection.lastActivity = now
                     connection.lastReceivedAt = now
+                    connection.hasReceivedFrame = true
                 }
                 data
             }
@@ -422,25 +471,32 @@ class TorCircuitManager private constructor(private val context: Context) {
     suspend fun addIncomingConnection(
         peerIdentifier: String,
         socket: Socket,
-        preferIncoming: Boolean
-    ) {
+        preferIncoming: Boolean? = null
+    ): Boolean {
         val canonicalKey = canonicalizePeerKey(peerIdentifier)
         val connectionLock = connectionLocks.getOrPut(canonicalKey) { Mutex() }
-        connectionLock.withLock {
+        return connectionLock.withLock {
             mutex.withLock {
                 try {
                     val now = System.currentTimeMillis()
+                    val resolvedPreferIncoming = preferIncoming ?: preferIncoming(canonicalKey)
                     val active = activeConnection(canonicalKey)
                     if (active != null) {
                         // Keep our own outbound circuit only if a simultaneous dial race
-                        // is happening right now (received traffic within 2.5s) and the
-                        // deterministic tie-break says outbound wins. Any redial after a
-                        // pause replaces the old socket so calls/messages never split-brain.
-                        val activeHealthy = (now - active.lastReceivedAt) <= 2_500L
-                        val keepActive = !active.isIncoming && activeHealthy && !preferIncoming
+                        // is happening right now (received traffic, or fresh outbound
+                        // handshake within 20s) and the deterministic tie-break says
+                        // outbound wins. Any redial after a pause replaces the old socket.
+                        val activeHealthy = active.hasReceivedFrame &&
+                            (now - active.lastReceivedAt) <= ACTIVE_CONNECTION_HEALTHY_MS
+                        val freshOutboundHandshake = !active.hasReceivedFrame &&
+                            (now - active.connectedAt) <= 20_000L
+                        val keepActive = !active.isIncoming &&
+                            (activeHealthy || freshOutboundHandshake) &&
+                            !resolvedPreferIncoming
                         if (keepActive) {
+                            dials.remove(canonicalKey)?.cancel()
                             try { socket.close() } catch (_: Exception) {}
-                            return@withLock
+                            return@withLock false
                         }
                         closeConnection(active)
                     }
@@ -452,25 +508,123 @@ class TorCircuitManager private constructor(private val context: Context) {
                         input = DataInputStream(BufferedInputStream(socket.inputStream, STREAM_BUFFER_BYTES)),
                         output = DataOutputStream(BufferedOutputStream(socket.outputStream, STREAM_BUFFER_BYTES)),
                         state = ConnectionState.CONNECTED,
+                        connectedAt = now,
                         lastActivity = now,
                         lastReceivedAt = now,
+                        hasReceivedFrame = true,
                         reconnectAttempts = 0,
                         isIncoming = true
                     )
 
                     connections[canonicalKey] = connection
+                    dials.remove(canonicalKey)?.cancel()
                     updateStateFlow()
                     _connectionEvents.tryEmit(canonicalKey)
                     Log.i(TAG, "📥 Incoming connection registered for $canonicalKey")
+                    true
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to register incoming connection: ${e.message}")
                     try { socket.close() } catch (_: Exception) {}
+                    false
                 }
             }
         }
     }
 
+    /**
+     * Make-before-break reconnect: dials a fresh circuit in the background while keeping
+     * the existing connection usable until the replacement socket is ready. If the dial
+     * fails, any still-open existing connection is left untouched.
+     */
+    suspend fun warmReconnect(onionAddress: String): PeerConnection? {
+        val canonicalKey = canonicalizePeerKey(onionAddress)
+        dials[canonicalKey]?.takeIf { it.isActive }?.let { inFlight ->
+            return withTimeoutOrNull(20_000L) { inFlight.await() }
+        }
+        val previousConnId = activeConnection(canonicalKey)?.connectionId
+        val warmDial = synchronized(dials) {
+            dials[canonicalKey]?.takeIf { it.isActive }?.let { return@synchronized it }
+            val deferred = scope.async {
+                val socket = try {
+                    connectSocketWithRetry(canonicalKey, maxAttempts = 2)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Warm reconnect dial failed for $canonicalKey: ${e.message}")
+                    null
+                } ?: return@async null
+
+                val connectionLock = connectionLocks.getOrPut(canonicalKey) { Mutex() }
+                connectionLock.withLock {
+                    mutex.withLock {
+                        val now = System.currentTimeMillis()
+                        val current = activeConnection(canonicalKey)
+                        if (current != null &&
+                            current.connectionId != previousConnId &&
+                            current.hasReceivedFrame &&
+                            (now - current.lastReceivedAt) <= 15_000L
+                        ) {
+                            try { socket.close() } catch (_: Exception) {}
+                            return@async current
+                        }
+                        current?.let { closeConnection(it) }
+                        val established = createOutboundConnection(canonicalKey, socket, now)
+                        connections[canonicalKey] = established
+                        updateStateFlow()
+                        _connectionEvents.tryEmit(canonicalKey)
+                        Log.i(TAG, "♻️ Warm-reconnected circuit to $canonicalKey")
+                        established
+                    }
+                }
+            }
+            dials[canonicalKey] = deferred
+            deferred.invokeOnCompletion { dials.remove(canonicalKey, deferred) }
+            deferred
+        }
+        return withTimeoutOrNull(30_000L) { warmDial.await() }
+    }
+
     // ========== Private Methods ==========
+
+    private suspend fun openSocksSocket(
+        canonicalKey: String,
+        torProxy: InetSocketAddress,
+        onSocketCreated: (Socket) -> Unit = {}
+    ): Socket = withContext(Dispatchers.IO) {
+        val parts = canonicalKey.split(":")
+        val host = parts[0]
+        val port = parts.getOrNull(1)?.toIntOrNull() ?: 18888
+        val created = Socket(Proxy(Proxy.Type.SOCKS, torProxy))
+        onSocketCreated(created)
+        created.connect(InetSocketAddress.createUnresolved(host, port), CONNECT_TIMEOUT_MS)
+        configureSocket(created)
+        created
+    }
+
+    private suspend fun connectSocketWithRetry(
+        canonicalKey: String,
+        maxAttempts: Int = 2
+    ): Socket? {
+        val torProxy = TorManager.currentBestSocksAddress(context) ?: return null
+        var lastError: Exception? = null
+        repeat(maxAttempts) { attempt ->
+            var pendingSocket: Socket? = null
+            try {
+                return openSocksSocket(canonicalKey, torProxy) { pendingSocket = it }
+            } catch (e: CancellationException) {
+                try { pendingSocket?.close() } catch (_: Exception) {}
+                throw e
+            } catch (e: Exception) {
+                try { pendingSocket?.close() } catch (_: Exception) {}
+                lastError = e
+                if (attempt + 1 < maxAttempts) {
+                    delay(500L)
+                }
+            }
+        }
+        lastError?.let { throw it }
+        return null
+    }
 
     /**
      * Dials a peer and registers the resulting socket. Runs in this manager's
@@ -492,28 +646,43 @@ class TorCircuitManager private constructor(private val context: Context) {
 
         var pendingSocket: Socket? = null
         return try {
-            val socket = withContext(Dispatchers.IO) {
-                val parts = canonicalKey.split(":")
-                val host = parts[0]
-                val port = parts.getOrNull(1)?.toIntOrNull() ?: 18888
-                val created = Socket(Proxy(Proxy.Type.SOCKS, torProxy))
-                pendingSocket = created
-                created.connect(InetSocketAddress.createUnresolved(host, port), CONNECT_TIMEOUT_MS)
-                created
-            }
-            configureSocket(socket)
+            val socket = openSocksSocket(canonicalKey, torProxy) { pendingSocket = it }
             registerOutbound(canonicalKey, socket)
         } catch (e: CancellationException) {
             try { pendingSocket?.close() } catch (_: Exception) {}
             throw e
         } catch (e: Exception) {
             try { pendingSocket?.close() } catch (_: Exception) {}
-            Log.e(TAG, "Failed to connect to $canonicalKey: ${e.message}")
-            placeholder.lastError = e.message
-            scheduleReconnect(canonicalKey, placeholder, e.message ?: "Connect failed")
-            null
+            val existing = activeConnection(canonicalKey)
+            if (existing != null) {
+                Log.d(TAG, "Outbound dial to $canonicalKey failed after incoming circuit established (${e.message}); keeping active circuit")
+                existing
+            } else {
+                Log.e(TAG, "Failed to connect to $canonicalKey: ${e.message}")
+                placeholder.lastError = e.message
+                scheduleReconnect(canonicalKey, placeholder, e.message ?: "Connect failed")
+                null
+            }
         }
     }
+
+    private fun createOutboundConnection(
+        canonicalKey: String,
+        socket: Socket,
+        now: Long = System.currentTimeMillis()
+    ): PeerConnection = PeerConnection(
+        onionAddress = canonicalKey,
+        socket = socket,
+        input = DataInputStream(BufferedInputStream(socket.inputStream, STREAM_BUFFER_BYTES)),
+        output = DataOutputStream(BufferedOutputStream(socket.outputStream, STREAM_BUFFER_BYTES)),
+        state = ConnectionState.CONNECTED,
+        connectedAt = now,
+        lastActivity = now,
+        lastReceivedAt = now,
+        hasReceivedFrame = false,
+        reconnectAttempts = 0,
+        isIncoming = false
+    )
 
     private suspend fun registerOutbound(canonicalKey: String, socket: Socket): PeerConnection? {
         val connectionLock = connectionLocks.getOrPut(canonicalKey) { Mutex() }
@@ -521,35 +690,28 @@ class TorCircuitManager private constructor(private val context: Context) {
             mutex.withLock {
                 val now = System.currentTimeMillis()
                 val active = activeConnection(canonicalKey)
-                // If the peer reached us while we were dialing, the symmetric
-                // tie-break decides which of the two sockets survives.
-                // Because registerOutbound runs before any frame is written on `socket`,
-                // the remote peer has not registered `socket` yet. If an authenticated
-                // `active` connection is already receiving traffic (within 15s), always
-                // keep `active` so a slow background dial never kills a live call/chat socket.
-                val keepActive = active != null && (now - active.lastReceivedAt) <= 15_000L
-                if (keepActive) {
+                val preferIncoming = preferIncoming(canonicalKey)
+                // Symmetric tie-break matching addIncomingConnection:
+                // only preserve `active` if it is healthy (has received a frame recently)
+                // AND either `active` is our own outbound or `preferIncoming` picks incoming.
+                val activeHealthy = active != null &&
+                    active.socket?.isClosed == false &&
+                    active.socket?.isConnected == true &&
+                    active.hasReceivedFrame &&
+                    (now - active.lastReceivedAt) <= ACTIVE_CONNECTION_HEALTHY_MS
+                val keepActive = activeHealthy && (active?.isIncoming != true || preferIncoming)
+                if (keepActive && active != null) {
                     try { socket.close() } catch (_: Exception) {}
-                    active
-                } else {
-                    if (active != null) closeConnection(active)
-                    val established = PeerConnection(
-                        onionAddress = canonicalKey,
-                        socket = socket,
-                        input = DataInputStream(BufferedInputStream(socket.inputStream, STREAM_BUFFER_BYTES)),
-                        output = DataOutputStream(BufferedOutputStream(socket.outputStream, STREAM_BUFFER_BYTES)),
-                        state = ConnectionState.CONNECTED,
-                        lastActivity = now,
-                        lastReceivedAt = now,
-                        reconnectAttempts = 0,
-                        isIncoming = false
-                    )
-                    connections[canonicalKey] = established
-                    updateStateFlow()
-                    _connectionEvents.tryEmit(canonicalKey)
-                    Log.i(TAG, "✅ Connected to $canonicalKey")
-                    established
+                    _connectionStates.value = _connectionStates.value + (canonicalKey to ConnectionState.CONNECTED)
+                    return@withLock active
                 }
+                active?.let { closeConnection(it) }
+                val established = createOutboundConnection(canonicalKey, socket, now)
+                connections[canonicalKey] = established
+                updateStateFlow()
+                _connectionEvents.tryEmit(canonicalKey)
+                Log.i(TAG, "✅ Connected to $canonicalKey")
+                established
             }
         }
     }

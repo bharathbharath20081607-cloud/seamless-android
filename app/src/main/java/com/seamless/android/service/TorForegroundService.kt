@@ -13,6 +13,7 @@ import android.net.NetworkRequest
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.seamless.android.MainActivity
@@ -21,6 +22,8 @@ import com.seamless.android.net.TorDaemonManager
 import com.seamless.android.net.TorHiddenServiceManager
 import com.seamless.android.net.TorManager
 import com.seamless.android.net.TorMessagingService
+import com.seamless.android.net.TorMode
+import com.seamless.android.net.TorPreferenceManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.combine
 
@@ -149,6 +152,32 @@ class TorForegroundService : Service() {
         return START_STICKY // Auto-restart if killed
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        runCatching {
+            if (TorPreferenceManager.get(applicationContext) != TorMode.ON) return
+            val restartIntent = Intent(applicationContext, TorForegroundService::class.java).apply {
+                setPackage(packageName)
+            }
+            val flags = PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+            val restartPendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                PendingIntent.getForegroundService(applicationContext, 7799, restartIntent, flags)
+            } else {
+                PendingIntent.getService(applicationContext, 7799, restartIntent, flags)
+            }
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+            val triggerAt = SystemClock.elapsedRealtime() + 1000L
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                alarmManager.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, restartPendingIntent)
+            } else {
+                alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, restartPendingIntent)
+            }
+            Log.i(TAG, "🧅 Scheduled TorForegroundService restart after task removal")
+        }.onFailure {
+            Log.w(TAG, "Failed to schedule TorForegroundService restart: ${it.message}")
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
@@ -250,10 +279,17 @@ class TorForegroundService : Service() {
      */
     private fun registerNetworkCallback() {
         val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+        var lastAvailableNetworkHandle = cm.activeNetwork?.networkHandle ?: 0L
 
         networkCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                Log.i(TAG, "🌐 Network available → rebuilding Tor circuits")
+                val handle = network.networkHandle
+                if (handle != 0L && handle == lastAvailableNetworkHandle) {
+                    Log.d(TAG, "🌐 Network already active (handle=$handle) — skipping redundant Tor HS republish")
+                    return
+                }
+                lastAvailableNetworkHandle = handle
+                Log.i(TAG, "🌐 Network available (handle=$handle) → rebuilding Tor circuits")
                 serviceScope.launch {
                     try {
                         // Re-enable networking on the daemon
@@ -277,6 +313,7 @@ class TorForegroundService : Service() {
                 val caps = activeNet?.let { cm.getNetworkCapabilities(it) }
                 val stillOnline = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
                 if (stillOnline) {
+                    lastAvailableNetworkHandle = activeNet?.networkHandle ?: 0L
                     Log.i(TAG, "📶 Previous network lost, but active internet network remains online — keeping Tor enabled")
                     serviceScope.launch {
                         try {
@@ -286,6 +323,7 @@ class TorForegroundService : Service() {
                     }
                     return
                 }
+                lastAvailableNetworkHandle = 0L
                 Log.i(TAG, "📡 All internet networks lost → pausing Tor operations")
                 serviceScope.launch {
                     try {
@@ -298,12 +336,16 @@ class TorForegroundService : Service() {
             }
         }
 
-        val request = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
-
-        cm.registerNetworkCallback(request, networkCallback!!)
-        Log.d(TAG, "Registered network callback")
+        try {
+            cm.registerDefaultNetworkCallback(networkCallback!!)
+            Log.d(TAG, "Registered default network callback")
+        } catch (_: Exception) {
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            cm.registerNetworkCallback(request, networkCallback!!)
+            Log.d(TAG, "Registered fallback network callback")
+        }
     }
 
     private fun unregisterNetworkCallback() {

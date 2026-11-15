@@ -159,6 +159,33 @@ fun ChatScreen(viewModel: ChatViewModel) {
     var profileOpenedFromSettings by remember { mutableStateOf(false) }
     var privateChatOpenedFromChatsScreen by remember { mutableStateOf(false) }
     var onionContactsSelectedTab by remember { mutableStateOf(0) }
+    val navContext = androidx.compose.ui.platform.LocalContext.current
+    val pendingTorContactId by viewModel.pendingTorContactId.collectAsStateWithLifecycle()
+    val pendingTorGroupId by viewModel.pendingTorGroupId.collectAsStateWithLifecycle()
+
+    LaunchedEffect(pendingTorContactId, pendingTorGroupId) {
+        val targetContactId = pendingTorContactId
+        val targetGroupId = pendingTorGroupId
+        if (targetContactId != null) {
+            val contact = com.seamless.android.net.OnionContactManager.getInstance(navContext).getContact(targetContactId)
+            if (contact != null) {
+                selectedOnionGroup = null
+                selectedOnionContact = contact
+                showOnionContactsScreen = true
+            }
+            viewModel.consumePendingTorNavigation()
+        } else if (targetGroupId != null) {
+            val group = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.seamless.android.data.AppDatabase.getDatabase(navContext).groupDao().getGroup(targetGroupId)
+            }
+            if (group != null) {
+                selectedOnionContact = null
+                selectedOnionGroup = group
+                showOnionContactsScreen = true
+            }
+            viewModel.consumePendingTorNavigation()
+        }
+    }
     
     // Emoji Rain Effect state
     val emojiRainState = com.seamless.android.ui.effects.rememberEmojiRainState()
@@ -993,9 +1020,6 @@ fun ChatScreen(viewModel: ChatViewModel) {
             )
         }
     }
-
-    // Global P2P + Tor Encrypted Voice Call Overlay (incoming & active calls)
-    com.seamless.android.ui.call.SeamlessCallOverlay()
 }
 
 @Composable

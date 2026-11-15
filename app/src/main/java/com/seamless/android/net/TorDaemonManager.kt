@@ -255,6 +255,17 @@ class TorDaemonManager private constructor(private val application: Application)
         }
         
         try {
+            val existingProps = hiddenServiceProps
+            if (existingProps != null && existingProps.onion.isNotBlank()) {
+                _status.value = _status.value.copy(
+                    state = DaemonState.CONNECTED,
+                    onionAddress = existingProps.onion,
+                    error = null
+                )
+                Log.d(TAG, "♻️ Reusing active hidden service: ${existingProps.onion.take(16)}...onion")
+                return@withContext existingProps.onion
+            }
+
             if (!waitForDaemonSocks()) {
                 val message = "Tor SOCKS listener was not ready for hidden-service publishing"
                 Log.w(TAG, message)
@@ -367,6 +378,12 @@ class TorDaemonManager private constructor(private val application: Application)
                     return@withContext null
                 }
 
+                val existingProps = mailboxServiceProps
+                if (existingProps != null && existingProps.onion.isNotBlank()) {
+                    Log.d(TAG, "♻️ Reusing active mailbox hidden service: ${existingProps.onion.take(16)}...onion")
+                    return@withContext existingProps.onion
+                }
+
                 try {
                     if (!waitForDaemonSocks()) {
                         Log.w(TAG, "Cannot publish mailbox hidden service - Tor SOCKS listener is not ready")
@@ -418,6 +435,11 @@ class TorDaemonManager private constructor(private val application: Application)
         return null
     }
 
+    private fun isCollisionError(e: Exception): Boolean {
+        val msg = e.message?.lowercase().orEmpty()
+        return msg.contains("collision") || msg.contains("already")
+    }
+
     private fun publishWithKeyRecovery(
         wrapper: TorWrapper,
         localPort: Int,
@@ -427,7 +449,7 @@ class TorDaemonManager private constructor(private val application: Application)
         return try {
             wrapper.publishHiddenService(localPort, virtualPort, savedKey)
         } catch (e: Exception) {
-            if (savedKey.isNullOrBlank()) throw e
+            if (savedKey.isNullOrBlank() || isCollisionError(e)) throw e
 
             Log.w(TAG, "Saved hidden service key failed; rotating onion identity once: ${e.message}")
             hiddenServicePrivateKey = null
@@ -447,7 +469,7 @@ class TorDaemonManager private constructor(private val application: Application)
         return try {
             wrapper.publishHiddenService(localPort, virtualPort, savedKey)
         } catch (e: Exception) {
-            if (savedKey.isNullOrBlank()) throw e
+            if (savedKey.isNullOrBlank() || isCollisionError(e)) throw e
 
             Log.w(TAG, "Saved mailbox hidden-service key failed; rotating mailbox identity once: ${e.message}")
             mailboxServicePrivateKey = null
@@ -625,7 +647,25 @@ class TorDaemonManager private constructor(private val application: Application)
      */
     suspend fun republishHiddenServiceWithRetry(maxAttempts: Int = 3): Boolean {
         if (!isRunning.get()) return false
-        
+
+        val alreadyUploaded = publishMutex.withLock {
+            val existing = hiddenServiceProps
+            if (existing != null && existing.onion.isNotBlank() && torWrapper?.isTorRunning == true) {
+                if (hsDescriptorUploaded) {
+                    Log.d(TAG, "✅ Hidden service ${existing.onion.take(16)}...onion descriptor already uploaded — skipping republish")
+                    true
+                } else {
+                    Log.i(TAG, "♻️ Removing un-uploaded hidden service ${existing.onion.take(16)}...onion before republish")
+                    runCatching { torWrapper?.removeHiddenService(existing.onion) }
+                    hiddenServiceProps = null
+                    false
+                }
+            } else {
+                false
+            }
+        }
+        if (alreadyUploaded) return true
+
         for (attempt in 1..maxAttempts) {
             val onion = try {
                 publishHiddenServiceInternal()
@@ -726,23 +766,30 @@ class TorDaemonManager private constructor(private val application: Application)
     private fun configureBridges() {
         try {
             val ptManager = PluggableTransportManager.getInstance(application)
-            val bridgeConfig = ptManager.generateBridgeConfig()
-            
-            if (bridgeConfig.isEmpty()) {
-                // No bridges needed — remove any stale torrc override
-                val torrcFile = File(torDirectory, "torrc")
-                if (torrcFile.exists()) {
-                    torrcFile.delete()
-                    Log.d(TAG, "Removed stale bridge torrc")
+            val bridgeLines = ptManager.generateBridgeConfig().trim()
+
+            // Always apply mobile-tuned low-latency torrc settings so C-Tor keeps
+            // guards and hidden-service rendezvous circuits warm across carrier/NAT
+            // transitions, and append pluggable transport bridges when enabled.
+            val baseTorrc = buildString {
+                appendLine("ClientOnly 1")
+                appendLine("KeepalivePeriod 30")
+                appendLine("NewCircuitPeriod 15")
+                appendLine("MaxCircuitDirtiness 600")
+                appendLine("CircuitBuildTimeout 30")
+                appendLine("LearnCircuitBuildTimeout 1")
+                appendLine("NumEntryGuards 4")
+                appendLine("SocksTimeout 30")
+                appendLine("CircuitStreamTimeout 20")
+                if (bridgeLines.isNotEmpty()) {
+                    appendLine(bridgeLines)
                 }
-                return
             }
-            
-            // Write bridge config to torrc in the daemon directory
+
             val torrcFile = File(torDirectory, "torrc")
-            torrcFile.writeText(bridgeConfig)
-            Log.i(TAG, "🌉 Bridge config written to torrc (${bridgeConfig.lines().size} lines)")
-            
+            torrcFile.parentFile?.mkdirs()
+            torrcFile.writeText(baseTorrc)
+            Log.i(TAG, "⚙️ Wrote mobile-tuned torrc (bridges=${bridgeLines.isNotEmpty()})")
         } catch (e: Exception) {
             Log.w(TAG, "⚠️ Failed to configure bridges (proceeding without): ${e.message}")
         }

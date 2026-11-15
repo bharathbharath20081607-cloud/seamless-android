@@ -131,9 +131,9 @@ class PowerManager(private val context: Context) {
                 .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
 
             PowerMode.BALANCED -> builder
-                .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
+                .setScanMode(if (!isAppInBackground) ScanSettings.SCAN_MODE_LOW_LATENCY else ScanSettings.SCAN_MODE_BALANCED)
                 .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
-                .setNumOfMatches(ScanSettings.MATCH_NUM_ONE_ADVERTISEMENT)
+                .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
 
             PowerMode.POWER_SAVER -> builder
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)

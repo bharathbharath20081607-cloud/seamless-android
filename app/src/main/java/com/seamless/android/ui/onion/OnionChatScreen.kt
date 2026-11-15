@@ -47,6 +47,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.seamless.android.data.TorMessageEntity
 import com.seamless.android.data.TorMessageRepository
 import com.seamless.android.net.OnionContactManager
@@ -79,6 +82,7 @@ fun OnionChatScreen(
     onNavigateBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     
     // Services
@@ -172,9 +176,23 @@ fun OnionChatScreen(
         }
     }
 
-    DisposableEffect(contact.id) {
-        messagingService.setChatVisible(contact.id, true)
+    DisposableEffect(contact.id, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> messagingService.setChatVisible(contact.id, true)
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
+                    messagingService.setTyping(contact.id, false)
+                    messagingService.setChatVisible(contact.id, false)
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            messagingService.setChatVisible(contact.id, true)
+        }
         onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
             messagingService.setTyping(contact.id, false)
             messagingService.setChatVisible(contact.id, false)
         }

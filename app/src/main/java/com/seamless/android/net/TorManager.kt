@@ -55,6 +55,7 @@ object TorManager {
     private var inactivityJob: Job? = null
     private var retryJob: Job? = null
     private var daemonObserverJob: Job? = null
+    private var daemonFallbackJob: Job? = null
     private var currentApplication: Application? = null
 
     // Pluggable Transport integration for censorship circumvention
@@ -178,6 +179,8 @@ object TorManager {
                         val daemonSocks = InetSocketAddress("127.0.0.1", TorDaemonManager.HIDDEN_SERVICE_SOCKS_PORT)
                         val wasReady = _status.value.state == TorState.RUNNING && _status.value.bootstrapPercent >= 100
                         socksAddr = daemonSocks
+                        lifecycleState = LifecycleState.RUNNING
+                        daemonFallbackJob?.cancel()
                         retryAttempts = 0
                         bindRetryAttempts = 0
                         _status.value = _status.value.copy(
@@ -261,6 +264,8 @@ object TorManager {
                 when (mode) {
                     TorMode.OFF -> {
                         Log.i(TAG, "applyMode: OFF -> stopping tor")
+                        daemonFallbackJob?.cancel()
+                        daemonFallbackJob = null
                         lifecycleState = LifecycleState.STOPPING
                         _status.value = _status.value.copy(mode = TorMode.OFF, running = false, bootstrapPercent = 0, state = TorState.STOPPING)
 
@@ -324,8 +329,29 @@ object TorManager {
                             try { OkHttpProvider.reset() } catch (_: Throwable) { }
                             try { com.seamless.android.nostr.NostrRelayManager.shared.reconnect() } catch (_: Throwable) { }
                         } else {
-                            startArti(application, useDelay = false)
-                            appScope.launch {
+                            // Prefer the primary C-Tor daemon (port 19050, which also hosts our .onion)
+                            // and only start Arti (port 9150) as a fallback if C-Tor errors or fails
+                            // to connect within 45s. Starting both simultaneously causes CPU/network
+                            // contention and mid-session cutover drops when C-Tor later stops Arti.
+                            daemonFallbackJob?.cancel()
+                            daemonFallbackJob = appScope.launch {
+                                val daemonManager = TorDaemonManager.getInstance(application)
+                                val terminalDaemonState = withTimeoutOrNull(45_000L) {
+                                    daemonManager.statusFlow.first {
+                                        it.state == TorDaemonManager.DaemonState.CONNECTED ||
+                                            it.state == TorDaemonManager.DaemonState.ERROR
+                                    }
+                                }?.state
+
+                                if (desiredMode != TorMode.ON ||
+                                    terminalDaemonState == TorDaemonManager.DaemonState.CONNECTED ||
+                                    daemonManager.statusFlow.value.state == TorDaemonManager.DaemonState.CONNECTED
+                                ) {
+                                    return@launch
+                                }
+
+                                Log.w(TAG, "TorDaemonManager not connected after fallback wait (state=$terminalDaemonState); starting Arti fallback")
+                                startArti(application, useDelay = false)
                                 waitUntilBootstrapped()
                                 if (_status.value.running && desiredMode == TorMode.ON) {
                                     if (socksAddr == null) {

@@ -56,6 +56,25 @@ class BluetoothGattClientManager(
         }
     }
 
+    // Retry counter for transient GATT connection failures (e.g. status 133/147/62/8)
+    private val clientRetryCounts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /**
+     * Ensure an outbound GATT client connection exists when a peer connected to our server first.
+     */
+    fun ensureClientConnection(device: BluetoothDevice) {
+        if (!isActive) return
+        val address = device.address
+        val existing = connectionTracker.getDeviceConnection(address)
+        if (existing != null && existing.isClient && existing.gatt != null && existing.characteristic != null) {
+            return
+        }
+        if (connectionTracker.isConnectionLimitReached()) return
+        if (connectionTracker.addPendingConnection(address)) {
+            connectToDevice(device, connectionTracker.getBestRSSI(address) ?: -70)
+        }
+    }
+
     // Scan management
     private var scanCallback: ScanCallback? = null
     
@@ -406,6 +425,7 @@ class BluetoothGattClientManager(
                 Log.d(TAG, "Client: Connection state change - Device: $deviceAddress, Status: $status, NewState: $newState")
 
                 if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                    clientRetryCounts.remove(deviceAddress)
                     Log.i(TAG, "Client: Successfully connected to $deviceAddress. Requesting MTU...")
                     // Request a larger MTU. Must be done before any data transfer.
                     connectionScope.launch {
@@ -419,24 +439,45 @@ class BluetoothGattClientManager(
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     if (status != BluetoothGatt.GATT_SUCCESS) {
                         Log.w(TAG, "Client: Disconnected from $deviceAddress with error status $status")
-                        if (status == 133 || status == 147) {
-                            Log.w(TAG, "Client: Transient GATT connection error ($status) for $deviceAddress - scheduling fast recovery")
-                            connectionScope.launch {
-                                delay(1500)
-                                connectionTracker.removePendingConnection(deviceAddress)
-                            }
-                        }
                     } else {
                         Log.d(TAG, "Client: Cleanly disconnected from $deviceAddress")
                     }
 
-                    // CRITICAL FIX: Always clean up device connection regardless of status code!
-                    // Previously, non-zero status codes (timeout=8, remote terminate=19, error=133)
-                    // skipped cleanupDeviceConnection, leaving dead entries in connectedDevices forever!
-                    connectionTracker.cleanupDeviceConnection(deviceAddress)
+                    // Preserve active GATT server subscription if one exists for this address
+                    val fullyDisconnected = connectionTracker.cleanupClientConnection(deviceAddress)
 
-                    // Notify higher layers about device disconnection to update direct flags
-                    delegate?.onDeviceDisconnected(gatt.device)
+                    // Only notify higher layers of full disconnect when no server subscription remains
+                    if (fullyDisconnected) {
+                        delegate?.onDeviceDisconnected(gatt.device)
+                    }
+
+                    val retryableStatus = status == 133 || status == 147 || status == 62 || status == 8
+                    if (isActive && (retryableStatus || !fullyDisconnected)) {
+                        val attempt = (clientRetryCounts[deviceAddress] ?: 0) + 1
+                        if (attempt <= 3) {
+                            clientRetryCounts[deviceAddress] = attempt
+                            Log.w(TAG, "Client: Scheduling retry $attempt/3 for $deviceAddress (status=$status, serverAlive=${!fullyDisconnected})")
+                            connectionScope.launch {
+                                delay(1200L)
+                                connectionTracker.removePendingConnection(deviceAddress)
+                                if (isActive && !connectionTracker.isDeviceConnected(deviceAddress) && !connectionTracker.isConnectionLimitReached()) {
+                                    if (connectionTracker.addPendingConnection(deviceAddress)) {
+                                        connectToDevice(gatt.device, connectionTracker.getBestRSSI(deviceAddress) ?: -70)
+                                    }
+                                }
+                            }
+                        } else {
+                            connectionScope.launch {
+                                delay(1500L)
+                                connectionTracker.removePendingConnection(deviceAddress)
+                            }
+                        }
+                    } else if (retryableStatus) {
+                        connectionScope.launch {
+                            delay(1500L)
+                            connectionTracker.removePendingConnection(deviceAddress)
+                        }
+                    }
 
                     connectionScope.launch {
                         delay(300)
@@ -454,6 +495,7 @@ class BluetoothGattClientManager(
                 Log.i(TAG, "Client: MTU changed for $deviceAddress to $mtu with status $status")
 
                 if (status == BluetoothGatt.GATT_SUCCESS) {
+                    connectionTracker.updateDeviceMtu(deviceAddress, mtu)
                     Log.i(TAG, "MTU successfully negotiated for $deviceAddress. Requesting HIGH priority and 2M PHY...")
                     
                     // ** TURBO MODE: Request HIGH priority for lower latency (11ms vs 100ms) **

@@ -13,6 +13,7 @@ import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import android.os.PowerManager as AndroidPowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -20,6 +21,7 @@ import com.seamless.android.MainActivity
 import com.seamless.android.R
 import com.seamless.android.mesh.BluetoothMeshService
 import com.seamless.android.mesh.BluetoothMeshDelegate
+import com.seamless.android.model.BitchatMessage
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import java.util.concurrent.ConcurrentHashMap
@@ -41,7 +43,7 @@ class MeshForegroundService : Service() {
         
         fun isBackgroundEnabled(context: Context): Boolean {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            return prefs.getBoolean(PREF_BACKGROUND_ENABLED, false)
+            return prefs.getBoolean(PREF_BACKGROUND_ENABLED, true)
         }
         
         fun setBackgroundEnabled(context: Context, enabled: Boolean) {
@@ -142,7 +144,7 @@ class MeshForegroundService : Service() {
             val removedDelegate = connectedDelegates.remove(id)
             if (removedDelegate != null && primaryDelegate === removedDelegate) {
                 primaryDelegate = connectedDelegates.values.firstOrNull()
-                meshService?.delegate = primaryDelegate
+                meshService?.delegate = primaryDelegate ?: backgroundMeshDelegate
             }
             Log.d(TAG, "Delegate disconnected: $id")
         }
@@ -165,6 +167,7 @@ class MeshForegroundService : Service() {
             startNostrMonitoring()
             registerDozeReceiver()
             startTorLifecycleMonitoring()
+            ensureUiNotificationManager()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create service", e)
             stopSelf()
@@ -208,10 +211,43 @@ class MeshForegroundService : Service() {
     
     override fun onUnbind(intent: Intent?): Boolean {
         Log.d(TAG, "Service onUnbind")
+        setAppBackgroundState(true)
+        if (connectedDelegates.isEmpty() || primaryDelegate != null) {
+            connectedDelegates.clear()
+            primaryDelegate = null
+            meshService?.delegate = backgroundMeshDelegate
+        }
         // Return true to receive onRebind calls
         return true
     }
     
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        setAppBackgroundState(true)
+        if (primaryDelegate == null) {
+            meshService?.delegate = backgroundMeshDelegate
+        }
+        runCatching {
+            if (!isBackgroundEnabled(applicationContext)) return
+            val restartIntent = Intent(applicationContext, MeshForegroundService::class.java).apply {
+                setPackage(packageName)
+            }
+            val flags = PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+            val restartPendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                PendingIntent.getForegroundService(applicationContext, NOTIFICATION_ID, restartIntent, flags)
+            } else {
+                PendingIntent.getService(applicationContext, NOTIFICATION_ID, restartIntent, flags)
+            }
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+            val triggerAt = SystemClock.elapsedRealtime() + 1000L
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                alarmManager.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, restartPendingIntent)
+            } else {
+                alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, restartPendingIntent)
+            }
+        }
+    }
+
     override fun onRebind(intent: Intent?) {
         Log.d(TAG, "Service onRebind")
         super.onRebind(intent)
@@ -341,6 +377,9 @@ class MeshForegroundService : Service() {
                     }
                     
                     // Start mesh services
+                    if (meshService?.delegate == null) {
+                        meshService?.delegate = backgroundMeshDelegate
+                    }
                     meshService?.startServices()
                     Log.d(TAG, "Mesh services started successfully")
                     
@@ -820,6 +859,102 @@ class MeshForegroundService : Service() {
      * Periodically check if Tor is needed based on contact reachability.
      * If all contacts are reachable via mesh, Tor is deactivated to save battery.
      */
+    private fun ensureUiNotificationManager(): com.seamless.android.ui.NotificationManager {
+        return notificationManager ?: com.seamless.android.ui.NotificationManager(
+            applicationContext,
+            androidx.core.app.NotificationManagerCompat.from(applicationContext),
+            com.seamless.android.util.NotificationIntervalManager()
+        ).also {
+            it.setAppBackgroundState(isAppInBackground)
+            notificationManager = it
+        }
+    }
+
+    private val processedBackgroundMessages = LinkedHashSet<String>()
+
+    private val backgroundMeshDelegate = object : BluetoothMeshDelegate {
+        override fun didReceiveMessage(message: BitchatMessage) {
+            if (primaryDelegate != null) return
+            val myPeerId = meshService?.myPeerID
+            if (!myPeerId.isNullOrBlank() && message.senderPeerID == myPeerId) return
+
+            val dedupKey = "${message.id}:${message.senderPeerID}:${message.timestamp.time}"
+            val isNew = synchronized(processedBackgroundMessages) {
+                if (!processedBackgroundMessages.add(dedupKey)) {
+                    false
+                } else {
+                    if (processedBackgroundMessages.size > 500) {
+                        val it = processedBackgroundMessages.iterator()
+                        if (it.hasNext()) {
+                            it.next()
+                            it.remove()
+                        }
+                    }
+                    true
+                }
+            }
+            if (!isNew) return
+
+            serviceScope.launch(Dispatchers.IO) {
+                try {
+                    val repo = com.seamless.android.data.MessageRepository(
+                        com.seamless.android.data.AppDatabase.getDatabase(applicationContext).messageDao()
+                    )
+                    repo.insertMessage(message)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to persist background mesh message: ${e.message}")
+                }
+            }
+
+            try {
+                val nm = ensureUiNotificationManager()
+                nm.setAppBackgroundState(true)
+                val preview = com.seamless.android.ui.NotificationTextUtils.buildPrivateMessagePreview(message)
+                when {
+                    message.isPrivate -> {
+                        val peerId = message.senderPeerID ?: return
+                        val nickname = message.sender.takeIf { it != peerId } ?: peerId
+                        nm.showPrivateMessageNotification(
+                            senderPeerID = peerId,
+                            senderNickname = nickname,
+                            messageContent = preview
+                        )
+                    }
+                    message.channel != null -> {
+                        nm.showPrivateMessageNotification(
+                            senderPeerID = "channel:${message.channel}",
+                            senderNickname = "#${message.channel} • ${message.sender}",
+                            messageContent = preview
+                        )
+                    }
+                    else -> {
+                        nm.showPrivateMessageNotification(
+                            senderPeerID = "mesh:broadcast",
+                            senderNickname = message.sender,
+                            messageContent = preview
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to post background mesh notification: ${e.message}")
+            }
+        }
+
+        override fun didUpdatePeerList(peers: List<String>) {
+            _peerCount.value = peers.size
+            updateNotification(peers.size)
+        }
+
+        override fun didReceiveChannelLeave(channel: String, fromPeer: String) = Unit
+        override fun didReceiveDeliveryAck(messageID: String, recipientPeerID: String) = Unit
+        override fun didReceiveReadReceipt(messageID: String, recipientPeerID: String) = Unit
+        override fun decryptChannelMessage(encryptedContent: ByteArray, channel: String): String? = null
+        override fun getNickname(): String? = runCatching {
+            com.seamless.android.ui.DataManager(applicationContext).loadNickname()
+        }.getOrNull()
+        override fun isFavorite(peerID: String): Boolean = false
+    }
+
     private fun startTorLifecycleMonitoring() {
         torLifecycleJob = serviceScope.launch {
             while (isRunning) {

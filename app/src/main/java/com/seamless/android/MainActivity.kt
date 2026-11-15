@@ -151,24 +151,61 @@ class MainActivity : OrientationAwareActivity() {
         
         setContent {
             SeamlessTheme {
-                // App Lock state
-                val isAppLockEnabled by com.seamless.android.ui.privacy.PrivacyPreferenceManager.appLockEnabled.collectAsState()
-                var isUnlocked by remember { mutableStateOf(!isAppLockEnabled) }
+                androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
+                    // App Lock state
+                    val isAppLockEnabled by com.seamless.android.ui.privacy.PrivacyPreferenceManager.appLockEnabled.collectAsState()
+                    var isUnlocked by remember { mutableStateOf(!isAppLockEnabled) }
 
-                if (isAppLockEnabled && !isUnlocked) {
-                    com.seamless.android.ui.privacy.AppLockScreen(
-                        onUnlocked = { isUnlocked = true }
-                    )
+                    if (isAppLockEnabled && !isUnlocked) {
+                        com.seamless.android.ui.privacy.AppLockScreen(
+                            onUnlocked = { isUnlocked = true }
+                        )
+                    } else {
+                        Scaffold(
+                            modifier = Modifier.fillMaxSize(),
+                            containerColor = MaterialTheme.colorScheme.background
+                        ) { innerPadding ->
+                            OnboardingFlowScreen(modifier = Modifier
+                                .fillMaxSize()
+                                .padding(innerPadding)
+                            )
+                        }
+                    }
+
+                    // Global P2P + Tor Encrypted Voice Call Overlay (incoming & active calls, works over lockscreen)
+                    com.seamless.android.ui.call.SeamlessCallOverlay()
+                }
+            }
+        }
+
+        handleCallActionIntent(intent)
+
+        lifecycleScope.launch {
+            com.seamless.android.call.SeamlessCallManager.getInstance(applicationContext).sessionFlow.collect { session ->
+                val hasCall = session != null &&
+                    session.state != com.seamless.android.call.CallState.IDLE &&
+                    session.state != com.seamless.android.call.CallState.ENDED
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                    setShowWhenLocked(hasCall)
+                    setTurnScreenOn(hasCall)
                 } else {
-                    Scaffold(
-                        modifier = Modifier.fillMaxSize(),
-                        containerColor = MaterialTheme.colorScheme.background
-                    ) { innerPadding ->
-                        OnboardingFlowScreen(modifier = Modifier
-                            .fillMaxSize()
-                            .padding(innerPadding)
+                    @Suppress("DEPRECATION")
+                    if (hasCall) {
+                        window.addFlags(
+                            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                        )
+                    } else {
+                        window.clearFlags(
+                            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
                         )
                     }
+                }
+                if (hasCall) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 }
             }
         }
@@ -778,10 +815,21 @@ class MainActivity : OrientationAwareActivity() {
     
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
+        handleCallActionIntent(intent)
         nfcHandoverService.handleNfcIntent(intent)
         // Handle notification intents when app is already running
         if (mainViewModel.onboardingState.value == OnboardingState.COMPLETE) {
             handleNotificationIntent(intent)
+        }
+    }
+
+    private fun handleCallActionIntent(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.getStringExtra(com.seamless.android.service.CallForegroundService.EXTRA_CALL_ACTION)
+        if (action == com.seamless.android.service.CallForegroundService.ACTION_ACCEPT_CALL) {
+            intent.removeExtra(com.seamless.android.service.CallForegroundService.EXTRA_CALL_ACTION)
+            com.seamless.android.call.SeamlessCallManager.getInstance(applicationContext).acceptIncomingCall()
         }
     }
     
@@ -829,6 +877,9 @@ class MainActivity : OrientationAwareActivity() {
     
     override fun onPause() {
         super.onPause()
+        runCatching {
+            com.seamless.android.net.TorMessagingService.getInstance(applicationContext).clearAllVisibleChats()
+        }
         // Disable NFC foreground dispatch
         nfcHandoverService.disableForegroundDispatch(this)
         // Only set background state if app is fully initialized
@@ -841,9 +892,16 @@ class MainActivity : OrientationAwareActivity() {
     }
     
     /**
-     * Handle intents from notification clicks - open specific private chat or geohash chat
+     * Handle intents from notification clicks - open specific private chat, geohash chat, or Tor chat
      */
     private fun handleNotificationIntent(intent: Intent) {
+        handleCallActionIntent(intent)
+
+        val shouldOpenTorChat = intent.getBooleanExtra(
+            com.seamless.android.net.TorMessageNotifier.EXTRA_OPEN_TOR_CHAT,
+            false
+        )
+
         val shouldOpenPrivateChat = intent.getBooleanExtra(
             com.seamless.android.ui.NotificationManager.EXTRA_OPEN_PRIVATE_CHAT, 
             false
@@ -855,6 +913,15 @@ class MainActivity : OrientationAwareActivity() {
         )
         
         when {
+            shouldOpenTorChat -> {
+                val contactId = intent.getStringExtra(com.seamless.android.net.TorMessageNotifier.EXTRA_TOR_CONTACT_ID)
+                val groupId = intent.getStringExtra(com.seamless.android.net.TorMessageNotifier.EXTRA_TOR_GROUP_ID)
+                if (!contactId.isNullOrBlank()) {
+                    chatViewModel.requestOpenTorContact(contactId)
+                } else if (!groupId.isNullOrBlank()) {
+                    chatViewModel.requestOpenTorGroup(groupId)
+                }
+            }
             shouldOpenPrivateChat -> {
                 val peerID = intent.getStringExtra(com.seamless.android.ui.NotificationManager.EXTRA_PEER_ID)
                 val senderNickname = intent.getStringExtra(com.seamless.android.ui.NotificationManager.EXTRA_SENDER_NICKNAME)

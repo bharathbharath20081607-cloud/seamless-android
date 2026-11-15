@@ -65,6 +65,26 @@ class ChatViewModel(
     private val _uiEvents = kotlinx.coroutines.flow.MutableSharedFlow<com.seamless.android.ui.events.UiEvent>()
     val uiEvents: kotlinx.coroutines.flow.SharedFlow<com.seamless.android.ui.events.UiEvent> = _uiEvents
 
+    private val _pendingTorContactId = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    val pendingTorContactId: kotlinx.coroutines.flow.StateFlow<String?> = _pendingTorContactId
+    private val _pendingTorGroupId = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    val pendingTorGroupId: kotlinx.coroutines.flow.StateFlow<String?> = _pendingTorGroupId
+
+    fun requestOpenTorContact(contactId: String) {
+        _pendingTorGroupId.value = null
+        _pendingTorContactId.value = contactId
+    }
+
+    fun requestOpenTorGroup(groupId: String) {
+        _pendingTorContactId.value = null
+        _pendingTorGroupId.value = groupId
+    }
+
+    fun consumePendingTorNavigation() {
+        _pendingTorContactId.value = null
+        _pendingTorGroupId.value = null
+    }
+
     // Transfer progress tracking
     private val transferMessageMap = mutableMapOf<String, String>()
     private val messageTransferMap = mutableMapOf<String, String>()
@@ -258,6 +278,26 @@ class ChatViewModel(
                 // Let's filter for main timeline (no channel, no private)
                 val mainMessages = messages.filter { it.channel == null && !it.isPrivate }
                 state.setMessages(mainMessages)
+                val myPeerId = meshService?.myPeerID
+                val persistedPrivate = messages.filter {
+                    it.isPrivate && !it.senderPeerID.isNullOrBlank() && it.senderPeerID != myPeerId
+                }
+                if (persistedPrivate.isNotEmpty()) {
+                    val currentChats = state.getPrivateChatsValue().toMutableMap()
+                    var changed = false
+                    persistedPrivate.groupBy { it.senderPeerID!! }.forEach { (peerId, dbMsgs) ->
+                        val existing = currentChats[peerId].orEmpty()
+                        val existingIds = existing.map { it.id }.toHashSet()
+                        val missing = dbMsgs.filter { it.id !in existingIds }
+                        if (missing.isNotEmpty()) {
+                            currentChats[peerId] = (existing + missing).sortedBy { it.timestamp }
+                            changed = true
+                        }
+                    }
+                    if (changed) {
+                        state.setPrivateChats(currentChats)
+                    }
+                }
             }
         }
         

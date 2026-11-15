@@ -131,6 +131,24 @@ class BluetoothPacketBroadcaster(
         }
     }
     
+    private fun fragmentDelayMs(targetPeerID: String? = null, minDelayMs: Long = 6L): Long {
+        val normalizedTarget = targetPeerID?.lowercase()
+        val clientAddresses = connectionTracker.getConnectedDevices().values
+            .filter { it.isClient && it.gatt != null && it.characteristic != null }
+            .map { it.device.address }
+            .toSet()
+        val needsServerNotify = if (normalizedTarget != null) {
+            val hasClientPath = clientAddresses.any { connectionTracker.addressPeerMap[it] == normalizedTarget }
+            val hasServerPath = connectionTracker.getSubscribedDevices().any {
+                connectionTracker.addressPeerMap[it.address] == normalizedTarget
+            }
+            hasServerPath && !hasClientPath
+        } else {
+            connectionTracker.getSubscribedDevices().any { !clientAddresses.contains(it.address) }
+        }
+        return if (needsServerNotify) 18L else minDelayMs
+    }
+
     fun broadcastPacket(
         routed: RoutedPacket,
         gattServer: BluetoothGattServer?,
@@ -171,8 +189,8 @@ class BluetoothPacketBroadcaster(
                             // If cancelled, stop sending remaining fragments
                             if (transferId != null && transferJobs[transferId]?.isCancelled == true) return@launch
                             broadcastSinglePacketAwait(RoutedPacket(fragment, transferId = transferId), gattServer, characteristic)
-                            // Hardware write/notify latch already completed; brief 6ms inter-fragment breathing room
-                            delay(6)
+                            // Server-only ATT notifications lack remote write-response backpressure; pace gently
+                            delay(fragmentDelayMs())
                             if (transferId != null) {
                                 sent += 1
                                 TransferProgressManager.progress(transferId, sent, fragments.size)
@@ -232,7 +250,7 @@ class BluetoothPacketBroadcaster(
                         if (!broadcasterScope.isActive) return
                         if (transferId != null && transferJobs[transferId]?.isCancelled == true) return
                         broadcastSinglePacketAwait(RoutedPacket(fragment, transferId = transferId), gattServer, characteristic)
-                        delay(8)
+                        delay(fragmentDelayMs(minDelayMs = 8L))
                         if (transferId != null) {
                             sent += 1
                             TransferProgressManager.progress(transferId, sent, fragments.size)
@@ -319,7 +337,7 @@ class BluetoothPacketBroadcaster(
                                 characteristic,
                                 normalizedTargetPeerID
                             )
-                            delay(6)
+                            delay(fragmentDelayMs(normalizedTargetPeerID))
                             if (transferId != null) {
                                 sent += 1
                                 TransferProgressManager.progress(transferId, sent, fragments.size)
@@ -558,11 +576,6 @@ class BluetoothPacketBroadcaster(
         } catch (e: Exception) {
             Log.w(TAG, "Error sending to server connection $address: ${e.message}")
             connectionTracker.onDeviceNotifyCompleted(address, false)
-            connectionScope.launch {
-                delay(CLEANUP_DELAY)
-                connectionTracker.removeSubscribedDevice(device)
-                connectionTracker.addressPeerMap.remove(address)
-            }
             false
         }
     }
@@ -609,10 +622,6 @@ class BluetoothPacketBroadcaster(
         } catch (e: Exception) {
             Log.w(TAG, "Error sending to client connection $address: ${e.message}")
             connectionTracker.onDeviceWriteCompleted(address, false)
-            connectionScope.launch {
-                delay(CLEANUP_DELAY)
-                connectionTracker.cleanupDeviceConnection(address)
-            }
             false
         }
     }

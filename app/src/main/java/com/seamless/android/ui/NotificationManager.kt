@@ -5,7 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
+import android.content.ContentResolver
 import android.content.Intent
+import android.media.AudioAttributes
+import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -34,8 +37,11 @@ class NotificationManager(
 
     companion object {
         private const val TAG = "NotificationManager"
-        private const val CHANNEL_ID = "bitchat_dm_notifications"
-        private const val GEOHASH_CHANNEL_ID = "bitchat_geohash_notifications"
+        private const val LEGACY_CHANNEL_ID = "bitchat_dm_notifications"
+        private const val LEGACY_GEOHASH_CHANNEL_ID = "bitchat_geohash_notifications"
+        private const val CHANNEL_ID = "seamless_dm_notifications_v2"
+        private const val GEOHASH_CHANNEL_ID = "seamless_geohash_notifications_v2"
+        private const val ACTIVE_PEERS_CHANNEL_ID = "seamless_active_peers_v2"
         private const val WIFI_DIRECT_CHANNEL_ID = "bitchat_wifi_direct_notifications"
         private const val GROUP_KEY_DM = "bitchat_dm_group"
         private const val GROUP_KEY_GEOHASH = "bitchat_geohash_group"
@@ -55,6 +61,9 @@ class NotificationManager(
     }
 
     private val systemNotificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+    private fun getSeamlessSoundUri(): Uri =
+        Uri.parse("${ContentResolver.SCHEME_ANDROID_RESOURCE}://${context.packageName}/${R.raw.seamless_notification}")
     
     // Track pending notifications per sender to enable grouping
     private val pendingNotifications = ConcurrentHashMap<String, MutableList<PendingNotification>>()
@@ -94,12 +103,21 @@ class NotificationManager(
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            runCatching { systemNotificationManager.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
+            runCatching { systemNotificationManager.deleteNotificationChannel(LEGACY_GEOHASH_CHANNEL_ID) }
+
+            val soundUri = getSeamlessSoundUri()
+            val audioAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
             // DM notifications channel
             val dmName = "Direct Messages"
             val dmDescriptionText = "Notifications for private messages from other users"
             val dmImportance = NotificationManager.IMPORTANCE_HIGH
             val dmChannel = NotificationChannel(CHANNEL_ID, dmName, dmImportance).apply {
                 description = dmDescriptionText
+                setSound(soundUri, audioAttributes)
                 enableVibration(true)
                 setShowBadge(true)
             }
@@ -111,10 +129,24 @@ class NotificationManager(
             val geohashImportance = NotificationManager.IMPORTANCE_HIGH
             val geohashChannel = NotificationChannel(GEOHASH_CHANNEL_ID, geohashName, geohashImportance).apply {
                 description = geohashDescriptionText
+                setSound(soundUri, audioAttributes)
                 enableVibration(true)
                 setShowBadge(true)
             }
             systemNotificationManager.createNotificationChannel(geohashChannel)
+
+            // Silent channel for active-peer summary ticker so it never plays the Seamless message sound
+            val activePeersChannel = NotificationChannel(
+                ACTIVE_PEERS_CHANNEL_ID,
+                "Active Mesh Peers",
+                NotificationManager.IMPORTANCE_MIN
+            ).apply {
+                description = "Low-priority notification for nearby active peers"
+                setSound(null, null)
+                enableVibration(false)
+                setShowBadge(false)
+            }
+            systemNotificationManager.createNotificationChannel(activePeersChannel)
 
             // Wi-Fi Direct notifications channel
             val wifiDirectName = "Wi-Fi Direct"
@@ -253,6 +285,7 @@ class NotificationManager(
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .addPerson(person)
             .setShowWhen(true)
+            .setSound(getSeamlessSoundUri())
             .setWhen(latestNotification.timestamp)
 
         // Add to notification group if we have multiple senders
@@ -320,6 +353,8 @@ class NotificationManager(
           .setContentText(contentText)
           .setContentIntent(pendingIntent)
           .setAutoCancel(true)
+          .setChannelId(ACTIVE_PEERS_CHANNEL_ID)
+          .setSilent(true)
           .setPriority(NotificationCompat.PRIORITY_MIN)
           .setCategory(NotificationCompat.CATEGORY_MESSAGE)
           .setShowWhen(true)
@@ -355,6 +390,7 @@ class NotificationManager(
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setGroup(GROUP_KEY_DM)
             .setGroupSummary(true)
+            .setOnlyAlertOnce(true)
 
         // Add inbox style showing recent senders
         val style = NotificationCompat.InboxStyle()
@@ -496,6 +532,7 @@ class NotificationManager(
             .setPriority(if (latestNotification.isMention) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setShowWhen(true)
+            .setSound(getSeamlessSoundUri())
             .setWhen(latestNotification.timestamp)
 
         // Add to notification group if we have multiple geohashes
@@ -577,6 +614,7 @@ class NotificationManager(
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setGroup(GROUP_KEY_GEOHASH)
             .setGroupSummary(true)
+            .setOnlyAlertOnce(true)
 
         // Add inbox style showing recent geohashes
         val style = NotificationCompat.InboxStyle()
@@ -709,6 +747,7 @@ class NotificationManager(
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setShowWhen(true)
+            .setSound(getSeamlessSoundUri())
             .setWhen(latestNotification.timestamp)
 
         // Add to notification group if we have multiple senders

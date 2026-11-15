@@ -45,6 +45,15 @@ class BluetoothConnectionTracker(
     // Per-device GATT flow control latches to prevent overlapping writes/notifications (status 133 / GATT_BUSY)
     private val pendingWriteLatches = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
     private val pendingNotifyLatches = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+    private val deviceMtu = ConcurrentHashMap<String, Int>()
+
+    fun updateDeviceMtu(deviceAddress: String, mtu: Int) {
+        if (mtu >= 23) {
+            deviceMtu[deviceAddress] = mtu
+        }
+    }
+
+    fun getDeviceMtu(deviceAddress: String): Int = deviceMtu[deviceAddress] ?: 185
     
     // State management
     private var isActive = false
@@ -387,16 +396,72 @@ class BluetoothConnectionTracker(
     }
     
     /**
-     * Clean up a specific device connection
+     * Clean up a specific device connection completely (explicit disconnect / stop)
      */
     fun cleanupDeviceConnection(deviceAddress: String) {
         connectedDevices.remove(deviceAddress)
         subscribedDevices.removeAll { it.address == deviceAddress }
         addressPeerMap.remove(deviceAddress)
         firstAnnounceSeen.remove(deviceAddress)
+        deviceMtu.remove(deviceAddress)
         pendingWriteLatches.remove(deviceAddress)?.complete(false)
         pendingNotifyLatches.remove(deviceAddress)?.complete(false)
         Log.d(TAG, "Cleaned up device connection for $deviceAddress")
+    }
+
+    /**
+     * Clean up only the GATT client side for [deviceAddress].
+     * Returns true if the device is completely disconnected, or false if an active
+     * GATT server subscription for this address still remains open.
+     */
+    fun cleanupClientConnection(deviceAddress: String): Boolean {
+        pendingWriteLatches.remove(deviceAddress)?.complete(false)
+        val subDevice = subscribedDevices.firstOrNull { it.address == deviceAddress }
+        return if (subDevice != null) {
+            val existing = connectedDevices[deviceAddress]
+            if (existing == null || existing.isClient) {
+                connectedDevices[deviceAddress] = DeviceConnection(
+                    device = subDevice,
+                    rssi = getBestRSSI(deviceAddress) ?: Int.MIN_VALUE,
+                    isClient = false,
+                    lastPacketReceivedAt = existing?.lastPacketReceivedAt ?: System.currentTimeMillis()
+                )
+            }
+            Log.d(TAG, "Cleaned up client connection for $deviceAddress while keeping active GATT server subscription")
+            false
+        } else {
+            val existing = connectedDevices[deviceAddress]
+            if (existing == null || existing.isClient) {
+                connectedDevices.remove(deviceAddress)
+            }
+            addressPeerMap.remove(deviceAddress)
+            firstAnnounceSeen.remove(deviceAddress)
+            deviceMtu.remove(deviceAddress)
+            Log.d(TAG, "Cleaned up client connection for $deviceAddress (fully disconnected)")
+            true
+        }
+    }
+
+    /**
+     * Clean up only the GATT server subscription for [device].
+     * Returns true if the device is completely disconnected, or false if an active
+     * GATT client connection for this address still remains open.
+     */
+    fun cleanupServerConnection(device: BluetoothDevice): Boolean {
+        val deviceAddress = device.address
+        removeSubscribedDevice(device)
+        val existing = connectedDevices[deviceAddress]
+        return if (existing != null && existing.isClient && existing.gatt != null) {
+            Log.d(TAG, "Cleaned up server subscription for $deviceAddress while keeping active GATT client connection")
+            false
+        } else {
+            connectedDevices.remove(deviceAddress)
+            addressPeerMap.remove(deviceAddress)
+            firstAnnounceSeen.remove(deviceAddress)
+            deviceMtu.remove(deviceAddress)
+            Log.d(TAG, "Cleaned up server connection for $deviceAddress (fully disconnected)")
+            true
+        }
     }
     
     /**
@@ -430,6 +495,7 @@ class BluetoothConnectionTracker(
         pendingConnections.clear()
         scanRSSI.clear()
         firstAnnounceSeen.clear()
+        deviceMtu.clear()
         pendingWriteLatches.values.forEach { it.complete(false) }
         pendingWriteLatches.clear()
         pendingNotifyLatches.values.forEach { it.complete(false) }
@@ -483,7 +549,7 @@ class BluetoothConnectionTracker(
                         zombies.forEach { (address, dc) ->
                             Log.d(TAG, "Disconnecting zombie: $address (inactive ${(now - dc.lastPacketReceivedAt)/1000}s)")
                             try { dc.gatt?.disconnect() } catch (_: Exception) {}
-                            cleanupDeviceConnection(address)
+                            cleanupClientConnection(address)
                         }
                     }
                     

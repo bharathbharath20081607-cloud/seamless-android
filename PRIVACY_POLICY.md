@@ -1,141 +1,57 @@
-# bitchat Privacy Policy
+# Seamless Privacy Policy
 
-*Last updated: January 2025*
+*Last updated: November 2026*
 
 ## Our Commitment
 
-bitchat is designed with privacy as its foundation. We believe private communication is a fundamental human right. This policy explains how bitchat protects your privacy.
+Seamless is designed with privacy and security as its foundation. We believe private communication is a fundamental human right. This policy explains what information Seamless processes on your device, what is shared with peers, and what we never collect.
 
 ## Summary
 
-- **No personal data collection** - We don't collect names, emails, or phone numbers
-- **Hybrid Functionality** - bitchat offers two modes of communication:
-  - **Bluetooth Mesh Chat**: This mode is completely offline, using peer-to-peer Bluetooth connections. It does not use any servers or internet connection.
-  - **Geohash Chat**: This mode uses an internet connection to communicate with others in a specific geographic area. It relies on Nostr relays for message transport.
-- **No tracking** - We have no analytics, telemetry, or user tracking
-- **Open source** - You can verify these claims by reading our code
+- **Zero personal data collection** — Seamless does not collect names, emails, phone numbers, contacts, or device identifiers.
+- **Zero central servers** — Seamless operates without central accounts, authentication servers, or developer-operated infrastructure.
+- **Multi-transport peer-to-peer communication**:
+  - **Bluetooth Low Energy (BLE) Mesh**: Works 100% offline using local peer-to-peer Bluetooth connections with optional multi-hop relay.
+  - **Tor v3 Onion P2P & Mailboxes**: Routes global 1:1 messages, voice calls, group chats, and asynchronous mailbox delivery directly over the Tor anonymity network using `.onion` hidden services.
+  - **Nostr Geohash Chat**: Optional internet channels via public decentralized Nostr relays using ephemeral client keys.
+  - **HyperDrop**: Direct local Wi-Fi Direct / P2P file transfer with zero cloud middlemen.
+- **No analytics, ads, or telemetry** — There is no tracking SDK, crash uploader, or usage telemetry in the app.
+- **Fully Open Source (GPL-3.0)** — Every claim in this policy can be audited in the public source code.
 
-## What Information bitchat Stores
+## What Seamless Stores Locally on Your Device
 
-### On Your Device Only
+1. **Cryptographic Identity & Tor Keys**
+   - Ephemeral and long-term cryptographic keypairs (Noise/X25519, Ed25519, Double Ratchet session state, and Tor v3 onion service keys) are generated locally on your device and protected by Android Keystore / encrypted local storage.
+2. **Display Nickname**
+   - Stored locally on your device and shared only with peers you communicate with.
+3. **Messages, Contacts & Group State**
+   - Conversations, contacts, favorites, and received media live only inside your device's SQLCipher-encrypted local database (or user-exported Downloads for saved media/files).
+4. **Temporary Routing & Offline Queues**
+   - Transient peer announcements and store-and-forward retry queues needed to deliver messages reliably across flaky links.
 
-1. **Identity Key** 
-   - A cryptographic key generated on first launch
-   - Stored locally in your device's secure storage
-   - Allows you to maintain "favorite" relationships across app restarts
-   - Never leaves your device
+## What You Share When Using Seamless
 
-2. **Nickname**
-   - The display name you choose (or auto-generated)
-   - Stored only on your device
-   - Shared with peers you communicate with
+- **With nearby BLE Mesh peers**: Your display nickname, session public key, approximate signal strength (RSSI), and the messages you choose to send.
+- **With paired Tor P2P contacts & group members**: Your `.onion` address, display nickname, and end-to-end encrypted chat/voice payloads. Direct voice calls and direct Tor connections transit Tor circuits by default (unless you explicitly choose Direct P2P LAN fallback when offline).
+- **With Nostr relays (if you open Geohash channels)**: Signed Nostr events (`kind`) visible on the public relays you connect to.
 
-3. **Message History** (if enabled)
-   - When room owners enable retention, messages are saved locally
-   - Stored encrypted on your device
-   - You can delete this at any time
+## Permissions & Hardware Access
 
-4. **Favorite Peers**
-   - Public keys of peers you mark as favorites
-   - Stored only on your device
-   - Allows you to recognize these peers in future sessions
+- **Bluetooth (`BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`, `BLUETOOTH_ADVERTISE`) & Location (`ACCESS_FINE_LOCATION` on older Android versions)**: Required by the Android OS solely to discover and connect to nearby Bluetooth LE peers. Seamless **never** reads or transmits your GPS coordinates for tracking.
+- **Wi-Fi Direct / Nearby Wi-Fi Devices (`NEARBY_WIFI_DEVICES`)**: Used exclusively for HyperDrop local file sharing.
+- **Microphone (`RECORD_AUDIO`)**: Used only when you actively record a voice note or speak on an encrypted voice call.
+- **Notifications & Full-Screen Intent (`POST_NOTIFICATIONS`, `USE_FULL_SCREEN_INTENT`)**: Used to notify you of incoming messages and ring incoming encrypted calls even while the device is locked.
 
-### Temporary Session Data
+## Your Control & Emergency Wipe
 
-During each session, bitchat temporarily maintains:
-- Active peer connections (forgotten when app closes)
-- Routing information for message delivery
-- Cached messages for offline peers (12 hours max)
+- **Emergency Panic Wipe**: Triple-tap the Seamless logo in the top bar (or use Panic Mode) to immediately wipe cryptographic keys, message history, and local identity state.
+- **No Cloud Footprint**: Uninstalling Seamless or deleting its data removes everything — there are no remote servers holding your account.
 
-## What Information is Shared
+## Contact & Source Code
 
-### With Other bitchat Users
-
-When you use bitchat, nearby peers can see:
-- Your chosen nickname
-- Your ephemeral public key (changes each session)
-- Messages you send to public rooms or directly to them
-- Your approximate Bluetooth signal strength (for connection quality)
-
-### With Room Members
-
-When you join a password-protected room:
-- Your messages are visible to others with the password
-- Your nickname appears in the member list
-- Room owners can see you've joined
-
-## What We DON'T Do
-
-bitchat **never**:
-- Collects personal information
-- Tracks your location
-- Stores data on servers
-- Shares data with third parties
-- Uses analytics or telemetry
-- Creates user profiles
-- Requires registration
-
-## Encryption
-
-All private messages use end-to-end encryption:
-- **X25519** for key exchange
-- **AES-256-GCM** for message encryption
-- **Ed25519** for digital signatures
-- **Argon2id** for password-protected rooms
-
-## Your Rights
-
-You have complete control:
-- **Delete Everything**: Triple-tap the logo to instantly wipe all data
-- **Leave Anytime**: Close the app and your presence disappears
-- **No Account**: Nothing to delete from servers because there are none
-- **Portability**: Your data never leaves your device unless you export it
-
-## Bluetooth & Permissions
-
-bitchat requires Bluetooth permission to function:
-- Used only for peer-to-peer communication
-- No location data is accessed or stored
-- Bluetooth is not used for tracking
-- You can revoke this permission at any time in system settings
-
-## Children's Privacy
-
-bitchat does not knowingly collect information from children. The app has no age verification because it collects no personal information from anyone.
-
-## Data Retention
-
-- **Messages**: Deleted from memory when app closes (unless room retention is enabled)
-- **Identity Key**: Persists until you delete the app
-- **Favorites**: Persist until you remove them or delete the app
-- **Everything Else**: Exists only during active sessions
-
-## Security Measures
-
-- All communication is encrypted
-- No data transmitted to servers (there are none)
-- Open source code for public audit
-- Regular security updates
-- Cryptographic signatures prevent tampering
-
-## Changes to This Policy
-
-If we update this policy:
-- The "Last updated" date will change
-- The updated policy will be included in the app
-- No retroactive changes can affect data (since we don't collect any)
-
-## Contact
-
-bitchat is an open source project. For privacy questions:
-- Review our code: https://github.com/yourusername/bitchat
-- Open an issue on GitHub
-- Join the discussion in public rooms
-
-## Philosophy
-
-Privacy isn't just a feature—it's the entire point. bitchat proves that modern communication doesn't require surrendering your privacy. No accounts, no servers, no surveillance. Just people talking freely.
+- Repository: https://github.com/bharathbharath20081607-cloud/seamless-android
+- Report privacy or security issues via GitHub Issues or Pull Requests.
 
 ---
 
-*This policy is released into the public domain under The Unlicense, just like bitchat itself.*
+*Licensed under the GNU General Public License v3.0 (GPL-3.0). See [LICENSE.md](LICENSE.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).*

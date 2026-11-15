@@ -778,11 +778,29 @@ class FileShareViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     override fun onDiscoveryFailed(reason: Int) {
+        if (reason == android.net.wifi.p2p.WifiP2pManager.BUSY) {
+            // Keep UI in discovering state and silently retry instead of flashing an error banner
+            _isDiscovering.value = true
+            _errorMessage.value = null
+            Log.w(TAG, "Wi-Fi Direct framework busy; scheduling automatic discovery retry")
+            viewModelScope.launch {
+                kotlinx.coroutines.delay(2500L)
+                if (_isDiscovering.value == true) {
+                    val service = wifiDirectService
+                    if (service != null) {
+                        service.startDiscovery()
+                    } else {
+                        startWifiDirectDiscovery()
+                    }
+                }
+            }
+            return
+        }
+
         _isDiscovering.value = false
         _errorMessage.value = when (reason) {
             -1 -> "Discovery failed: missing Nearby devices/location permission. Check app permissions."
             -2 -> "Turn on the phone's system Location setting to find nearby HyperDrop devices."
-            android.net.wifi.p2p.WifiP2pManager.BUSY -> "System is busy. Retrying scan..."
             android.net.wifi.p2p.WifiP2pManager.P2P_UNSUPPORTED -> "Wi-Fi Direct is not supported on this device."
             else -> "Device discovery failed (code $reason)."
         }

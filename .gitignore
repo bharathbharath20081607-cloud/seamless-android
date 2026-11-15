@@ -53,6 +53,15 @@ gen/
 *.swp
 *.lock
 .goosehints
+.agents/
+.vscode/
+.kotlin/
+.gradle-verify/
+.gradle-codex/
+GEMINI.md
+distribution_docs/
+full_build_output.txt
+kotlin_compile_output.txt
 
 # Google services
 google-services.json

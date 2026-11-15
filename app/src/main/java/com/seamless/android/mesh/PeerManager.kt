@@ -294,6 +294,13 @@ class PeerManager {
             announcedToPeers.add(peerID)
         }
     }
+
+    /**
+     * Allow re-announcing to a peer on a subsequent reconnection.
+     */
+    fun clearAnnouncedToPeer(peerID: String) {
+        announcedToPeers.removeAll { it.equals(peerID, ignoreCase = true) }
+    }
     
     /**
      * Check if peer is active

@@ -52,11 +52,11 @@ class OnionMessageQueue private constructor(private val context: Context) {
         const val MAX_RETRY_ATTEMPTS = Int.MAX_VALUE
         const val BACKOFF_MULTIPLIER = 1.8
         // Unacknowledged frames are retransmitted on an escalating schedule
-        // (10s, 15s, 22s, 34s ... capped) so a slow circuit is not flooded
+        // (4.5s, 6.3s, 8.8s, 12.3s ... capped) so a slow circuit is not flooded
         // with duplicates while a dead one is still detected quickly.
-        const val ACK_RETRY_DELAY_MS = 10_000L
+        const val ACK_RETRY_DELAY_MS = 4_500L
         const val MAX_ACK_RETRY_DELAY_MS = 90_000L
-        const val ACK_RETRY_GROWTH = 1.5
+        const val ACK_RETRY_GROWTH = 1.4
         // Persisting the whole queue (every photo chunk) through encrypted
         // preferences is expensive. Writes are coalesced into one snapshot
         // per debounce window instead of one per state transition.

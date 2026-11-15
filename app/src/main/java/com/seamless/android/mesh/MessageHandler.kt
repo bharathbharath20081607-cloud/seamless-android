@@ -555,6 +555,13 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
             // Try to parse as binary-encoded BitchatMessage first (has TLV structure with message ID, content, vector clock)
             val parsedMessage = BitchatMessage.fromBinaryPayload(packet.payload)
             if (parsedMessage != null) {
+                if ((peerInfo == null || !peerInfo.isVerifiedNickname) &&
+                    packet.signature != null &&
+                    parsedMessage.sender.isNotBlank() &&
+                    parsedMessage.sender != peerID
+                ) {
+                    delegate?.addOrUpdatePeer(peerID, parsedMessage.sender)
+                }
                 // Successfully parsed binary message format
                 val message = parsedMessage.copy(
                     sender = delegate?.getPeerNickname(peerID) ?: parsedMessage.sender,

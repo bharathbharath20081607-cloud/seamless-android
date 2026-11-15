@@ -43,12 +43,20 @@ class BluetoothConnectionManager(
     private val packetBroadcaster = BluetoothPacketBroadcaster(connectionScope, connectionTracker, fragmentManager)
     
     // Delegate for component managers to call back to main manager
-    private val componentDelegate = object : BluetoothConnectionManagerDelegate {
+    private val componentDelegate: BluetoothConnectionManagerDelegate = object : BluetoothConnectionManagerDelegate {
         override fun onPacketReceived(packet: BitchatPacket, peerID: String, device: BluetoothDevice?) {
             Log.d(TAG, "onPacketReceived: Packet received from ${device?.address} ($peerID)")
             device?.let { bluetoothDevice ->
                 // HEARTBEAT: Mark connection as active
                 connectionTracker.updateLastPacketReceived(bluetoothDevice.address)
+
+                // Map direct neighbor MAC -> peerID as soon as any direct/unmapped packet arrives
+                if (peerID != myPeerID &&
+                    (packet.ttl == com.seamless.android.util.AppConstants.MESSAGE_TTL_HOPS ||
+                        !connectionTracker.addressPeerMap.containsKey(bluetoothDevice.address))
+                ) {
+                    connectionTracker.addressPeerMap[bluetoothDevice.address] = peerID.lowercase()
+                }
                 
                 // Get current RSSI for this device and update if available
                 val currentRSSI = connectionTracker.getBestRSSI(bluetoothDevice.address)
@@ -64,6 +72,12 @@ class BluetoothConnectionManager(
         
         override fun onDeviceConnected(device: BluetoothDevice) {
             delegate?.onDeviceConnected(device)
+            connectionScope.launch {
+                delay(1200L)
+                if (isActive && !connectionTracker.isDeviceConnected(device.address)) {
+                    clientManager.ensureClientConnection(device)
+                }
+            }
         }
 
         override fun onDeviceDisconnected(device: BluetoothDevice) {
@@ -75,10 +89,10 @@ class BluetoothConnectionManager(
         }
     }
     
-    private val serverManager = BluetoothGattServerManager(
+    private val serverManager: BluetoothGattServerManager = BluetoothGattServerManager(
         context, connectionScope, connectionTracker, permissionManager, powerManager, componentDelegate
     )
-    private val clientManager = BluetoothGattClientManager(
+    private val clientManager: BluetoothGattClientManager = BluetoothGattClientManager(
         context, connectionScope, connectionTracker, permissionManager, powerManager, componentDelegate
     )
     

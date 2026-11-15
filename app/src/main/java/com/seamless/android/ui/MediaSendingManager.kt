@@ -227,7 +227,12 @@ class MediaSendingManager(
         
         // PRODUCTION FIX: Try Bluetooth first, but also send via Nostr for long-distance
         // Check if peer is on local mesh vs long-distance
-        val isPeerOnMesh = meshService?.getPeerNicknames()?.containsKey(toPeerID) == true
+        val isPeerOnMesh = meshService != null && !toPeerID.startsWith("nostr_") && (
+            meshService?.getPeerNicknames()?.containsKey(toPeerID) == true ||
+            meshService?.getPeerInfo(toPeerID) != null ||
+            meshService?.hasEstablishedSession(toPeerID) == true ||
+            (meshService?.getActiveConnectionCount() ?: 0) > 0
+        )
         
         if (isPeerOnMesh) {
             Log.d(TAG, "📤 Calling meshService.sendFilePrivate to $toPeerID (local mesh)")

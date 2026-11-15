@@ -12,6 +12,7 @@ import com.seamless.android.identity.SecureIdentityStateManager
 import com.seamless.android.noise.SeamlessRatchetManager
 import com.seamless.android.sync.BrambleSyncEngine
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -53,7 +54,7 @@ class TorMessagingService private constructor(private val context: Context) {
         private val MAILBOX_SEALED_MAGIC = byteArrayOf(0x53, 0x54, 0x4D, 0x42) // STMB
         private const val DIRECT_SEALED_VERSION: Byte = 1
         private const val DIRECT_NONCE_SIZE = 12
-        private const val UNACKED_RETRIES_BEFORE_RECONNECT = 2
+        private const val UNACKED_RETRIES_BEFORE_RECONNECT = 3
         // Onion-service circuits can pause while a rendezvous path is rebuilt.
         // A verified peer should not flicker offline during one of those normal
         // pauses; authenticated PONGs and receipts refresh this lease.
@@ -126,7 +127,16 @@ class TorMessagingService private constructor(private val context: Context) {
     private var heartbeatJob: Job? = null
     private var queueDeliveryJob: Job? = null
     private var mailboxPollJob: Job? = null
+    private var mailboxHostJob: Job? = null
+    private var hiddenServiceObserverJob: Job? = null
+    private val pendingContactExchanges = ConcurrentHashMap.newKeySet<String>()
     private val queueWakeSignal = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    private val queueWakeChannel = Channel<Unit>(Channel.CONFLATED)
+
+    private fun wakeQueueDispatcher() {
+        queueWakeChannel.trySend(Unit)
+        queueWakeSignal.tryEmit(Unit)
+    }
     
     // Track peers that have a dedicated continuous read loop
     // to prevent processIncomingMessages from racing on the same socket
@@ -199,7 +209,20 @@ class TorMessagingService private constructor(private val context: Context) {
 
     /** Avoid a redundant system notification while this Tor chat is visible. */
     fun setChatVisible(contactId: String, visible: Boolean) {
-        if (visible) visibleChatContacts.add(contactId) else visibleChatContacts.remove(contactId)
+        if (visible) {
+            visibleChatContacts.add(contactId)
+            scope.launch {
+                refreshPeerConnection(contactId)
+                wakeQueueDispatcher()
+            }
+        } else {
+            visibleChatContacts.remove(contactId)
+        }
+    }
+
+    /** Clear all visible-chat markers (e.g., when Activity pauses or goes to background). */
+    fun clearAllVisibleChats() {
+        visibleChatContacts.clear()
     }
     
     // ========== Lifecycle ==========
@@ -257,7 +280,12 @@ class TorMessagingService private constructor(private val context: Context) {
                 error(_lastError.value ?: "Tor could not start")
             }
 
-            startMailboxHost()
+            mailboxHostJob?.cancel()
+            mailboxHostJob = scope.launch {
+                startMailboxHost()
+            }
+
+            observeHiddenServiceReadiness()
             
             // Start processing loop (incoming messages)
             startProcessingLoop()
@@ -287,6 +315,25 @@ class TorMessagingService private constructor(private val context: Context) {
             _serviceState.value = ServiceState.ERROR
         }
     }
+
+    private fun observeHiddenServiceReadiness() {
+        hiddenServiceObserverJob?.cancel()
+        hiddenServiceObserverJob = scope.launch {
+            hiddenServiceManager.statusFlow.collect { status ->
+                if (status.state == TorHiddenServiceManager.HiddenServiceState.RUNNING &&
+                    status.onionAddress.isNotBlank()
+                ) {
+                    val pending = pendingContactExchanges.toList()
+                    if (pending.isNotEmpty()) {
+                        pendingContactExchanges.clear()
+                        Log.i(TAG, "📤 Flushing ${pending.size} pending contact exchange(s) after HS publish")
+                        pending.forEach { peer -> sendContactExchange(peer) }
+                    }
+                    wakeQueueDispatcher()
+                }
+            }
+        }
+    }
     
     /**
      * Stop the messaging service
@@ -303,6 +350,9 @@ class TorMessagingService private constructor(private val context: Context) {
         heartbeatJob?.cancel()
         queueDeliveryJob?.cancel()
         mailboxPollJob?.cancel()
+        mailboxHostJob?.cancel()
+        hiddenServiceObserverJob?.cancel()
+        pendingContactExchanges.clear()
         connectionEventsJob?.cancel()
         introducedConnectionIds.clear()
         mailboxClient.stopPolling()
@@ -386,13 +436,17 @@ class TorMessagingService private constructor(private val context: Context) {
      */
     private suspend fun sendContactExchange(recipientOnion: String) {
         try {
+            val canonicalRecipient = OnionContactManager.OnionContact
+                .canonicalizeOnionEndpoint(recipientOnion)
+                .ifBlank { recipientOnion }
             val myInfo = contactManager.getMyContactInfo()
-            if (myInfo.requiresRendezvous()) {
-                Log.w(TAG, "Skipping contact exchange until our onion address is published")
+            if (myInfo.requiresRendezvous() || myInfo.onionAddress.isBlank()) {
+                pendingContactExchanges.add(canonicalRecipient)
+                Log.w(TAG, "Queueing contact exchange for ${redactEndpoint(canonicalRecipient)} until our onion address is published")
                 return
             }
             
-            val seqManager = sequenceManagers.getOrPut(recipientOnion) {
+            val seqManager = sequenceManagers.getOrPut(canonicalRecipient) {
                 OnionMessageProtocol.SequenceManager()
             }
             
@@ -406,10 +460,10 @@ class TorMessagingService private constructor(private val context: Context) {
             
             // DO NOT ENCRYPT - recipient doesn't have our public key yet!
             // The frame contains our public key, which they need to decrypt future messages
-            messageQueue.enqueue(recipientOnion, frame)
-            queueWakeSignal.tryEmit(Unit)
+            messageQueue.enqueue(canonicalRecipient, frame)
+            dispatchRecipientNow(canonicalRecipient)
             
-            Log.i(TAG, "📤 Sent contact exchange (unencrypted) to ${redactEndpoint(recipientOnion)} for auto-pairing")
+            Log.i(TAG, "📤 Sent contact exchange (unencrypted) to ${redactEndpoint(canonicalRecipient)} for auto-pairing")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send contact exchange: ${e.message}")
         }
@@ -572,10 +626,12 @@ class TorMessagingService private constructor(private val context: Context) {
                 uiMessageId = messageId.toString(),
                 completesUiMessage = completesUiMessage
             )
-            syncEngine.addMessageForSync(messageId.toString(), frame.encode(), canonicalRecipient)
             deliveryRoutes[queuedMessageId] = TorDeliveryRoute.QUEUED
             updateChainHead(canonicalRecipient, envelope.chainHash())
-            queueWakeSignal.tryEmit(Unit)
+            scope.launch {
+                syncEngine.addMessageForSync(messageId.toString(), frame.encode(), canonicalRecipient)
+            }
+            dispatchRecipientNow(canonicalRecipient)
             
             Log.i(TAG, "📨 Message $messageId queued for ${redactEndpoint(canonicalRecipient)}")
             Result.success(queuedMessageId)
@@ -659,7 +715,7 @@ class TorMessagingService private constructor(private val context: Context) {
                 if (index == chunks.lastIndex) finalChunkId = chunkId
             }
             deliveryRoutes[imageMessageId.toString()] = TorDeliveryRoute.QUEUED
-            queueWakeSignal.tryEmit(Unit)
+            dispatchRecipientNow(contact.onionAddress)
             Result.success(finalChunkId)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to queue image: ${e.message}")
@@ -1123,11 +1179,23 @@ class TorMessagingService private constructor(private val context: Context) {
                             if (canonical.isNotBlank()) peerOnion = canonical
                         }
                         resolvedPeerOnion = peerOnion
-                        circuitManager.addIncomingConnection(
+                        val accepted = circuitManager.addIncomingConnection(
                             peerOnion,
                             socket,
                             shouldPreferIncomingCircuit(peerOnion)
                         )
+                        if (accepted) {
+                            circuitManager.getActiveConnectionId(peerOnion)?.let { connId ->
+                                introducedConnectionIds[peerOnion] = connId
+                                peersIntroducedOnConnection.add(peerOnion)
+                            }
+                            messageQueue.getPendingMessages(peerOnion)
+                                .filter {
+                                    OnionMessageProtocol.OnionFrame.decode(it.frameData)?.frameType ==
+                                        OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
+                                }
+                                .forEach { messageQueue.markDelivered(it.id) }
+                        }
                         Log.i(TAG, "📥 Incoming CONTACT_EXCHANGE from ${peerOnion.take(20)}...")
                         handleIncomingData(peerOnion, data, isAlreadyDecrypted = false)
                     } else {
@@ -1144,11 +1212,23 @@ class TorMessagingService private constructor(private val context: Context) {
                             .canonicalizeOnionEndpoint(identified.first)
                             .ifBlank { identified.first }
                         resolvedPeerOnion = canonicalPeer
-                        circuitManager.addIncomingConnection(
+                        val accepted = circuitManager.addIncomingConnection(
                             canonicalPeer,
                             socket,
                             shouldPreferIncomingCircuit(canonicalPeer)
                         )
+                        if (accepted) {
+                            circuitManager.getActiveConnectionId(canonicalPeer)?.let { connId ->
+                                introducedConnectionIds[canonicalPeer] = connId
+                                peersIntroducedOnConnection.add(canonicalPeer)
+                            }
+                            messageQueue.getPendingMessages(canonicalPeer)
+                                .filter {
+                                    OnionMessageProtocol.OnionFrame.decode(it.frameData)?.frameType ==
+                                        OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
+                                }
+                                .forEach { messageQueue.markDelivered(it.id) }
+                        }
                         Log.i(TAG, "📥 Incoming connection from ${canonicalPeer.take(20)}... (identified via decryption)")
                         handleIncomingData(canonicalPeer, identified.second, isAlreadyDecrypted = true)
                     } else {
@@ -1167,7 +1247,7 @@ class TorMessagingService private constructor(private val context: Context) {
             // outbound delivery loop immediately so queued frames flush right away.
             resolvedPeerOnion?.let { peer ->
                 ensureReadLoop(peer)
-                queueWakeSignal.tryEmit(Unit)
+                wakeQueueDispatcher()
             }
             
         } catch (e: Exception) {
@@ -1196,7 +1276,7 @@ class TorMessagingService private constructor(private val context: Context) {
                         break
                     } else {
                         // No data available (timeout or no connection) — small delay to avoid spinning
-                        delay(50)
+                        delay(10)
                     }
                 } catch (e: java.io.EOFException) {
                     Log.d(TAG, "📡 Peer $peerOnion disconnected (EOF)")
@@ -1302,28 +1382,64 @@ class TorMessagingService private constructor(private val context: Context) {
         }
     }
     
+    private fun healPeerCircuit(onion: String, reconnectFirst: Boolean) {
+        scope.launch {
+            if (reconnectFirst && circuitManager.warmReconnect(onion) != null) {
+                ensureReadLoop(onion)
+            }
+            pingPeer(onion)
+        }
+    }
+
     private fun startHeartbeatLoop() {
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
             while (isActive) {
                 try {
+                    val now = System.currentTimeMillis()
                     // A connected TCP socket is not proof that a Tor peer is
                     // reachable. Only show a contact online after we have seen
                     // valid encrypted traffic from it recently.
                     val peers = circuitManager.getConnectedPeers()
-                    val cutoff = System.currentTimeMillis() - PEER_PRESENCE_TIMEOUT_MS
+                    val peerSet = peers.toSet()
+                    val cutoff = now - PEER_PRESENCE_TIMEOUT_MS
                     val verifiedPeers = peers.filter { peer ->
                         (lastVerifiedPeerActivity[peer] ?: 0L) >= cutoff
                     }.toSet()
                     _connectedPeers.value = verifiedPeers
                     _typingPeers.update { active ->
-                        active.filterValues { expiresAt -> expiresAt > System.currentTimeMillis() }
+                        active.filterValues { expiresAt -> expiresAt > now }
                     }
-                    
-                    // Ping all connected peers concurrently so one slow circuit doesn't delay others
+
+                    // Traffic-aware keepalives: skip PINGs while messages/ACKs are actively
+                    // flowing, and silently warm-reconnect connected circuits idle >= 25s.
                     for (onion in peers) {
-                        scope.launch { pingPeer(onion) }
+                        val silenceMs = now - (lastVerifiedPeerActivity[onion] ?: 0L)
+                        if (silenceMs >= 8_000L) {
+                            healPeerCircuit(onion, reconnectFirst = silenceMs >= 25_000L)
+                        }
                     }
+
+                    // Proactively self-heal visibly open chats if their circuit is absent/silent
+                    val visibleOnions = visibleChatContacts.mapNotNull { id ->
+                        contactManager.getContact(id)
+                            ?.takeIf {
+                                !it.requiresRendezvous() &&
+                                    it.effectiveTrustState() != TorContactTrustState.BLOCKED &&
+                                    it.effectiveTrustState() != TorContactTrustState.KEY_CHANGED
+                            }
+                            ?.onionAddress
+                    }.distinct()
+                    for (onion in visibleOnions) {
+                        if (onion in peerSet) continue
+                        val silenceMs = now - (lastVerifiedPeerActivity[onion] ?: 0L)
+                        val lastDial = lastPeerDialAttempt[onion] ?: 0L
+                        if (silenceMs >= 25_000L && now - lastDial >= 15_000L) {
+                            lastPeerDialAttempt[onion] = now
+                            healPeerCircuit(onion, reconnectFirst = true)
+                        }
+                    }
+
                     reconnectKnownContacts()
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in heartbeat loop: ${e.message}")
@@ -1332,7 +1448,42 @@ class TorMessagingService private constructor(private val context: Context) {
             }
         }
     }
-    
+
+    private fun launchRecipientDelivery(
+        recipientOnion: String,
+        preloadedMessages: List<OnionMessageQueue.QueuedMessage>? = null
+    ) {
+        if (preloadedMessages != null && preloadedMessages.isEmpty()) return
+        if (!activeRecipientDeliveries.add(recipientOnion)) {
+            wakeQueueDispatcher()
+            return
+        }
+        scope.launch {
+            val lock = recipientDeliveryLocks.getOrPut(recipientOnion) { Mutex() }
+            try {
+                lock.withLock {
+                    val messages = preloadedMessages ?: messageQueue.getPendingMessages(recipientOnion)
+                    if (messages.isNotEmpty()) {
+                        deliverPendingForRecipient(recipientOnion, messages)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error delivering to ${redactEndpoint(recipientOnion)}: ${e.message}")
+            } finally {
+                activeRecipientDeliveries.remove(recipientOnion)
+                // If new messages were queued or ACKs opened attachment window
+                // slots while this worker was running, wake the dispatcher.
+                if (messageQueue.getPendingMessages(recipientOnion).isNotEmpty()) {
+                    wakeQueueDispatcher()
+                }
+            }
+        }
+    }
+
+    private fun dispatchRecipientNow(recipientOnion: String) {
+        launchRecipientDelivery(recipientOnion, preloadedMessages = null)
+    }
+
     /**
      * Queue delivery loop - dispatches pending outbound messages concurrently per recipient.
      * Already-connected peers are prioritized and never wait behind an offline peer's
@@ -1340,11 +1491,13 @@ class TorMessagingService private constructor(private val context: Context) {
      */
     private fun startQueueDeliveryLoop() {
         queueDeliveryJob?.cancel()
-        // Flush queued frames the moment a (re)connection becomes usable instead
-        // of waiting for the next poll tick.
+        // Flush queued frames and start read loop the moment any connection becomes usable.
         connectionEventsJob?.cancel()
         connectionEventsJob = scope.launch {
-            circuitManager.connectionEvents.collect { queueWakeSignal.tryEmit(Unit) }
+            circuitManager.connectionEvents.collect { peer ->
+                ensureReadLoop(peer)
+                wakeQueueDispatcher()
+            }
         }
         queueDeliveryJob = scope.launch {
             while (isActive) {
@@ -1354,30 +1507,12 @@ class TorMessagingService private constructor(private val context: Context) {
                         circuitManager.hasActiveConnection(recipientOnion)
                     }
                     for ((recipientOnion, messages) in sortedRecipients) {
-                        if (messages.isEmpty()) continue
-                        if (!activeRecipientDeliveries.add(recipientOnion)) continue
-                        scope.launch {
-                            val lock = recipientDeliveryLocks.getOrPut(recipientOnion) { Mutex() }
-                            try {
-                                lock.withLock {
-                                    deliverPendingForRecipient(recipientOnion, messages)
-                                }
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error delivering to ${redactEndpoint(recipientOnion)}: ${e.message}")
-                            } finally {
-                                activeRecipientDeliveries.remove(recipientOnion)
-                                // If new messages were queued or ACKs opened attachment window
-                                // slots while this worker was running, wake the dispatcher.
-                                if (messageQueue.getPendingMessages(recipientOnion).isNotEmpty()) {
-                                    queueWakeSignal.tryEmit(Unit)
-                                }
-                            }
-                        }
+                        launchRecipientDelivery(recipientOnion, messages)
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in queue delivery loop: ${e.message}")
                 }
-                withTimeoutOrNull(1_500L) { queueWakeSignal.first() }
+                withTimeoutOrNull(400L) { queueWakeChannel.receive() }
             }
         }
     }
@@ -1389,17 +1524,39 @@ class TorMessagingService private constructor(private val context: Context) {
         // Preserve a healthy circuit through a small number of
         // missed ACKs. Recreating an onion circuit on every retry
         // produced avoidable presence flapping and 20-60 second
-        // delivery delays. A genuinely stalled circuit is rebuilt
-        // only after repeated authenticated retransmissions.
-        if (messages.any {
-                it.state == OnionMessageProtocol.DeliveryState.SENT &&
-                    it.retryCount >= UNACKED_RETRIES_BEFORE_RECONNECT
+        // delivery delays. A genuinely stalled circuit is replaced
+        // via make-before-break after repeated unacked retransmissions.
+        val activeConnId = circuitManager.getActiveConnectionId(recipientOnion)
+        val introducedActive = activeConnId != null &&
+            introducedConnectionIds[recipientOnion] == activeConnId &&
+            peersIntroducedOnConnection.contains(recipientOnion)
+        val stuckCandidates = if (introducedActive) {
+            messages.filterNot { queued ->
+                val isExchange = OnionMessageProtocol.OnionFrame.decode(queued.frameData)?.frameType ==
+                    OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
+                if (isExchange) {
+                    messageQueue.markDelivered(queued.id)
+                }
+                isExchange
             }
-        ) {
-            circuitManager.disconnect(recipientOnion)
-            peersIntroducedOnConnection.remove(recipientOnion)
-            readLoopConnections.remove(recipientOnion)
-            peersWithReadLoop.remove(recipientOnion)
+        } else {
+            messages
+        }
+        val hasStuckSent = stuckCandidates.any {
+            it.state == OnionMessageProtocol.DeliveryState.SENT &&
+                it.retryCount >= UNACKED_RETRIES_BEFORE_RECONNECT
+        }
+        val lastInbound = lastVerifiedPeerActivity[recipientOnion] ?: 0L
+        val peerRecentlyActive = (System.currentTimeMillis() - lastInbound) <= 30_000L
+        if (hasStuckSent && !peerRecentlyActive && circuitManager.hasActiveConnection(recipientOnion)) {
+            val replaced = circuitManager.warmReconnect(recipientOnion)
+            if (replaced != null) {
+                introducedConnectionIds.remove(recipientOnion)
+                peersIntroducedOnConnection.remove(recipientOnion)
+                readLoopConnections.remove(recipientOnion)
+                peersWithReadLoop.remove(recipientOnion)
+                ensureReadLoop(recipientOnion)
+            }
         }
 
         // Give a first direct onion dial a bounded head start. The dial keeps
@@ -1455,6 +1612,11 @@ class TorMessagingService private constructor(private val context: Context) {
         if (currentConnectionId != null && introducedConnectionIds[recipientOnion] != currentConnectionId) {
             peersIntroducedOnConnection.remove(recipientOnion)
         }
+        val queuedExchangeFrame = messages.firstNotNullOfOrNull { queued ->
+            OnionMessageProtocol.OnionFrame.decode(queued.frameData)?.takeIf {
+                it.frameType == OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
+            }
+        }
         val hasNormalMessages = messages.any { queued ->
             OnionMessageProtocol.OnionFrame.decode(queued.frameData)?.frameType !=
                 OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
@@ -1465,20 +1627,26 @@ class TorMessagingService private constructor(private val context: Context) {
             try {
                 val myInfo = contactManager.getMyContactInfo()
                 // Guard: don't send CONTACT_EXCHANGE with empty onion address.
-                // If our hidden service hasn't published yet, skip the intro
-                // and let the next queue cycle retry once the HS is ready.
+                // If our hidden service hasn't published yet, record pending intro
+                // and let the next queue cycle (or HS readiness observer) retry.
                 if (myInfo.onionAddress.isBlank() || myInfo.requiresRendezvous()) {
                     Log.w(TAG, "⏳ Skipping auto CONTACT_EXCHANGE — our hidden service is not published yet")
+                    pendingContactExchanges.add(recipientOnion)
                     peersIntroducedOnConnection.remove(recipientOnion) // allow retry next cycle
                 } else {
                     val seqManager = getSequenceManager(recipientOnion)
-                    val introFrame = OnionMessageProtocol.createContactExchangeFrame(
+                    val baseIntroFrame = OnionMessageProtocol.createContactExchangeFrame(
                         myOnionAddress = myInfo.onionAddress,
                         myNickname = myInfo.nickname,
                         myPublicKey = myInfo.publicKey,
                         myAvatarId = myInfo.avatarId,
                         sequence = seqManager.nextOutbound()
                     )
+                    val introFrame = if (queuedExchangeFrame != null) {
+                        baseIntroFrame.copy(messageId = queuedExchangeFrame.messageId)
+                    } else {
+                        baseIntroFrame
+                    }
                     introductionReady = circuitManager.sendData(recipientOnion, introFrame.encode())
                     if (introductionReady) {
                         currentConnectionId?.let { introducedConnectionIds[recipientOnion] = it }
@@ -1514,6 +1682,13 @@ class TorMessagingService private constructor(private val context: Context) {
         
         for (message in messages) {
             try {
+                if (introducedOnThisConnection && introductionReady &&
+                    OnionMessageProtocol.OnionFrame.decode(message.frameData)?.frameType ==
+                    OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
+                ) {
+                    messageQueue.markDelivered(message.id)
+                    continue
+                }
                 messageQueue.markSending(message.id)
                 if (message.completesUiMessage) {
                     messageRepository.updateDeliveryState(
@@ -1637,9 +1812,17 @@ class TorMessagingService private constructor(private val context: Context) {
                 return true
             }
 
-            // Check for duplicates
+                // Check for duplicates
                 if (deduplicator.isDuplicate(frame.messageId)) {
-                    Log.d(TAG, "Ignoring duplicate contact exchange ${frame.messageId}")
+                    val canonicalPeer = OnionMessageProtocol.ContactExchange.fromBytes(frame.payload)
+                        ?.onionAddress
+                        ?.let { OnionContactManager.OnionContact.canonicalizeOnionEndpoint(it) }
+                        ?.takeIf { it.isNotBlank() }
+                        ?: senderOnion
+                    markPeerResponsive(canonicalPeer)
+                    sendMessageAck(canonicalPeer, frame.messageId)
+                    wakeQueueDispatcher()
+                    Log.d(TAG, "Acked duplicate contact exchange ${frame.messageId} from ${redactEndpoint(canonicalPeer)}")
                     return true
                 }
                 
@@ -1673,7 +1856,9 @@ class TorMessagingService private constructor(private val context: Context) {
                 Log.d(TAG, "Ignoring duplicate message ${frame.messageId}")
                 if (frame.frameType == OnionMessageProtocol.FrameType.MESSAGE ||
                     frame.frameType == OnionMessageProtocol.FrameType.FILE_META ||
-                    frame.frameType == OnionMessageProtocol.FrameType.FILE_CHUNK
+                    frame.frameType == OnionMessageProtocol.FrameType.FILE_CHUNK ||
+                    frame.frameType == OnionMessageProtocol.FrameType.MAILBOX_EXCHANGE ||
+                    frame.frameType == OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
                 ) {
                     // The original ACK may have been lost while the message itself
                     // was persisted. ACK duplicate delivery again so the sender can
@@ -1841,6 +2026,17 @@ class TorMessagingService private constructor(private val context: Context) {
                 ?: exchangedContact
             contactManager.updateLastSeen(currentContact.id)
             registerContactMailboxForPolling(currentContact)
+            markPeerResponsive(canonicalExchangeOnion)
+            sendMessageAck(canonicalExchangeOnion, frame.messageId)
+            listOf(canonicalExchangeOnion, senderOnion).distinct().forEach { endpoint ->
+                messageQueue.getPendingMessages(endpoint)
+                    .filter {
+                        OnionMessageProtocol.OnionFrame.decode(it.frameData)?.frameType ==
+                            OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
+                    }
+                    .forEach { messageQueue.markDelivered(it.id) }
+            }
+            wakeQueueDispatcher()
             Log.i(TAG, "✅ Auto-paired with ${exchange.nickname}!")
             
             // Notify listener that a new contact was added
@@ -1851,7 +2047,7 @@ class TorMessagingService private constructor(private val context: Context) {
             // and to get our info (address, key) for bidirectional messaging
             if (shouldRespond) {
                 scope.launch {
-                    delay(1000) // Short delay to let connection stabilize
+                    delay(150) // Short delay to let connection stabilize
                     sendContactExchange(canonicalExchangeOnion)
                     Log.i(TAG, "Sent CONTACT_EXCHANGE response back to ${exchange.nickname}")
                 }
@@ -2040,6 +2236,7 @@ class TorMessagingService private constructor(private val context: Context) {
             .sortedByDescending { it.lastSeenOnline }
             .take(8)
             .forEach { contact ->
+                if (circuitManager.hasActiveConnection(contact.onionAddress)) return@forEach
                 val lastAttempt = lastPeerDialAttempt[contact.onionAddress] ?: 0L
                 if (now - lastAttempt < KNOWN_CONTACT_REDIAL_INTERVAL_MS) return@forEach
                 lastPeerDialAttempt[contact.onionAddress] = now
@@ -2148,7 +2345,7 @@ class TorMessagingService private constructor(private val context: Context) {
         // mark the photo delivered; only its final chunk is allowed to do that.
         val queuedMessage = messageQueue.getQueuedMessage(ackedId.toString())
         messageQueue.markDelivered(ackedId.toString())
-        queueWakeSignal.tryEmit(Unit)
+        wakeQueueDispatcher()
 
         if (queuedMessage != null) {
             if (!queuedMessage.completesUiMessage) return
@@ -2307,9 +2504,11 @@ class TorMessagingService private constructor(private val context: Context) {
         val frame = OnionMessageProtocol.OnionFrame.decode(message.frameData)
             ?: return message.frameData
 
-        if (frame.frameType == OnionMessageProtocol.FrameType.CONTACT_EXCHANGE ||
-            isDirectSealedPayload(frame.payload)
-        ) {
+        if (frame.frameType == OnionMessageProtocol.FrameType.CONTACT_EXCHANGE) {
+            return frame.copy(timestamp = System.currentTimeMillis()).encode()
+        }
+
+        if (isDirectSealedPayload(frame.payload)) {
             return message.frameData
         }
 
@@ -3182,7 +3381,7 @@ class TorMessagingService private constructor(private val context: Context) {
             // The receiver ACKs only after it persists and registers the
             // endpoint for polling.
             messageQueue.enqueue(recipientOnion, frame)
-            queueWakeSignal.tryEmit(Unit)
+            wakeQueueDispatcher()
             Log.i(TAG, "📬 Queued mailbox exchange to ${redactEndpoint(recipientOnion)}")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to send mailbox exchange: ${e.message}")

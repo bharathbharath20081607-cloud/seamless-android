@@ -27,6 +27,7 @@ object OnionMessageProtocol {
     
     // Frame constants
     const val FRAME_SIZE = 4096          // Fixed frame size for traffic analysis resistance
+    const val COMPACT_CELL_FRAME_SIZE = 480 // Fits inside a single 514-byte Tor cell (480B + 4B length prefix)
     const val HEADER_SIZE = 36           // 1 + 16 + 8 + 8 + 1 + 2 = 36 bytes
     const val MAX_PAYLOAD_SIZE = FRAME_SIZE - HEADER_SIZE  // 4060 bytes
     const val PROTOCOL_VERSION: Byte = 0x01
@@ -119,8 +120,25 @@ object OnionMessageProtocol {
             require(payload.size <= MAX_PAYLOAD_SIZE) {
                 "Payload too large: ${payload.size} > $MAX_PAYLOAD_SIZE"
             }
-            
-            val totalSize = if (padToFixedSize) FRAME_SIZE else (HEADER_SIZE + payload.size)
+
+            val useCompactCell = padToFixedSize &&
+                (HEADER_SIZE + payload.size <= COMPACT_CELL_FRAME_SIZE) &&
+                (frameType == FrameType.MESSAGE ||
+                    frameType == FrameType.ACK ||
+                    frameType == FrameType.NACK ||
+                    frameType == FrameType.PING ||
+                    frameType == FrameType.PONG ||
+                    frameType == FrameType.TYPING ||
+                    frameType == FrameType.READ_RECEIPT ||
+                    frameType == FrameType.CALL_SIGNAL ||
+                    frameType == FrameType.CONTACT_EXCHANGE ||
+                    frameType == FrameType.MAILBOX_EXCHANGE)
+
+            val totalSize = when {
+                !padToFixedSize -> HEADER_SIZE + payload.size
+                useCompactCell -> COMPACT_CELL_FRAME_SIZE
+                else -> FRAME_SIZE
+            }
             val buffer = ByteBuffer.allocate(totalSize)
             
             // Header
@@ -136,7 +154,7 @@ object OnionMessageProtocol {
             buffer.put(payload)
             
             // Random padding to fixed size (prevents traffic analysis)
-            val paddingSize = if (padToFixedSize) (FRAME_SIZE - HEADER_SIZE - payload.size) else 0
+            val paddingSize = (totalSize - HEADER_SIZE - payload.size).coerceAtLeast(0)
             if (paddingSize > 0) {
                 val padding = ByteArray(paddingSize)
                 secureRandom.nextBytes(padding)
@@ -187,8 +205,8 @@ object OnionMessageProtocol {
                     }
                     
                     val payloadLen = buffer.getShort().toInt() and 0xFFFF
-                    if (data.size != FRAME_SIZE && frameType != FrameType.CALL_AUDIO) {
-                        Log.e(TAG, "Invalid frame size ${data.size} for $frameType")
+                    if (data.size < HEADER_SIZE + payloadLen || data.size > FRAME_SIZE) {
+                        Log.e(TAG, "Invalid frame size ${data.size} for $frameType (payloadLen=$payloadLen)")
                         return null
                     }
                     if (payloadLen > MAX_PAYLOAD_SIZE || payloadLen > buffer.remaining()) {

@@ -71,6 +71,16 @@ class MeshDelegateHandler(
                     // Channel message
                     if (state.getJoinedChannelsValue().contains(message.channel)) {
                         channelManager.addChannelMessage(message.channel, message, message.senderPeerID)
+                        val myPeerId = getMyPeerID()
+                        if (message.senderPeerID != myPeerId &&
+                            (notificationManager.getAppBackgroundState() || state.getCurrentChannelValue() != message.channel)
+                        ) {
+                            notificationManager.showPrivateMessageNotification(
+                                senderPeerID = "channel:${message.channel}",
+                                senderNickname = "#${message.channel} • ${message.sender}",
+                                messageContent = NotificationTextUtils.buildPrivateMessagePreview(message)
+                            )
+                        }
                     }
                 } else {
                     // Public mesh message - always store to preserve message history
@@ -232,12 +242,20 @@ class MeshDelegateHandler(
         try {
             // Get user's current nickname
             val currentNickname = state.getNicknameValue()
-            if (currentNickname.isNullOrEmpty()) {
+            if (currentNickname.isNullOrEmpty() && !notificationManager.getAppBackgroundState()) {
                 return
             }
 
             // Check if this message mentions the current user using @username format
-            val isMention = checkForMeshMention(message.content, currentNickname)
+            val isMention = !currentNickname.isNullOrEmpty() && checkForMeshMention(message.content, currentNickname)
+            if (!isMention && notificationManager.getAppBackgroundState() && message.senderPeerID != getMyPeerID()) {
+                val preview = NotificationTextUtils.buildPrivateMessagePreview(message)
+                notificationManager.showPrivateMessageNotification(
+                    senderPeerID = "mesh:broadcast",
+                    senderNickname = message.sender,
+                    messageContent = preview
+                )
+            }
 
             if (isMention) {
                 android.util.Log.d("MeshDelegateHandler", "🔔 Triggering mesh mention notification from ${message.sender}")
