@@ -267,8 +267,26 @@ class OnionContactManager private constructor(private val context: Context) {
      * hidden service endpoint when not explicitly supplied by the caller.
      */
     fun getMyContactInfo(mailboxOnion: String? = getMyMailboxOnion()): OnionContact {
-        val onion = TorHiddenServiceManager.getInstance(context)
+        val rawOnion = TorHiddenServiceManager.getInstance(context)
             .getOnionAddress()
+            .ifBlank {
+                (context.applicationContext as? android.app.Application)
+                    ?.let { TorDaemonManager.getInstance(it).getOnionAddress() }
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { "$it:${TorHiddenServiceManager.HIDDEN_SERVICE_PORT}" }
+                    .orEmpty()
+            }
+            .ifBlank {
+                runCatching {
+                    com.seamless.android.identity.SecureIdentityStateManager(context)
+                        .getSecureValue("tor_hs_onion_address")
+                }.getOrNull()
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { "$it:${TorHiddenServiceManager.HIDDEN_SERVICE_PORT}" }
+                    .orEmpty()
+            }
+        val onion = rawOnion
             .let { OnionContact.canonicalizeOnionEndpoint(it) }
             .takeIf { it.isNotBlank() && !it.equals(UNRESOLVED_ONION, ignoreCase = true) }
             .orEmpty()

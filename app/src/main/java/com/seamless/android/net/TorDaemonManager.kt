@@ -102,6 +102,10 @@ class TorDaemonManager private constructor(private val application: Application)
     
     // Tor data directory
     private val torDirectory by lazy { File(application.filesDir, "tor_daemon") }
+
+    init {
+        loadSavedOnionAddress()
+    }
     
     /**
      * Start the Tor daemon
@@ -113,7 +117,7 @@ class TorDaemonManager private constructor(private val application: Application)
         }
         
         try {
-            _status.value = DaemonStatus(state = DaemonState.STARTING)
+            _status.value = _status.value.copy(state = DaemonState.STARTING, error = null)
             
             // Ensure directory exists
             torDirectory.mkdirs()
@@ -221,6 +225,11 @@ class TorDaemonManager private constructor(private val application: Application)
             // Start Tor
             wrapper.start()
             applyIpv6Preference(wrapper)
+
+            // Pre-register ADD_ONION on the local control socket immediately so the
+            // user's .onion address, QR code, and share link are ready without waiting
+            // for full network bootstrap.
+            scheduleHiddenServicePublish("daemon-started")
             
             // Enable networking
             wrapper.enableNetwork(true)
@@ -255,10 +264,19 @@ class TorDaemonManager private constructor(private val application: Application)
         }
         
         try {
+            val isBootstrapped = _status.value.bootstrapPercent >= 100 ||
+                wrapper.getTorState() == TorState.CONNECTED
+            val resolvedState = if (isBootstrapped) {
+                DaemonState.CONNECTED
+            } else {
+                _status.value.state.takeIf { it != DaemonState.NOT_STARTED } ?: DaemonState.BOOTSTRAPPING
+            }
+
             val existingProps = hiddenServiceProps
             if (existingProps != null && existingProps.onion.isNotBlank()) {
+                saveOnionAddress(existingProps.onion)
                 _status.value = _status.value.copy(
-                    state = DaemonState.CONNECTED,
+                    state = resolvedState,
                     onionAddress = existingProps.onion,
                     error = null
                 )
@@ -266,31 +284,24 @@ class TorDaemonManager private constructor(private val application: Application)
                 return@withContext existingProps.onion
             }
 
-            if (!waitForDaemonSocks()) {
-                val message = "Tor SOCKS listener was not ready for hidden-service publishing"
-                Log.w(TAG, message)
-                _status.value = _status.value.copy(error = message)
-                return@withContext null
-            }
-
-            Log.i(TAG, "📡 Publishing hidden service on port $localPort")
+            Log.i(TAG, "📡 Publishing hidden service on port $localPort (bootstrapped=$isBootstrapped)")
             
-            // Publish the hidden service
+            // Publish the hidden service via ADD_ONION over the local control connection.
             // virtualPort MUST match the port peers connect to (HIDDEN_SERVICE_PORT = 18888)
-            // Previously was 80, which caused ALL connections to fail because peers connect to :18888
             val props = publishWithKeyRecovery(wrapper, localPort, localPort)
             
             hiddenServiceProps = props
             
-            // Save private key for persistence
+            // Save private key and onion address for instant 0ms availability on reopen
             if (hiddenServicePrivateKey == null) {
                 hiddenServicePrivateKey = props.privKey
                 savePrivateKey(props.privKey)
             }
             
             val onionAddress = props.onion
+            saveOnionAddress(onionAddress)
             _status.value = _status.value.copy(
-                state = DaemonState.CONNECTED,
+                state = resolvedState,
                 onionAddress = onionAddress,
                 error = null
             )
@@ -454,7 +465,7 @@ class TorDaemonManager private constructor(private val application: Application)
             Log.w(TAG, "Saved hidden service key failed; rotating onion identity once: ${e.message}")
             hiddenServicePrivateKey = null
             runCatching {
-                SecureIdentityStateManager(application).clearSecureValues("tor_hs_private_key")
+                SecureIdentityStateManager(application).clearSecureValues("tor_hs_private_key", "tor_hs_onion_address")
             }
             wrapper.publishHiddenService(localPort, virtualPort, null)
         }
@@ -586,6 +597,23 @@ class TorDaemonManager private constructor(private val application: Application)
     /**
      * Load private key for persistent onion address — from secure storage with migration
      */
+    private fun saveOnionAddress(onionAddress: String) {
+        val clean = onionAddress.trim().removeSuffix(".onion")
+        if (clean.isBlank()) return
+        runCatching {
+            SecureIdentityStateManager(application).storeSecureValue("tor_hs_onion_address", clean)
+        }.onFailure { e ->
+            Log.w(TAG, "Failed to save onion address: ${e.message}")
+        }
+    }
+
+    private fun loadSavedOnionAddress() {
+        val savedOnion = runCatching {
+            SecureIdentityStateManager(application).getSecureValue("tor_hs_onion_address")
+        }.getOrNull()?.trim()?.removeSuffix(".onion")?.takeIf { it.isNotBlank() } ?: return
+        _status.value = _status.value.copy(onionAddress = savedOnion)
+    }
+
     private fun loadPrivateKey() {
         try {
             val stateManager = SecureIdentityStateManager(application)
@@ -646,7 +674,7 @@ class TorDaemonManager private constructor(private val application: Application)
      * Called after Doze exit or network change to ensure we're reachable.
      */
     suspend fun republishHiddenServiceWithRetry(maxAttempts: Int = 3): Boolean {
-        if (!isRunning.get()) return false
+        if (!isRunning.get() || _status.value.state != DaemonState.CONNECTED) return false
 
         val alreadyUploaded = publishMutex.withLock {
             val existing = hiddenServiceProps

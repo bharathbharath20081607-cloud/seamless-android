@@ -154,7 +154,23 @@ class MainActivity : OrientationAwareActivity() {
                 androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
                     // App Lock state
                     val isAppLockEnabled by com.seamless.android.ui.privacy.PrivacyPreferenceManager.appLockEnabled.collectAsState()
-                    var isUnlocked by remember { mutableStateOf(!isAppLockEnabled) }
+                    var wasAppLockEnabledAtLaunch by androidx.compose.runtime.saveable.rememberSaveable {
+                        mutableStateOf(isAppLockEnabled)
+                    }
+                    var isUnlocked by androidx.compose.runtime.saveable.rememberSaveable {
+                        mutableStateOf(!isAppLockEnabled)
+                    }
+
+                    LaunchedEffect(isAppLockEnabled) {
+                        if (!wasAppLockEnabledAtLaunch && isAppLockEnabled) {
+                            // Keep current session unlocked when user turns on App Lock in Settings
+                            isUnlocked = true
+                            wasAppLockEnabledAtLaunch = true
+                        } else if (!isAppLockEnabled) {
+                            isUnlocked = true
+                            wasAppLockEnabledAtLaunch = false
+                        }
+                    }
 
                     if (isAppLockEnabled && !isUnlocked) {
                         com.seamless.android.ui.privacy.AppLockScreen(
