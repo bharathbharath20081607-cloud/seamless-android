@@ -83,6 +83,23 @@ class TorHiddenServiceManager private constructor(private val context: Context) 
     }
     
     private var connectionListener: ConnectionListener? = null
+
+    init {
+        val savedOnion = runCatching {
+            com.seamless.android.identity.SecureIdentityStateManager(context)
+                .getSecureValue("tor_hs_onion_address")
+        }.getOrNull()?.trim()?.takeIf { it.isNotBlank() }
+        if (savedOnion != null) {
+            val endpoint = toOnionEndpoint(savedOnion)
+            if (endpoint.isNotBlank()) {
+                _status.value = HiddenServiceStatus(
+                    state = HiddenServiceState.WAITING_FOR_TOR,
+                    onionAddress = endpoint,
+                    torConnected = false
+                )
+            }
+        }
+    }
     
     fun setConnectionListener(listener: ConnectionListener?) {
         connectionListener = listener
@@ -101,7 +118,10 @@ class TorHiddenServiceManager private constructor(private val context: Context) 
         }
         
         try {
-            _status.value = HiddenServiceStatus(state = HiddenServiceState.STARTING)
+            _status.value = _status.value.copy(
+                state = HiddenServiceState.STARTING,
+                error = null
+            )
             isRunning.set(true)
             
             // Start the local server socket first to accept incoming connections
@@ -115,12 +135,14 @@ class TorHiddenServiceManager private constructor(private val context: Context) 
             // Start observing daemon status
             daemonStatusJob = scope.launch {
                 daemonManager.statusFlow.collect { daemonStatus ->
+                    val endpoint = daemonStatus.onionAddress
+                        ?.let(::toOnionEndpoint)
+                        .orEmpty()
+                        .ifBlank { _status.value.onionAddress }
                     when (daemonStatus.state) {
                         TorDaemonManager.DaemonState.CONNECTED -> {
                             // Tor is connected - update our status with onion address
-                            val onion = daemonStatus.onionAddress
-                            if (onion != null) {
-                                val endpoint = toOnionEndpoint(onion)
+                            if (endpoint.isNotBlank()) {
                                 _status.value = HiddenServiceStatus(
                                     state = HiddenServiceState.RUNNING,
                                     onionAddress = endpoint,
@@ -139,17 +161,20 @@ class TorHiddenServiceManager private constructor(private val context: Context) 
                         TorDaemonManager.DaemonState.STARTING -> {
                             _status.value = _status.value.copy(
                                 state = HiddenServiceState.WAITING_FOR_TOR,
+                                onionAddress = endpoint,
                                 torConnected = false
                             )
                         }
                         TorDaemonManager.DaemonState.ERROR -> {
-                            _status.value = HiddenServiceStatus(
+                            _status.value = _status.value.copy(
                                 state = HiddenServiceState.ERROR,
                                 error = daemonStatus.error ?: "Tor daemon error"
                             )
                         }
                         else -> {
-                            // Other states - keep current status
+                            if (endpoint.isNotBlank() && _status.value.onionAddress.isBlank()) {
+                                _status.value = _status.value.copy(onionAddress = endpoint)
+                            }
                         }
                     }
                 }

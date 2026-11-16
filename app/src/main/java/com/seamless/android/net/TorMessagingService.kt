@@ -155,6 +155,7 @@ class TorMessagingService private constructor(private val context: Context) {
     private var connectionEventsJob: Job? = null
     private val lastVerifiedPeerActivity = ConcurrentHashMap<String, Long>()
     private val lastPeerDialAttempt = ConcurrentHashMap<String, Long>()
+    private val lastContactExchangeReplyAt = ConcurrentHashMap<String, Long>()
     private val lastTypingSignalAt = ConcurrentHashMap<String, Long>()
     private val deliveryRoutes = ConcurrentHashMap<String, TorDeliveryRoute>()
     private val mailboxFallbackDisabled = ConcurrentHashMap.newKeySet<String>()
@@ -412,10 +413,15 @@ class TorMessagingService private constructor(private val context: Context) {
      * Automatically sends your info for auto-pairing
      */
     suspend fun addContact(data: String): OnionContactManager.OnionContact? {
-        val contact = contactManager.addContactFromLink(data) 
+        if (_serviceState.value == ServiceState.STOPPED || _serviceState.value == ServiceState.ERROR) {
+            com.seamless.android.service.TorForegroundService.start(context.applicationContext)
+            scope.launch { start() }
+        }
+        val contact = contactManager.addContactFromLink(data)
             ?: contactManager.addContactFromQr(data)
-        
-        // Auto-pairing: Send our contact info to them
+
+        // Auto-pairing: Always send our contact info to them so bidirectional pairing
+        // succeeds even if one side already existed or missed an earlier exchange.
         if (contact != null) {
             if (contact.requiresRendezvous()) {
                 scope.launch { startRendezvousForContact(contact) }
@@ -423,7 +429,7 @@ class TorMessagingService private constructor(private val context: Context) {
                 sendContactExchange(contact.onionAddress)
             }
         }
-        
+
         return contact
     }
     
@@ -460,7 +466,12 @@ class TorMessagingService private constructor(private val context: Context) {
             
             // DO NOT ENCRYPT - recipient doesn't have our public key yet!
             // The frame contains our public key, which they need to decrypt future messages
-            messageQueue.enqueue(canonicalRecipient, frame)
+            lastContactExchangeReplyAt[canonicalRecipient] = System.currentTimeMillis()
+            messageQueue.enqueue(
+                recipientOnion = canonicalRecipient,
+                frame = frame,
+                completesUiMessage = false
+            )
             dispatchRecipientNow(canonicalRecipient)
             
             Log.i(TAG, "📤 Sent contact exchange (unencrypted) to ${redactEndpoint(canonicalRecipient)} for auto-pairing")
@@ -815,10 +826,24 @@ class TorMessagingService private constructor(private val context: Context) {
      * Ping a peer to check if they're online
      */
     suspend fun pingPeer(onionAddress: String): Boolean {
+        val canonical = OnionContactManager.OnionContact
+            .canonicalizeOnionEndpoint(onionAddress)
+            .ifBlank { onionAddress }
         // A delivery worker streaming to this peer owns the socket introduction and
         // its traffic already proves liveness; a concurrent ping could slip ahead of
         // CONTACT_EXCHANGE on a fresh socket and get the connection rejected.
-        if (activeRecipientDeliveries.contains(onionAddress)) return true
+        if (activeRecipientDeliveries.contains(canonical) || activeRecipientDeliveries.contains(onionAddress)) {
+            return true
+        }
+        val hasPendingExchange = pendingContactExchanges.contains(canonical) ||
+            messageQueue.getPendingMessages(canonical).any {
+                OnionMessageProtocol.OnionFrame.decode(it.frameData)?.frameType ==
+                    OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
+            }
+        if (hasPendingExchange) {
+            dispatchRecipientNow(canonical)
+            return true
+        }
         return try {
             val connection = circuitManager.getConnection(onionAddress)
             if (connection != null) {
@@ -1532,12 +1557,8 @@ class TorMessagingService private constructor(private val context: Context) {
             peersIntroducedOnConnection.contains(recipientOnion)
         val stuckCandidates = if (introducedActive) {
             messages.filterNot { queued ->
-                val isExchange = OnionMessageProtocol.OnionFrame.decode(queued.frameData)?.frameType ==
+                OnionMessageProtocol.OnionFrame.decode(queued.frameData)?.frameType ==
                     OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
-                if (isExchange) {
-                    messageQueue.markDelivered(queued.id)
-                }
-                isExchange
             }
         } else {
             messages
@@ -1686,7 +1707,9 @@ class TorMessagingService private constructor(private val context: Context) {
                     OnionMessageProtocol.OnionFrame.decode(message.frameData)?.frameType ==
                     OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
                 ) {
-                    messageQueue.markDelivered(message.id)
+                    // Keep awaiting remote ACK or reverse CONTACT_EXCHANGE instead of
+                    // dropping the pairing frame immediately after writing to local SOCKS.
+                    messageQueue.markSent(message.id)
                     continue
                 }
                 messageQueue.markSending(message.id)
@@ -2005,9 +2028,12 @@ class TorMessagingService private constructor(private val context: Context) {
         val existingByKey = contactManager.getContactByPublicKey(exchange.publicKey)
         val keyChangedForOnion = existingByOnion != null &&
             !existingByOnion.publicKey.equals(exchange.publicKey, ignoreCase = true)
+        val now = System.currentTimeMillis()
+        val lastReplyAt = lastContactExchangeReplyAt[canonicalExchangeOnion] ?: 0L
         val shouldRespond = existingByOnion == null ||
             keyChangedForOnion ||
-            existingByKey?.requiresRendezvous() == true
+            existingByKey?.requiresRendezvous() == true ||
+            (now - lastReplyAt) >= 15_000L
 
         // Add, update, or mark key-change state for the contact.
         try {
@@ -2046,6 +2072,7 @@ class TorMessagingService private constructor(private val context: Context) {
             // The sender needs to know we received their pairing request
             // and to get our info (address, key) for bidirectional messaging
             if (shouldRespond) {
+                lastContactExchangeReplyAt[canonicalExchangeOnion] = now
                 scope.launch {
                     delay(150) // Short delay to let connection stabilize
                     sendContactExchange(canonicalExchangeOnion)
@@ -3186,7 +3213,11 @@ class TorMessagingService private constructor(private val context: Context) {
                 false
             }
 
-            val stored = storedRemotely || localOutboxPublished
+            val isContactExchange = OnionMessageProtocol.OnionFrame.decode(message.frameData)?.frameType ==
+                OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
+            // An unpaired peer cannot poll our local outbox until they know we exist,
+            // so CONTACT_EXCHANGE must keep retrying direct delivery unless stored remotely.
+            val stored = if (isContactExchange) storedRemotely else (storedRemotely || localOutboxPublished)
             if (stored) {
                 deliveryRoutes[message.uiMessageId] = TorDeliveryRoute.MAILBOX
                 messageQueue.markMailboxStored(message.id)

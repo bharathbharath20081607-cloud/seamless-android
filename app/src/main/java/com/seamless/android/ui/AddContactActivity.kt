@@ -196,7 +196,14 @@ fun AddContactScreen(
                                     if (contact != null) {
                                         scope.launch {
                                             try {
-                                                if (contactManager.addContact(contact)) {
+                                                val appContext = context.applicationContext
+                                                com.seamless.android.service.TorForegroundService.start(appContext)
+                                                val added = com.seamless.android.net.TorMessagingService
+                                                    .getInstance(appContext)
+                                                    .addContact(contactLink)
+                                                if (added != null) {
+                                                    contactAdded = true
+                                                } else if (contactManager.addContact(contact)) {
                                                     contactAdded = true
                                                 } else {
                                                     errorMessage = "Contact already exists"
