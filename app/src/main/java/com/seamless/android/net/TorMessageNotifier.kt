@@ -100,6 +100,14 @@ class TorMessageNotifier(private val context: Context) {
         NotificationManagerCompat.from(context).notify(id, notification)
     }
 
+    fun cancelContact(contactId: String) {
+        runCatching { NotificationManagerCompat.from(context).cancel(contactId.hashCode()) }
+    }
+
+    fun cancelGroup(groupId: String) {
+        runCatching { NotificationManagerCompat.from(context).cancel(("group:" + groupId).hashCode()) }
+    }
+
     private fun ensureChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val nm = context.getSystemService(NotificationManager::class.java)

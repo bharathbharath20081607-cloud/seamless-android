@@ -266,21 +266,29 @@ class MailboxClient private constructor(private val context: Context) {
         // Use one locked snapshot so the poller never observes a half-mutated list.
         val registeredMailboxes = mutex.withLock { mailboxes.toList() }
 
-        for (mailbox in registeredMailboxes) {
-            if (!mailbox.isActive) continue
-
-            try {
-                val targetFolder = mailbox.folderId?.takeIf { it.isNotBlank() } ?: myOwnerId
-                val messages = pollMailbox(mailbox.onionAddress, mailbox.accessToken, targetFolder)
-                allMessages.addAll(messages)
-
-                mutex.withLock {
-                    mailbox.lastPollTime = System.currentTimeMillis()
+        val activeMailboxes = registeredMailboxes.filter { it.isActive }
+        val semaphore = kotlinx.coroutines.sync.Semaphore(3)
+        val pollResults = coroutineScope {
+            activeMailboxes.map { mailbox ->
+                async {
+                    semaphore.acquire()
+                    try {
+                        val targetFolder = mailbox.folderId?.takeIf { it.isNotBlank() } ?: myOwnerId
+                        val messages = pollMailbox(mailbox.onionAddress, mailbox.accessToken, targetFolder)
+                        mutex.withLock {
+                            mailbox.lastPollTime = System.currentTimeMillis()
+                        }
+                        messages
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to poll ${redactEndpoint(mailbox.onionAddress)}: ${e.message}")
+                        emptyList()
+                    } finally {
+                        semaphore.release()
+                    }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to poll ${redactEndpoint(mailbox.onionAddress)}: ${e.message}")
-            }
+            }.awaitAll()
         }
+        pollResults.forEach { allMessages.addAll(it) }
 
         if (allMessages.isNotEmpty()) {
             // Deliver to callback FIRST, then confirm receipt on server.

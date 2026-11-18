@@ -213,7 +213,12 @@ object BinaryProtocol {
             var originalPayloadSize: UShort? = null
             var isCompressed = false
             
-            if (payload.size <= 65535 && CompressionUtil.shouldCompress(payload)) {
+            // Skip entropy scanning/deflate on already-compressed or encrypted payloads
+            val shouldAttemptCompression =
+                packet.type != MessageType.FRAGMENT.value &&
+                    packet.type != MessageType.FILE_TRANSFER.value &&
+                    packet.type != MessageType.NOISE_ENCRYPTED.value
+            if (shouldAttemptCompression && payload.size <= 65535 && CompressionUtil.shouldCompress(payload)) {
                 CompressionUtil.compress(payload)?.let { compressedPayload ->
                     originalPayloadSize = payload.size.toUShort()
                     payload = compressedPayload

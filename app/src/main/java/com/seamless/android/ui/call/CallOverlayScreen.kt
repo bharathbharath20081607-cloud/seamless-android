@@ -148,6 +148,14 @@ fun SeamlessCallOverlay(modifier: Modifier = Modifier) {
     if (activeSession != null && activeSession.state != CallState.IDLE) {
         cachedSession = activeSession
     }
+    LaunchedEffect(activeSession) {
+        if (activeSession == null || activeSession.state == CallState.IDLE) {
+            delay(250L)
+            if (liveSession == null || liveSession?.state == CallState.IDLE) {
+                cachedSession = null
+            }
+        }
+    }
 
     val isOverlayVisible = activeSession != null && activeSession.state != CallState.IDLE
     val displaySession = activeSession?.takeIf { it.state != CallState.IDLE } ?: cachedSession ?: return

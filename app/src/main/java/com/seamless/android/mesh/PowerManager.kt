@@ -111,9 +111,15 @@ class PowerManager(private val context: Context) {
 
     fun setAppBackgroundState(inBackground: Boolean) {
         if (isAppInBackground != inBackground) {
+            val wasUsingDutyCycle = shouldUseDutyCycle()
             isAppInBackground = inBackground
             Log.d(TAG, "App background state changed: $inBackground")
             updatePowerMode()
+            val nowUsingDutyCycle = shouldUseDutyCycle()
+            if (wasUsingDutyCycle != nowUsingDutyCycle) {
+                if (nowUsingDutyCycle) startDutyCycle() else stopDutyCycle()
+                delegate?.onPowerModeChanged(currentMode)
+            }
         }
     }
     
@@ -162,8 +168,14 @@ class PowerManager(private val context: Context) {
                 .build()
                 
             PowerMode.BALANCED -> AdvertiseSettings.Builder()
-                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
-                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+                .setAdvertiseMode(
+                    if (!isAppInBackground) AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY
+                    else AdvertiseSettings.ADVERTISE_MODE_BALANCED
+                )
+                .setTxPowerLevel(
+                    if (!isAppInBackground) AdvertiseSettings.ADVERTISE_TX_POWER_HIGH
+                    else AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM
+                )
                 .setConnectable(true)
                 .setTimeout(0)
                 .build()
@@ -215,7 +227,9 @@ class PowerManager(private val context: Context) {
      * Check if duty cycling should be used
      */
     fun shouldUseDutyCycle(): Boolean {
-        return currentMode != PowerMode.PERFORMANCE
+        return (isAppInBackground && currentMode != PowerMode.PERFORMANCE) ||
+            currentMode == PowerMode.POWER_SAVER ||
+            currentMode == PowerMode.ULTRA_LOW_POWER
     }
     
     /**

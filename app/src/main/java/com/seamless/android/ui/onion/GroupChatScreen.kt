@@ -81,6 +81,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -732,11 +733,15 @@ private fun GroupMessageBubble(
             }
 
             message.attachmentPath?.let { path ->
-                val bitmap = remember(path) { BitmapFactory.decodeFile(path)?.asImageBitmap() }
+                val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(initialValue = null, key1 = path) {
+                    value = withContext(Dispatchers.IO) {
+                        runCatching { BitmapFactory.decodeFile(path)?.asImageBitmap() }.getOrNull()
+                    }
+                }
                 if (bitmap != null) {
                     if (parsed.body != "Photo") Spacer(Modifier.height(8.dp))
                     Image(
-                        bitmap = bitmap,
+                        bitmap = bitmap!!,
                         contentDescription = "Group photo",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier

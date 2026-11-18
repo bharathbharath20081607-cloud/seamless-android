@@ -77,11 +77,22 @@ class MediaSendingManager(
     fun sendImageNote(toPeerIDOrNull: String?, channelOrNull: String?, filePath: String) {
         try {
             Log.d(TAG, "🔄 Starting image send: $filePath")
-            val file = java.io.File(filePath)
-            if (!file.exists() || file.length() <= 0L) {
+            val rawFile = java.io.File(filePath)
+            if (!rawFile.exists() || rawFile.length() <= 0L) {
                 Log.e(TAG, "❌ Image file does not exist or is empty: $filePath")
                 return
             }
+            val effectivePath = if (rawFile.length() > 45L * 1024L) {
+                com.seamless.android.features.media.ImageUtils.downscalePathAndSaveToAppFiles(
+                    com.seamless.android.SeamlessApplication.instance,
+                    rawFile.absolutePath,
+                    maxDim = 512,
+                    quality = 75
+                ) ?: filePath
+            } else {
+                filePath
+            }
+            val file = java.io.File(effectivePath)
             Log.d(TAG, "📁 File exists: size=${file.length()} bytes, name=${file.name}")
             
             if (file.length() > MAX_FILE_SIZE) {
@@ -101,9 +112,9 @@ class MediaSendingManager(
             )
 
             if (toPeerIDOrNull != null) {
-                sendPrivateFile(toPeerIDOrNull, filePacket, filePath, BitchatMessageType.Image)
+                sendPrivateFile(toPeerIDOrNull, filePacket, effectivePath, BitchatMessageType.Image)
             } else {
-                sendPublicFile(channelOrNull, filePacket, filePath, BitchatMessageType.Image)
+                sendPublicFile(channelOrNull, filePacket, effectivePath, BitchatMessageType.Image)
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ CRITICAL: Image send failed completely", e)
@@ -119,11 +130,27 @@ class MediaSendingManager(
     fun sendFileNote(toPeerIDOrNull: String?, channelOrNull: String?, filePath: String) {
         try {
             Log.d(TAG, "🔄 Starting file send: $filePath")
-            val file = java.io.File(filePath)
-            if (!file.exists() || file.length() <= 0L) {
+            val rawFile = java.io.File(filePath)
+            if (!rawFile.exists() || rawFile.length() <= 0L) {
                 Log.e(TAG, "❌ File does not exist or is empty: $filePath")
                 return
             }
+            val detectedMime = try {
+                com.seamless.android.features.file.FileUtils.getMimeTypeFromExtension(rawFile.name)
+            } catch (_: Exception) {
+                "application/octet-stream"
+            }
+            val effectivePath = if (detectedMime.lowercase().startsWith("image/") && rawFile.length() > 45L * 1024L) {
+                com.seamless.android.features.media.ImageUtils.downscalePathAndSaveToAppFiles(
+                    com.seamless.android.SeamlessApplication.instance,
+                    rawFile.absolutePath,
+                    maxDim = 512,
+                    quality = 75
+                ) ?: filePath
+            } else {
+                filePath
+            }
+            val file = java.io.File(effectivePath)
             Log.d(TAG, "📁 File exists: size=${file.length()} bytes, name=${file.name}")
             
             if (file.length() > MAX_FILE_SIZE) {
@@ -165,9 +192,9 @@ class MediaSendingManager(
             }
 
             if (toPeerIDOrNull != null) {
-                sendPrivateFile(toPeerIDOrNull, filePacket, filePath, messageType)
+                sendPrivateFile(toPeerIDOrNull, filePacket, effectivePath, messageType)
             } else {
-                sendPublicFile(channelOrNull, filePacket, filePath, messageType)
+                sendPublicFile(channelOrNull, filePacket, effectivePath, messageType)
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ CRITICAL: File send failed completely", e)

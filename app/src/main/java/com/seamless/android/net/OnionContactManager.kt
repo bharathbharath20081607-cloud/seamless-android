@@ -127,9 +127,16 @@ class OnionContactManager private constructor(private val context: Context) {
             return trustState ?: TorContactTrustState.UNVERIFIED
         }
 
-        fun safetyNumber(): String {
-            val input = "$publicKey|$onionAddress".toByteArray(Charsets.UTF_8)
-            val digest = MessageDigest.getInstance("SHA-256").digest(input)
+        fun safetyNumber(myPublicKey: String = ""): String {
+            val cleanPeerKey = publicKey.trim().lowercase()
+            val cleanMyKey = myPublicKey.trim().lowercase()
+            val input = if (cleanMyKey.isNotBlank()) {
+                val sorted = listOf(cleanMyKey, cleanPeerKey).sorted()
+                "SeamlessSafetyNumber/v1|${sorted[0]}|${sorted[1]}"
+            } else {
+                "$cleanPeerKey|${canonicalizeOnionEndpoint(onionAddress)}"
+            }
+            val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
             return digest.joinToString("") { "%02x".format(it) }
                 .chunked(4)
                 .take(12)
@@ -514,6 +521,9 @@ class OnionContactManager private constructor(private val context: Context) {
     fun getContactByPublicKey(publicKey: String): OnionContact? {
         return contacts.values.find { it.publicKey.equals(publicKey, ignoreCase = true) }
     }
+
+    fun getSafetyNumber(contact: OnionContact): String =
+        contact.safetyNumber(getMyContactInfo().publicKey)
 
     fun toggleFavorite(contactId: String) {
         val contact = contacts[contactId] ?: return

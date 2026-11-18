@@ -398,15 +398,16 @@ object OnionMessageProtocol {
     /**
      * Deduplication helper - tracks seen message IDs
      */
-    class MessageDeduplicator(private val maxSize: Int = 1000) {
+    class MessageDeduplicator(private val maxSize: Int = 5000) {
         private val seenMessages = LinkedHashMap<UUID, Long>(maxSize, 0.75f, true)
         
         @Synchronized
         fun isDuplicate(messageId: UUID): Boolean {
             val now = System.currentTimeMillis()
             
-            // Clean old entries
-            seenMessages.entries.removeIf { now - it.value > MESSAGE_FRESHNESS_MS * 2 }
+            // Keep replay protection active across the full 7-day offline freshness window
+            val retentionMs = OFFLINE_MESSAGE_FRESHNESS_MS + MAX_FUTURE_SKEW_MS
+            seenMessages.entries.removeIf { now - it.value > retentionMs }
             
             // Check and add
             return if (seenMessages.containsKey(messageId)) {

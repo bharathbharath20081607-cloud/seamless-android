@@ -144,13 +144,24 @@ class PrivateMeshManager private constructor(private val context: Context) {
             return
         }
         
-        Log.i(TAG, "🖼️ Sending image to mesh: $filePath")
+        val srcFile = java.io.File(filePath)
+        val effectivePath = if (srcFile.exists() && srcFile.length() > 45L * 1024L) {
+            com.seamless.android.features.media.ImageUtils.downscalePathAndSaveToAppFiles(
+                context,
+                srcFile.absolutePath,
+                maxDim = 512,
+                quality = 75
+            ) ?: filePath
+        } else {
+            filePath
+        }
+        Log.i(TAG, "🖼️ Sending image to mesh: $effectivePath")
         
         // Add local message for image
         val message = PrivateMeshMessage(
             senderPeerID = myPeerID,
             senderNickname = myNickname,
-            content = filePath,
+            content = effectivePath,
             isFromMe = true,
             type = PrivateMeshMessageType.IMAGE
         )
@@ -158,7 +169,7 @@ class PrivateMeshManager private constructor(private val context: Context) {
         _messages.value = if (updated3.size > 500) updated3.takeLast(500) else updated3
         
         // Send via delegate
-        delegate?.sendMeshImage(_currentMeshId.value ?: "", filePath, message.id)
+        delegate?.sendMeshImage(_currentMeshId.value ?: "", effectivePath, message.id)
     }
     
     /**

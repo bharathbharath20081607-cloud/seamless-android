@@ -12,16 +12,34 @@ import java.io.FileOutputStream
 import java.io.InputStream
 
 object ImageUtils {
+    private fun calculateInSampleSize(rawWidth: Int, rawHeight: Int, reqDim: Int): Int {
+        var inSampleSize = 1
+        var longest = maxOf(rawWidth, rawHeight)
+        while ((longest / 2) >= reqDim) {
+            inSampleSize *= 2
+            longest /= 2
+        }
+        return inSampleSize.coerceAtLeast(1)
+    }
+
     fun downscaleAndSaveToAppFiles(context: Context, uri: Uri, maxDim: Int = 420, quality: Int = 72): String? {
         return try {
             val resolver = context.contentResolver
             val exifRotation = resolver.openInputStream(uri)?.use { getRotationDegreesFromExif(it) } ?: 0
 
-            // Reopen for decode as the previous stream is consumed
-            val input = resolver.openInputStream(uri) ?: return null
-            val original = BitmapFactory.decodeStream(input)
-            input.close()
-            original ?: return null
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+            val decodeOpts = BitmapFactory.Options().apply {
+                inSampleSize = if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                    calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxDim)
+                } else {
+                    1
+                }
+            }
+
+            // Reopen for sampled decode as previous streams are consumed
+            val original = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decodeOpts) }
+                ?: return null
 
             val oriented = if (exifRotation != 0) rotateBitmap(original, exifRotation) else original
 
@@ -39,14 +57,23 @@ object ImageUtils {
             try { if (oriented !== original) original.recycle() } catch (_: Exception) {}
             try { if (scaled !== oriented) oriented.recycle() } catch (_: Exception) {}
             outFile.absolutePath
-        } catch (e: Exception) {
+        } catch (_: Throwable) {
             null
         }
     }
 
     fun downscalePathAndSaveToAppFiles(context: Context, path: String, maxDim: Int = 420, quality: Int = 72): String? {
         return try {
-            val original = BitmapFactory.decodeFile(path) ?: return null
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(path, bounds)
+            val decodeOpts = BitmapFactory.Options().apply {
+                inSampleSize = if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                    calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxDim)
+                } else {
+                    1
+                }
+            }
+            val original = BitmapFactory.decodeFile(path, decodeOpts) ?: return null
             val exifRotation = getRotationDegreesFromExif(path)
             val oriented = if (exifRotation != 0) rotateBitmap(original, exifRotation) else original
 
@@ -64,7 +91,7 @@ object ImageUtils {
             try { if (oriented !== original) original.recycle() } catch (_: Exception) {}
             try { if (scaled !== oriented) oriented.recycle() } catch (_: Exception) {}
             outFile.absolutePath
-        } catch (e: Exception) {
+        } catch (_: Throwable) {
             null
         }
     }

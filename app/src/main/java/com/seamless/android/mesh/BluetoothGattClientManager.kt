@@ -65,6 +65,8 @@ class BluetoothGattClientManager(
     fun ensureClientConnection(device: BluetoothDevice) {
         if (!isActive) return
         val address = device.address
+        // Never attempt connectGatt on an incoming Central RPA that was not discovered advertising.
+        if (!connectionTracker.isScannedAddress(address)) return
         val existing = connectionTracker.getDeviceConnection(address)
         if (existing != null && existing.isClient && existing.gatt != null && existing.characteristic != null) {
             return
@@ -72,6 +74,12 @@ class BluetoothGattClientManager(
         if (connectionTracker.isConnectionLimitReached()) return
         if (connectionTracker.addPendingConnection(address)) {
             connectToDevice(device, connectionTracker.getBestRSSI(address) ?: -70)
+        }
+    }
+
+    fun ensureScanningActive() {
+        if (isActive && !isCurrentlyScanning) {
+            startScanning()
         }
     }
 
@@ -452,7 +460,7 @@ class BluetoothGattClientManager(
                     }
 
                     val retryableStatus = status == 133 || status == 147 || status == 62 || status == 8
-                    if (isActive && (retryableStatus || !fullyDisconnected)) {
+                    if (isActive && retryableStatus && connectionTracker.isScannedAddress(deviceAddress)) {
                         val attempt = (clientRetryCounts[deviceAddress] ?: 0) + 1
                         if (attempt <= 3) {
                             clientRetryCounts[deviceAddress] = attempt
@@ -548,6 +556,7 @@ class BluetoothGattClientManager(
                     if (service != null) {
                         val characteristic = service.getCharacteristic(AppConstants.Mesh.Gatt.CHARACTERISTIC_UUID)
                         if (characteristic != null) {
+                            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                             connectionTracker.getDeviceConnection(deviceAddress)?.let { deviceConn ->
                                 val updatedConn = deviceConn.copy(characteristic = characteristic)
                                 connectionTracker.updateDeviceConnection(deviceAddress, updatedConn)

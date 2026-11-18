@@ -38,6 +38,7 @@ class BluetoothConnectionTracker(
     
     // RSSI tracking from scan results (for devices we discover but may connect as servers)
     private val scanRSSI = ConcurrentHashMap<String, Int>()
+    private val scannedAddresses = ConcurrentHashMap.newKeySet<String>()
     
     // Connection attempt tracking with automatic cleanup
     private val pendingConnections = ConcurrentHashMap<String, ConnectionAttempt>()
@@ -54,6 +55,24 @@ class BluetoothConnectionTracker(
     }
 
     fun getDeviceMtu(deviceAddress: String): Int = deviceMtu[deviceAddress] ?: 185
+
+    fun isScannedAddress(deviceAddress: String): Boolean = scannedAddresses.contains(deviceAddress)
+
+    fun getEffectiveMtuForTarget(targetPeerID: String? = null): Int {
+        val normalized = targetPeerID?.lowercase()
+        if (!normalized.isNullOrBlank()) {
+            val clientAddr = connectedDevices.values.firstOrNull {
+                it.isClient && it.gatt != null && addressPeerMap[it.device.address] == normalized
+            }?.device?.address
+            if (clientAddr != null) return (deviceMtu[clientAddr] ?: 512).coerceIn(185, 512)
+            val serverAddr = subscribedDevices.firstOrNull {
+                addressPeerMap[it.address] == normalized
+            }?.address
+            if (serverAddr != null) return (deviceMtu[serverAddr] ?: 512).coerceIn(185, 512)
+        }
+        val activeMtus = connectedDevices.keys.mapNotNull { deviceMtu[it] }
+        return (activeMtus.minOrNull() ?: 512).coerceIn(185, 512)
+    }
     
     // State management
     private var isActive = false
@@ -113,6 +132,7 @@ class BluetoothConnectionTracker(
         // Without this, pending connections from previous session would block new connections
         pendingConnections.clear()
         scanRSSI.clear()
+        scannedAddresses.clear()
         firstAnnounceSeen.clear()
         Log.i(TAG, "🟢 ConnectionTracker started - cleared stale pending connections")
         
@@ -193,6 +213,7 @@ class BluetoothConnectionTracker(
      */
     fun updateScanRSSI(deviceAddress: String, rssi: Int) {
         scanRSSI[deviceAddress] = rssi
+        scannedAddresses.add(deviceAddress)
     }
     
     /**
@@ -494,6 +515,7 @@ class BluetoothConnectionTracker(
         addressPeerMap.clear()
         pendingConnections.clear()
         scanRSSI.clear()
+        scannedAddresses.clear()
         firstAnnounceSeen.clear()
         deviceMtu.clear()
         pendingWriteLatches.values.forEach { it.complete(false) }

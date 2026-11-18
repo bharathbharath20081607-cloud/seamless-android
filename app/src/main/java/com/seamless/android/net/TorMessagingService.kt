@@ -212,6 +212,7 @@ class TorMessagingService private constructor(private val context: Context) {
     fun setChatVisible(contactId: String, visible: Boolean) {
         if (visible) {
             visibleChatContacts.add(contactId)
+            messageNotifier.cancelContact(contactId)
             scope.launch {
                 refreshPeerConnection(contactId)
                 wakeQueueDispatcher()
@@ -219,6 +220,10 @@ class TorMessagingService private constructor(private val context: Context) {
         } else {
             visibleChatContacts.remove(contactId)
         }
+    }
+
+    fun cancelContactNotification(contactId: String) {
+        messageNotifier.cancelContact(contactId)
     }
 
     /** Clear all visible-chat markers (e.g., when Activity pauses or goes to background). */
@@ -659,7 +664,8 @@ class TorMessagingService private constructor(private val context: Context) {
         imageBytes: ByteArray,
         mimeType: String,
         groupId: String? = null,
-        groupMessageId: String? = null
+        groupMessageId: String? = null,
+        finalChunkMessageId: UUID? = null
     ): Result<String> = mutex.withLock {
         val contact = contactManager.getContact(contactId)
             ?: return@withLock Result.failure(IllegalArgumentException("Contact not found"))
@@ -711,7 +717,11 @@ class TorMessagingService private constructor(private val context: Context) {
                 val chunkFrame = OnionMessageProtocol.OnionFrame(
                     // Every frame needs its own transport identity. The final
                     // chunk alone completes the single visible photo message.
-                    messageId = UUID.randomUUID(),
+                    messageId = if (index == chunks.lastIndex && finalChunkMessageId != null) {
+                        finalChunkMessageId
+                    } else {
+                        UUID.randomUUID()
+                    },
                     sequence = sequenceManager.nextOutbound(),
                     timestamp = now,
                     frameType = OnionMessageProtocol.FrameType.FILE_CHUNK,
@@ -2619,19 +2629,12 @@ class TorMessagingService private constructor(private val context: Context) {
             Log.w(TAG, "Rejected unsealed mailbox payload from ${redactEndpoint(mailboxOnion)}")
             return false
         }
-        if (false) {
-            val rawFrame = OnionMessageProtocol.OnionFrame.decode(payload) ?: return false
-            if (rawFrame.frameType != OnionMessageProtocol.FrameType.CONTACT_EXCHANGE) {
-                Log.w(TAG, "Rejected unsealed mailbox payload with type ${rawFrame.frameType}")
-                return false
-            }
-            return handleIncomingData(mailboxOnion, payload, allowOfflineTimestamp = true)
-        }
 
         val frame = OnionMessageProtocol.OnionFrame.decode(unsealed) ?: return false
         val senderKey = when (frame.frameType) {
             OnionMessageProtocol.FrameType.MESSAGE -> TorMessageEnvelope.decode(frame.payload)?.senderKey
             OnionMessageProtocol.FrameType.FILE_META -> attachmentTransfer.decodeMeta(frame.payload)?.senderPublicKey
+            OnionMessageProtocol.FrameType.FILE_CHUNK -> attachmentTransfer.senderPublicKeyForChunk(frame.payload)
             else -> null
         }
         val contact = senderKey
@@ -3411,7 +3414,11 @@ class TorMessagingService private constructor(private val context: Context) {
             // "mailbox ready" status but no route for offline delivery.
             // The receiver ACKs only after it persists and registers the
             // endpoint for polling.
-            messageQueue.enqueue(recipientOnion, frame)
+            messageQueue.enqueue(
+                recipientOnion = recipientOnion,
+                frame = frame,
+                completesUiMessage = false
+            )
             wakeQueueDispatcher()
             Log.i(TAG, "📬 Queued mailbox exchange to ${redactEndpoint(recipientOnion)}")
         } catch (e: Exception) {

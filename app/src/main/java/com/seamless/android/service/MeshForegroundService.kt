@@ -153,6 +153,7 @@ class MeshForegroundService : Service() {
     fun setAppBackgroundState(inBackground: Boolean) {
         isAppInBackground = inBackground
         notificationManager?.setAppBackgroundState(inBackground)
+        meshService?.connectionManager?.setAppBackgroundState(inBackground)
         Log.d(TAG, "App background state updated: $inBackground")
     }
     
@@ -743,10 +744,9 @@ class MeshForegroundService : Service() {
         if (entering) {
             Log.i(TAG, "💤 Entering Doze mode — reducing operations")
 
-            // Reduce mesh scanning to ultra-low power via PowerManager
+            // Reduce mesh scanning to ultra-low power via active ConnectionManager
             try {
-                val meshPowerMgr = com.seamless.android.mesh.PowerManager(applicationContext)
-                meshPowerMgr.setAppBackgroundState(true)
+                meshService?.connectionManager?.setAppBackgroundState(true)
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to adjust mesh power: ${e.message}")
             }
@@ -757,10 +757,9 @@ class MeshForegroundService : Service() {
         } else {
             Log.i(TAG, "⚡ Exiting Doze mode — resuming operations")
 
-            // Resume normal scanning
+            // Resume normal scanning via active ConnectionManager
             try {
-                val meshPowerMgr = com.seamless.android.mesh.PowerManager(applicationContext)
-                meshPowerMgr.setAppBackgroundState(isAppInBackground)
+                meshService?.connectionManager?.setAppBackgroundState(isAppInBackground)
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to resume mesh power: ${e.message}")
             }

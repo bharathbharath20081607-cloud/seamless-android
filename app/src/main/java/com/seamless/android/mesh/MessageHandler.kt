@@ -247,6 +247,9 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
                                 type = PrivateMeshMessageType.AUDIO,
                                 messageId = file.transferId.ifBlank { null }
                             )
+                            file.transferId.takeIf { it.isNotBlank() }?.let {
+                                sendDeliveryAck(it.uppercase(), peerID)
+                            }
                         }
                     }
                 }
@@ -275,6 +278,9 @@ class MessageHandler(private val myPeerID: String, private val appContext: andro
                                 type = PrivateMeshMessageType.IMAGE,
                                 messageId = file.transferId.ifBlank { null }
                             )
+                            file.transferId.takeIf { it.isNotBlank() }?.let {
+                                sendDeliveryAck(it.uppercase(), peerID)
+                            }
                         }
                     }
                 }

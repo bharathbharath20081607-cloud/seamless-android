@@ -47,7 +47,10 @@ class FragmentManager {
      * Create fragments from a large packet - 100% iOS Compatible
      * Matches iOS sendFragmentedPacket() implementation exactly
      */
-    fun createFragments(packet: BitchatPacket): List<BitchatPacket> {
+    fun createFragments(
+        packet: BitchatPacket,
+        maxPacketBytes: Int = FRAGMENT_SIZE_THRESHOLD
+    ): List<BitchatPacket> {
         try {
             Log.d(TAG, "🔀 Creating fragments for packet type ${packet.type}, payload: ${packet.payload.size} bytes")
         val encoded = packet.toBinaryData()
@@ -58,9 +61,11 @@ class FragmentManager {
             Log.d(TAG, "📦 Encoded to ${encoded.size} bytes")
         
         val fullData = encoded
+        val effectiveThreshold = maxPacketBytes.coerceIn(150, FRAGMENT_SIZE_THRESHOLD)
+        val effectiveFragmentSize = (effectiveThreshold - 43).coerceIn(120, MAX_FRAGMENT_SIZE)
         
         // Fragment if frame exceeds safe BLE GATT payload threshold
-        if (fullData.size <= FRAGMENT_SIZE_THRESHOLD) {
+        if (fullData.size <= effectiveThreshold) {
             return listOf(packet) // No fragmentation needed
         }
         
@@ -70,8 +75,8 @@ class FragmentManager {
         val fragmentID = FragmentPayload.generateFragmentID()
         
         // iOS: stride(from: 0, to: fullData.count, by: maxFragmentSize)
-        val fragmentChunks = stride(0, fullData.size, MAX_FRAGMENT_SIZE) { offset ->
-            val endOffset = minOf(offset + MAX_FRAGMENT_SIZE, fullData.size)
+        val fragmentChunks = stride(0, fullData.size, effectiveFragmentSize) { offset ->
+            val endOffset = minOf(offset + effectiveFragmentSize, fullData.size)
             fullData.sliceArray(offset..<endOffset)
         }
         

@@ -75,7 +75,11 @@ class BluetoothConnectionManager(
             connectionScope.launch {
                 delay(1200L)
                 if (isActive && !connectionTracker.isDeviceConnected(device.address)) {
-                    clientManager.ensureClientConnection(device)
+                    if (connectionTracker.isScannedAddress(device.address)) {
+                        clientManager.ensureClientConnection(device)
+                    } else {
+                        clientManager.ensureScanningActive()
+                    }
                 }
             }
         }
@@ -318,13 +322,19 @@ class BluetoothConnectionManager(
         )
     }
 
-    suspend fun broadcastPacketAwait(routed: RoutedPacket) {
+    suspend fun broadcastPacketAwait(
+        routed: RoutedPacket,
+        targetPeerID: String? = null,
+        onFragmentSent: ((sent: Int, total: Int) -> Unit)? = null
+    ) {
         if (!isActive) return
 
         packetBroadcaster.broadcastPacketAwait(
             routed,
             serverManager.getGattServer(),
-            serverManager.getCharacteristic()
+            serverManager.getCharacteristic(),
+            targetPeerID = targetPeerID,
+            onFragmentSent = onFragmentSent
         )
     }
 
@@ -461,6 +471,9 @@ class BluetoothConnectionManager(
      * Get connected device count
      */
     fun getConnectedDeviceCount(): Int = connectionTracker.getConnectedDeviceCount()
+
+    fun getEffectiveMtuForTarget(targetPeerID: String? = null): Int =
+        connectionTracker.getEffectiveMtuForTarget(targetPeerID)
     
     /**
      * Get debug information including power management

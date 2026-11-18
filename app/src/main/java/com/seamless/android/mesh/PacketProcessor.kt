@@ -156,7 +156,14 @@ class PacketProcessor(private val myPeerID: String) {
                 MessageType.MESSAGE -> handleMessage(routed)
                 MessageType.FILE_TRANSFER -> handleMessage(routed) // treat same routing path; parsing happens in handler
                 MessageType.LEAVE -> handleLeave(routed)
-                MessageType.FRAGMENT -> handleFragment(routed)
+                MessageType.FRAGMENT -> {
+                    val isForThisNode = packet.recipientID == null ||
+                        packet.recipientID.contentEquals(delegate?.getBroadcastRecipient()) ||
+                        packetRelayManager.isPacketAddressedToMe(packet)
+                    if (isForThisNode) {
+                        handleFragment(routed)
+                    }
+                }
                 MessageType.REQUEST_SYNC -> handleRequestSync(routed)
                 
                 // Private Mesh discovery packets (broadcast, no address check needed)

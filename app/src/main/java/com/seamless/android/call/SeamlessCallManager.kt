@@ -205,6 +205,8 @@ class SeamlessCallManager private constructor(private val context: Context) {
     private var verifiedDirectPeerEndpoint: InetSocketAddress? = null
     @Volatile
     private var lastDirectP2pVerifiedAt: Long = 0L
+    @Volatile
+    private var lastPeerActivityAtMs: Long = 0L
 
     init {
         val engine = CallAudioEngine(context) { seq, ts, encodedAdpcm ->
@@ -371,6 +373,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 }
 
                 val now = System.currentTimeMillis()
+                lastPeerActivityAtMs = now
                 _sessionFlow.value = session.copy(
                     state = CallState.ACTIVE,
                     connectedAtMs = now,
@@ -497,6 +500,16 @@ class SeamlessCallManager private constructor(private val context: Context) {
         val current = _sessionFlow.value ?: return
         val nextForceTor = !current.forceTorOnly
         if (nextForceTor) {
+            p2pProbeJob?.cancel()
+            p2pProbeJob = null
+            p2pReceiveJob?.cancel()
+            p2pReceiveJob = null
+            stunDiscoveryJob?.cancel()
+            stunDiscoveryJob = null
+            try { udpSocket?.close() } catch (_: Exception) {}
+            udpSocket = null
+            localUdpCandidates.clear()
+            peerUdpCandidates.clear()
             candidateDirectPeerEndpoint = null
             verifiedDirectPeerEndpoint = null
             lastDirectP2pVerifiedAt = 0L
@@ -594,17 +607,33 @@ class SeamlessCallManager private constructor(private val context: Context) {
                     "OFFER" -> {
                         if (current != null && current.state != CallState.IDLE && current.state != CallState.ENDED) {
                             if (current.callId == callId) return@withLock
-                            val messaging = TorMessagingService.getInstance(context)
-                            val myInfo = messaging.getMyContactInfo()
-                            val busyPayload = buildSignalJson(
-                                type = "BUSY",
-                                callId = callId,
-                                senderOnion = myInfo.onionAddress,
-                                senderNickname = myInfo.nickname,
-                                senderPubKey = myInfo.publicKey
-                            )
-                            launch { messaging.sendCallSignalFrame(canonicalSender, busyPayload) }
-                            return@withLock
+                            val currentCanonicalPeer = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(current.peerOnion)
+                            val isGlare = (current.state == CallState.OUTGOING_DIALING || current.state == CallState.OUTGOING_RINGING) &&
+                                currentCanonicalPeer == canonicalSender
+                            if (isGlare) {
+                                val myCanonical = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(
+                                    TorMessagingService.getInstance(context).getMyContactInfo().onionAddress
+                                )
+                                if (myCanonical.isNotBlank() && myCanonical < canonicalSender) {
+                                    Log.i(TAG, "⚡ Resolving simultaneous call glare: yielding outgoing offer to $canonicalSender")
+                                    cleanupCallResourcesLocked()
+                                } else {
+                                    Log.i(TAG, "⚡ Resolving simultaneous call glare: keeping outgoing offer over $canonicalSender")
+                                    return@withLock
+                                }
+                            } else {
+                                val messaging = TorMessagingService.getInstance(context)
+                                val myInfo = messaging.getMyContactInfo()
+                                val busyPayload = buildSignalJson(
+                                    type = "BUSY",
+                                    callId = callId,
+                                    senderOnion = myInfo.onionAddress,
+                                    senderNickname = myInfo.nickname,
+                                    senderPubKey = myInfo.publicKey
+                                )
+                                launch { messaging.sendCallSignalFrame(canonicalSender, busyPayload) }
+                                return@withLock
+                            }
                         }
 
                         cleanupCallResourcesLocked()
@@ -676,6 +705,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
                             mergeCandidatesIntoList(json.optJSONArray("p2pCandidates"))
 
                             val now = System.currentTimeMillis()
+                            lastPeerActivityAtMs = now
                             _sessionFlow.value = current.copy(
                                 state = CallState.ACTIVE,
                                 connectedAtMs = now,
@@ -723,6 +753,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
                     "HEARTBEAT" -> {
                         if (current?.callId == callId && current.state == CallState.ACTIVE) {
+                            lastPeerActivityAtMs = System.currentTimeMillis()
                             mergeCandidatesIntoList(json.optJSONArray("p2pCandidates"))
                             val sentTs = json.optLong("timestamp", 0L)
                             launch {
@@ -742,6 +773,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
                     "HEARTBEAT_ACK" -> {
                         if (current?.callId == callId && current.state == CallState.ACTIVE) {
+                            lastPeerActivityAtMs = System.currentTimeMillis()
                             val echoTs = json.optLong("echoTimestamp", 0L)
                             if (echoTs > 0L) {
                                 val torRtt = (System.currentTimeMillis() - echoTs).toInt().coerceIn(10, 5000)
@@ -808,43 +840,39 @@ class SeamlessCallManager private constructor(private val context: Context) {
      * Decrypts in RAM in ~0.01ms using [currentSessionKey] (AES-256-GCM).
      */
     fun onIncomingTorCallAudio(
-        @Suppress("UNUSED_PARAMETER") senderOnion: String,
+        senderOnion: String,
         sequence: Long,
         timestampMs: Long,
         payload: ByteArray
     ) {
         val current = _sessionFlow.value ?: return
-        if (current.state != CallState.ACTIVE || payload.size <= 17) return
+        if (current.state != CallState.ACTIVE || payload.size < 1 + 16 + DIRECT_UDP_NONCE_BYTES + 16) return
+        val canonicalSender = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(senderOnion)
+            .ifBlank { senderOnion.trim().lowercase() }
+        val canonicalPeer = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(current.peerOnion)
+            .ifBlank { current.peerOnion.trim().lowercase() }
+        if (canonicalSender != canonicalPeer) return
 
         val buf = ByteBuffer.wrap(payload)
-        val firstByte = payload[0]
+        if (payload[0] != TOR_AUDIO_MAGIC_V2) return
+        buf.get() // magic
+        val incomingCallUuid = UUID(buf.long, buf.long)
+        if (incomingCallUuid.toString() != current.callId) return
+        val key = currentSessionKey ?: return
+        val nonce = ByteArray(DIRECT_UDP_NONCE_BYTES)
+        buf.get(nonce)
+        val cipherBytes = ByteArray(buf.remaining())
+        buf.get(cipherBytes)
+        val aad = ByteBuffer.allocate(1 + 16 + 8 + 8)
+            .put(TOR_AUDIO_MAGIC_V2)
+            .putLong(incomingCallUuid.mostSignificantBits)
+            .putLong(incomingCallUuid.leastSignificantBits)
+            .putLong(sequence)
+            .putLong(timestampMs)
+            .array()
+        val encodedAudio = decryptUdpGcm(cipherBytes, key, nonce, aad) ?: return
 
-        val encodedAudio: ByteArray = if (firstByte == TOR_AUDIO_MAGIC_V2 &&
-            payload.size >= 1 + 16 + DIRECT_UDP_NONCE_BYTES + 16
-        ) {
-            buf.get() // magic
-            val incomingCallUuid = UUID(buf.long, buf.long)
-            if (incomingCallUuid.toString() != current.callId) return
-            val key = currentSessionKey ?: return
-            val nonce = ByteArray(DIRECT_UDP_NONCE_BYTES)
-            buf.get(nonce)
-            val cipherBytes = ByteArray(buf.remaining())
-            buf.get(cipherBytes)
-            val aad = ByteBuffer.allocate(1 + 16 + 8 + 8)
-                .put(TOR_AUDIO_MAGIC_V2)
-                .putLong(incomingCallUuid.mostSignificantBits)
-                .putLong(incomingCallUuid.leastSignificantBits)
-                .putLong(sequence)
-                .putLong(timestampMs)
-                .array()
-            decryptUdpGcm(cipherBytes, key, nonce, aad) ?: return
-        } else {
-            // Backward-compatible fallback for unsealed inner payload
-            val incomingCallId = UUID(buf.long, buf.long).toString()
-            if (incomingCallId != current.callId) return
-            ByteArray(payload.size - 16).also { buf.get(it) }
-        }
-
+        lastPeerActivityAtMs = System.currentTimeMillis()
         val rxCount = rxAudioFramesCounter.incrementAndGet()
         if ((rxCount and 3L) == 0L) {
             _rxPacketPulseFlow.value = System.currentTimeMillis()
@@ -1288,6 +1316,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
                 // Two-way UDP reachability is now cryptographically verified!
                 val now = System.currentTimeMillis()
+                lastPeerActivityAtMs = now
                 verifiedDirectPeerEndpoint = sender
                 candidateDirectPeerEndpoint = sender
                 lastDirectP2pVerifiedAt = now
@@ -1324,6 +1353,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 val decodedAudio = decryptUdpGcm(cipherBytes, key, nonce, aad) ?: return
 
                 val now = System.currentTimeMillis()
+                lastPeerActivityAtMs = now
                 verifiedDirectPeerEndpoint = sender
                 candidateDirectPeerEndpoint = sender
                 lastDirectP2pVerifiedAt = now
@@ -1444,6 +1474,19 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 delay(2_800L)
                 val current = _sessionFlow.value
                 if (current == null || current.callId != callId || current.state != CallState.ACTIVE) break
+                if (lastPeerActivityAtMs > 0L && (System.currentTimeMillis() - lastPeerActivityAtMs) > 25_000L) {
+                    callMutex.withLock {
+                        if (_sessionFlow.value?.callId == callId && _sessionFlow.value?.state == CallState.ACTIVE) {
+                            endCallInternal(
+                                callId = callId,
+                                reason = "Connection lost",
+                                notifyPeer = false,
+                                logText = "📞 Voice call ended (Lost connection)"
+                            )
+                        }
+                    }
+                    break
+                }
                 val myInfo = messaging.getMyContactInfo()
                 val hbPayload = buildSignalJson(
                     type = "HEARTBEAT",
@@ -1626,6 +1669,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
         candidateDirectPeerEndpoint = null
         verifiedDirectPeerEndpoint = null
         lastDirectP2pVerifiedAt = 0L
+        lastPeerActivityAtMs = 0L
         _localVoiceLevelFlow.value = 0f
         _remoteVoiceLevelFlow.value = 0f
         _jitterBufferMsFlow.value = 0

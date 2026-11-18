@@ -119,6 +119,7 @@ class BluetoothMeshService(private val context: Context) {
     // Coroutines
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val lastAnnouncedToPeerAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val deliveredTransferAcks = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     
     init {
         setupDelegates()
@@ -254,7 +255,7 @@ class BluetoothMeshService(private val context: Context) {
                 // PRODUCTION FIX: Automatically initiate Noise handshakes for connected peers
                 // This ensures DM capability is set up proactively when peers connect
                 serviceScope.launch {
-                    delay(500) // Brief delay to let connection stabilize
+                    delay(150) // Brief delay to let connection stabilize
                     peerIDs.forEach { peerID ->
                         try {
                             val hasSession = hasEstablishedSession(peerID)
@@ -272,7 +273,7 @@ class BluetoothMeshService(private val context: Context) {
                                 flushPendingMeshMedia(peerID)
                             } else if (!hasSession && (isDirectlyConnected || hasParked)) {
                                 // Deterministic stagger: higher peerID waits so the lower one initiates first (avoids glare)
-                                if (myPeerID.lowercase() > peerID.lowercase()) delay(1500)
+                                if (myPeerID.lowercase() > peerID.lowercase()) delay(350)
                                 if (hasEstablishedSession(peerID)) return@forEach
                                 if (encryptionService.getSessionState(peerID) is com.seamless.android.noise.NoiseSession.NoiseSessionState.Handshaking) return@forEach
                                 Log.d(TAG, "🤝 Auto-initiating Noise handshake with directly connected peer: $peerID")
@@ -301,10 +302,9 @@ class BluetoothMeshService(private val context: Context) {
             override fun onKeyExchangeCompleted(peerID: String, peerPublicKeyData: ByteArray) {
                 // Send announcement and cached messages after key exchange
                 serviceScope.launch {
-                    delay(100)
+                    delay(40)
                     sendAnnouncementToPeer(peerID)
                     
-                    delay(500)
                     // PRODUCTION FIX: Flush any pending private messages for this peer
                     flushPendingMessages(peerID)
                     
@@ -315,7 +315,7 @@ class BluetoothMeshService(private val context: Context) {
                     // PRODUCTION FIX: Flush any pending files for this peer
                     flushPendingFiles(peerID)
                     
-                    delay(500)
+                    delay(100)
                     storeForwardManager.sendCachedMessages(peerID)
                 }
             }
@@ -517,6 +517,7 @@ class BluetoothMeshService(private val context: Context) {
             }
             
             override fun onDeliveryAckReceived(messageID: String, peerID: String) {
+                deliveredTransferAcks.add(messageID.uppercase())
                 delegate?.didReceiveDeliveryAck(messageID, peerID)
             }
             
@@ -1414,7 +1415,7 @@ class BluetoothMeshService(private val context: Context) {
         try {
             Log.d(TAG, "📤 sendFileBroadcast: name=${file.fileName}, size=${file.fileSize}")
             
-            val CHUNK_SIZE = 24 * 1024 // 24KB chunks (~52 BLE fragments per chunk)
+            val CHUNK_SIZE = 6 * 1024 // 6KB chunks (~14 BLE fragments per chunk at 469B)
             val fileContent = file.content
             val totalChunks = if (fileContent.size <= CHUNK_SIZE) 1 else (fileContent.size + CHUNK_SIZE - 1) / CHUNK_SIZE
             val canonicalTransferId = file.transferId.ifBlank { java.util.UUID.randomUUID().toString() }
@@ -1426,9 +1427,7 @@ class BluetoothMeshService(private val context: Context) {
             
             serviceScope.launch {
                 try {
-                    if (totalChunks > 1) {
-                        TransferProgressManager.start(canonicalTransferId, totalChunks)
-                    }
+                    val preparedPackets = mutableListOf<Pair<BitchatPacket, ByteArray>>()
                     for (chunkIndex in 0 until totalChunks) {
                         val start = chunkIndex * CHUNK_SIZE
                         val end = minOf(start + CHUNK_SIZE, fileContent.size)
@@ -1461,19 +1460,16 @@ class BluetoothMeshService(private val context: Context) {
                             ttl = MAX_TTL
                         )
                         val signed = signPacketBeforeBroadcast(packet)
-                        val wireTransferId = if (totalChunks == 1) canonicalTransferId else sha256Hex(payload)
-                        connectionManager.broadcastPacketAwait(RoutedPacket(signed, transferId = wireTransferId))
-                        if (totalChunks > 1) {
-                            TransferProgressManager.progress(canonicalTransferId, chunkIndex + 1, totalChunks)
-                        }
-                        
-                        if (totalChunks > 1 && chunkIndex < totalChunks - 1) {
-                            delay(40L)
-                        }
-                        try { gossipSyncManager.onPublicPacketSeen(signed) } catch (_: Exception) { }
+                        preparedPackets.add(signed to payload)
                     }
-                    if (totalChunks > 1) {
-                        TransferProgressManager.complete(canonicalTransferId, totalChunks)
+                    transmitChunkedPacketsWithProgress(
+                        transferId = canonicalTransferId,
+                        packets = preparedPackets,
+                        targetPeerID = null,
+                        retryOnMissingAckForPeer = null
+                    )
+                    preparedPackets.forEach { (signed, _) ->
+                        try { gossipSyncManager.onPublicPacketSeen(signed) } catch (_: Exception) { }
                     }
                     Log.d(TAG, "✅ sendFileBroadcast completed successfully (${totalChunks} chunks)")
                 } catch (e: Exception) {
@@ -1486,15 +1482,81 @@ class BluetoothMeshService(private val context: Context) {
         }
     }
 
+    private suspend fun transmitChunkedPacketsWithProgress(
+        transferId: String,
+        packets: List<Pair<BitchatPacket, ByteArray>>,
+        targetPeerID: String? = null,
+        retryOnMissingAckForPeer: String? = null
+    ) {
+        if (packets.isEmpty()) return
+        val effectiveMtu = connectionManager.getEffectiveMtuForTarget(targetPeerID)
+        val chunkFragCounts = packets.map { (pkt, _) ->
+            maxOf(1, fragmentManager.createFragments(pkt, effectiveMtu).size)
+        }
+        val grandTotalFrags = chunkFragCounts.sum().coerceAtLeast(1)
+        val trackProgress = packets.size > 1 || grandTotalFrags > 1
+        if (trackProgress) {
+            TransferProgressManager.start(transferId, grandTotalFrags)
+        }
+
+        suspend fun sendOnce(reportProgress: Boolean) {
+            var completedFrags = 0
+            packets.forEachIndexed { idx, (pkt, rawPayload) ->
+                val chunkFrags = chunkFragCounts[idx]
+                val wireTransferId = if (packets.size == 1) transferId else sha256Hex(rawPayload)
+                connectionManager.broadcastPacketAwait(
+                    routed = RoutedPacket(pkt, transferId = wireTransferId),
+                    targetPeerID = targetPeerID,
+                    onFragmentSent = { sentInChunk, _ ->
+                        if (reportProgress && trackProgress) {
+                            val overall = (completedFrags + sentInChunk).coerceAtMost(grandTotalFrags - 1)
+                            TransferProgressManager.progress(transferId, overall, grandTotalFrags)
+                        }
+                    }
+                )
+                completedFrags += chunkFrags
+                if (packets.size > 1 && idx < packets.size - 1) {
+                    delay(8L)
+                }
+            }
+        }
+
+        sendOnce(reportProgress = true)
+
+        if (retryOnMissingAckForPeer != null) {
+            val ackKey = transferId.uppercase()
+            var acked = deliveredTransferAcks.contains(ackKey)
+            if (!acked) {
+                repeat(18) {
+                    delay(100L)
+                    if (deliveredTransferAcks.contains(ackKey)) {
+                        acked = true
+                        return@repeat
+                    }
+                }
+            }
+            if (!acked && isActive && peerManager.isPeerActive(retryOnMissingAckForPeer) &&
+                encryptionService.hasEstablishedSession(retryOnMissingAckForPeer)
+            ) {
+                Log.w(TAG, "🔁 No ACK for ${transferId.take(8)} from $retryOnMissingAckForPeer after 1.8s, re-sending ${packets.size} chunks")
+                sendOnce(reportProgress = false)
+            }
+        }
+
+        if (trackProgress) {
+            TransferProgressManager.complete(transferId, grandTotalFrags)
+        }
+    }
+
     /**
      * Send a file as an encrypted private message using Noise protocol
-     * PRODUCTION FIX: Chunk large files at 24KB with fragment-aware BLE pacing
+     * PRODUCTION FIX: Chunk large files at 6KB with fragment-aware BLE pacing
      */
     fun sendFilePrivate(recipientPeerID: String, file: com.seamless.android.model.BitchatFilePacket) {
         try {
             Log.d(TAG, "📤 sendFilePrivate (ENCRYPTED): to=$recipientPeerID, name=${file.fileName}, size=${file.fileSize}")
             
-            val CHUNK_SIZE = 24 * 1024 // 24KB chunks (~52 BLE fragments per chunk)
+            val CHUNK_SIZE = 6 * 1024 // 6KB chunks (~14 BLE fragments per chunk at 469B)
             val fileContent = file.content
             val totalChunks = if (fileContent.size <= CHUNK_SIZE) 1 else (fileContent.size + CHUNK_SIZE - 1) / CHUNK_SIZE
             val canonicalTransferId = file.transferId.ifBlank { java.util.UUID.randomUUID().toString() }
@@ -1507,9 +1569,7 @@ class BluetoothMeshService(private val context: Context) {
                 // Check if we have an established Noise session
                 if (encryptionService.hasEstablishedSession(recipientPeerID)) {
                     try {
-                        if (totalChunks > 1) {
-                            TransferProgressManager.start(canonicalTransferId, totalChunks)
-                        }
+                        val preparedPackets = mutableListOf<Pair<BitchatPacket, ByteArray>>()
                         for (chunkIndex in 0 until totalChunks) {
                             val start = chunkIndex * CHUNK_SIZE
                             val end = minOf(start + CHUNK_SIZE, fileContent.size)
@@ -1557,21 +1617,16 @@ class BluetoothMeshService(private val context: Context) {
                                 ttl = com.seamless.android.util.AppConstants.MESSAGE_TTL_HOPS
                             )
                             
-                            // Sign and send the encrypted packet
+                            // Sign and collect the encrypted packet
                             val signed = signPacketBeforeBroadcast(packet)
-                            val wireTransferId = if (totalChunks == 1) canonicalTransferId else sha256Hex(filePayload)
-                            connectionManager.broadcastPacketAwait(RoutedPacket(signed, transferId = wireTransferId))
-                            if (totalChunks > 1) {
-                                TransferProgressManager.progress(canonicalTransferId, chunkIndex + 1, totalChunks)
-                            }
-                            
-                            if (totalChunks > 1 && chunkIndex < totalChunks - 1) {
-                                delay(40L)
-                            }
+                            preparedPackets.add(signed to filePayload)
                         }
-                        if (totalChunks > 1) {
-                            TransferProgressManager.complete(canonicalTransferId, totalChunks)
-                        }
+                        transmitChunkedPacketsWithProgress(
+                            transferId = canonicalTransferId,
+                            packets = preparedPackets,
+                            targetPeerID = recipientPeerID,
+                            retryOnMissingAckForPeer = recipientPeerID
+                        )
                         Log.d(TAG, "✅ Sent encrypted file to $recipientPeerID ($totalChunks chunks)")
                         
                     } catch (e: Exception) {
@@ -1680,12 +1735,10 @@ class BluetoothMeshService(private val context: Context) {
                 com.seamless.android.model.NoisePayloadType.MESH_IMAGE
             }
 
-            val CHUNK_SIZE = 16 * 1024 // 16KB chunks for fast, reliable BLE delivery
+            val CHUNK_SIZE = 6 * 1024 // 6KB chunks (~14 BLE fragments per chunk at 469B)
             val totalChunks = if (fileData.size <= CHUNK_SIZE) 1 else (fileData.size + CHUNK_SIZE - 1) / CHUNK_SIZE
             val transferId = messageId.ifBlank { java.util.UUID.randomUUID().toString() }
-            if (totalChunks > 1) {
-                TransferProgressManager.start(transferId, totalChunks)
-            }
+            val preparedPackets = mutableListOf<Pair<BitchatPacket, ByteArray>>()
 
             for (chunkIndex in 0 until totalChunks) {
                 val start = chunkIndex * CHUNK_SIZE
@@ -1716,18 +1769,14 @@ class BluetoothMeshService(private val context: Context) {
                     payload = encrypted,
                     ttl = com.seamless.android.util.AppConstants.MESSAGE_TTL_HOPS
                 )
-                val wireTransferId = if (totalChunks == 1) transferId else sha256Hex(encodedFile)
-                connectionManager.broadcastPacketAwait(RoutedPacket(signPacketBeforeBroadcast(packet), transferId = wireTransferId))
-                if (totalChunks > 1) {
-                    TransferProgressManager.progress(transferId, chunkIndex + 1, totalChunks)
-                }
-                if (totalChunks > 1 && chunkIndex < totalChunks - 1) {
-                    delay(40L)
-                }
+                preparedPackets.add(signPacketBeforeBroadcast(packet) to encodedFile)
             }
-            if (totalChunks > 1) {
-                TransferProgressManager.complete(transferId, totalChunks)
-            }
+            transmitChunkedPacketsWithProgress(
+                transferId = transferId,
+                packets = preparedPackets,
+                targetPeerID = memberPeerID,
+                retryOnMissingAckForPeer = memberPeerID
+            )
         } catch (e: Exception) {
             Log.w(TAG, "Failed to send mesh media to $memberPeerID: ${e.message}")
         }
@@ -1755,12 +1804,15 @@ class BluetoothMeshService(private val context: Context) {
                     )
                 }
             }
-        } else if (retryCount < 6) {
+        } else if (retryCount < 10) {
             synchronized(pendingMeshMediaQueue) {
                 pendingMeshMediaQueue[peerID] = mediaToSend.toMutableList()
             }
+            if (encryptionService.getSessionState(peerID) !is com.seamless.android.noise.NoiseSession.NoiseSessionState.Handshaking) {
+                messageHandler.delegate?.initiateNoiseHandshake(peerID)
+            }
             serviceScope.launch {
-                delay(5000)
+                delay(600)
                 flushPendingMeshMedia(peerID, retryCount + 1)
             }
         } else {
@@ -1884,7 +1936,7 @@ class BluetoothMeshService(private val context: Context) {
                 
                 // Schedule retry after a short delay to allow handshake to complete
                 serviceScope.launch {
-                    kotlinx.coroutines.delay(2000) // Wait 2 seconds for handshake
+                    kotlinx.coroutines.delay(450)
                     flushPendingMessages(recipientPeerID)
                     flushPendingFiles(recipientPeerID) // Also flush pending files
                 }
@@ -1919,14 +1971,17 @@ class BluetoothMeshService(private val context: Context) {
                 )
                 Log.d(TAG, "📤 Flushed pending message to ${pending.recipientPeerID}")
             }
-        } else if (retryCount < 6) {
-            // Retry with limit to prevent infinite coroutine leak
-            Log.d(TAG, "⏳ Still no session with $peerID, will retry in 5 seconds (${retryCount + 1}/6)")
+        } else if (retryCount < 10) {
+            // Retry quickly while handshake completes
+            Log.d(TAG, "⏳ Still no session with $peerID, retrying in 600ms (${retryCount + 1}/10)")
             synchronized(pendingMessagesQueue) {
                 pendingMessagesQueue[peerID] = messagesToSend.toMutableList()
             }
+            if (encryptionService.getSessionState(peerID) !is com.seamless.android.noise.NoiseSession.NoiseSessionState.Handshaking) {
+                messageHandler.delegate?.initiateNoiseHandshake(peerID)
+            }
             serviceScope.launch {
-                kotlinx.coroutines.delay(5000)
+                kotlinx.coroutines.delay(600)
                 flushPendingMessages(peerID, retryCount + 1)
             }
         } else {
@@ -1961,14 +2016,17 @@ class BluetoothMeshService(private val context: Context) {
                 sendFilePrivate(pending.recipientPeerID, pending.filePacket)
                 Log.d(TAG, "📤 Flushed pending file ${pending.filePacket.fileName} to $peerID")
             }
-        } else if (retryCount < 6) {
-            // Retry with limit to prevent infinite coroutine leak
-            Log.d(TAG, "⏳ Still no session with $peerID for files, will retry in 5 seconds (${retryCount + 1}/6)")
+        } else if (retryCount < 10) {
+            // Retry quickly while handshake completes
+            Log.d(TAG, "⏳ Still no session with $peerID for files, retrying in 600ms (${retryCount + 1}/10)")
             synchronized(pendingFilesQueue) {
                 pendingFilesQueue[peerID] = filesToSend.toMutableList()
             }
+            if (encryptionService.getSessionState(peerID) !is com.seamless.android.noise.NoiseSession.NoiseSessionState.Handshaking) {
+                messageHandler.delegate?.initiateNoiseHandshake(peerID)
+            }
             serviceScope.launch {
-                kotlinx.coroutines.delay(5000)
+                kotlinx.coroutines.delay(600)
                 flushPendingFiles(peerID, retryCount + 1)
             }
         } else {
@@ -2034,14 +2092,17 @@ class BluetoothMeshService(private val context: Context) {
                     Log.w(TAG, "Failed to flush mesh message to $peerID: ${e.message}")
                 }
             }
-        } else if (retryCount < 6) {
-            // Retry with limit to prevent infinite coroutine leak
-            Log.d(TAG, "⏳ Still no session with $peerID for mesh messages, will retry in 5 seconds (${retryCount + 1}/6)")
+        } else if (retryCount < 10) {
+            // Retry quickly while handshake completes
+            Log.d(TAG, "⏳ Still no session with $peerID for mesh messages, retrying in 600ms (${retryCount + 1}/10)")
             synchronized(pendingMeshMessagesQueue) {
                 pendingMeshMessagesQueue[peerID] = messagesToSend.toMutableList()
             }
+            if (encryptionService.getSessionState(peerID) !is com.seamless.android.noise.NoiseSession.NoiseSessionState.Handshaking) {
+                messageHandler.delegate?.initiateNoiseHandshake(peerID)
+            }
             serviceScope.launch {
-                kotlinx.coroutines.delay(5000)
+                kotlinx.coroutines.delay(600)
                 flushPendingMeshMessages(peerID, retryCount + 1)
             }
         } else {

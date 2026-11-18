@@ -38,8 +38,8 @@ object AppConstants {
     }
 
     object Fragmentation {
-        const val FRAGMENT_SIZE_THRESHOLD: Int = 150
-        const val MAX_FRAGMENT_SIZE: Int = 120
+        const val FRAGMENT_SIZE_THRESHOLD: Int = 512
+        const val MAX_FRAGMENT_SIZE: Int = 469
         const val FRAGMENT_TIMEOUT_MS: Long = 120_000L
         const val CLEANUP_INTERVAL_MS: Long = 10_000L
     }

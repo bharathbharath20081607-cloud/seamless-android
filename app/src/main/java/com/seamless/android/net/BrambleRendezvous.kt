@@ -532,6 +532,8 @@ class BrambleRendezvous private constructor(private val context: Context) {
     private fun getPrivateKeyBlob(seed: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-512")
         val hashedSeed = digest.digest(seed)
+        hashedSeed[0] = (hashedSeed[0].toInt() and 248).toByte()
+        hashedSeed[31] = ((hashedSeed[31].toInt() and 127) or 64).toByte()
         val base64Key = Base64.encodeToString(hashedSeed, Base64.NO_WRAP)
         return "ED25519-V3:$base64Key"
     }

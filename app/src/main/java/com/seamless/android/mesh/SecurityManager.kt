@@ -221,9 +221,9 @@ class SecurityManager(private val encryptionService: EncryptionService, private 
                 "${packet.timestamp}-$peerID-${packet.type}-${packet.payload.contentHashCode()}"
             }
             else -> {
-                // For other messages, use a truncated payload hash
-                val payloadHash = packet.payload.sliceArray(0 until minOf(64, packet.payload.size)).contentHashCode()
-                "${packet.timestamp}-$peerID-$payloadHash"
+                // Include type, payload size, and full payload hash so multi-chunk
+                // FILE_TRANSFER / NOISE_ENCRYPTED frames sharing a 64B header never collide.
+                "${packet.timestamp}-$peerID-${packet.type}-${packet.payload.size}-${packet.payload.contentHashCode()}"
             }
         }
     }

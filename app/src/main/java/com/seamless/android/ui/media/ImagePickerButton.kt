@@ -22,6 +22,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.seamless.android.features.media.ImageUtils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -31,14 +34,19 @@ fun ImagePickerButton(
     onImageReady: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var capturedImagePath by remember { mutableStateOf<String?>(null) }
     
     val imagePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: android.net.Uri? ->
         if (uri != null) {
-            val outPath = ImageUtils.downscaleAndSaveToAppFiles(context, uri)
-            if (!outPath.isNullOrBlank()) onImageReady(outPath)
+            scope.launch {
+                val outPath = withContext(Dispatchers.IO) {
+                    ImageUtils.downscaleAndSaveToAppFiles(context, uri)
+                }
+                if (!outPath.isNullOrBlank()) onImageReady(outPath)
+            }
         }
     }
     
@@ -47,12 +55,17 @@ fun ImagePickerButton(
     ) { success ->
         val path = capturedImagePath
         if (success && !path.isNullOrBlank()) {
-            // Downscale + correct orientation, then send; delete original
-            val outPath = com.seamless.android.features.media.ImageUtils.downscalePathAndSaveToAppFiles(context, path)
-            if (!outPath.isNullOrBlank()) {
-                onImageReady(outPath)
+            scope.launch {
+                // Downscale + correct orientation off main thread, then send; delete original
+                val outPath = withContext(Dispatchers.IO) {
+                    ImageUtils.downscalePathAndSaveToAppFiles(context, path).also {
+                        runCatching { File(path).delete() }
+                    }
+                }
+                if (!outPath.isNullOrBlank()) {
+                    onImageReady(outPath)
+                }
             }
-            runCatching { File(path).delete() }
         } else {
             // Cleanup on cancel/failure
             path?.let { runCatching { File(it).delete() } }

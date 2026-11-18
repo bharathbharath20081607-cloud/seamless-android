@@ -170,6 +170,7 @@ class CallAudioEngine(
                 )
                 .setBufferSizeInBytes(minTrackBuf * 2)
                 .setTransferMode(AudioTrack.MODE_STREAM)
+                .setSessionId(record.audioSessionId)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 trackBuilder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
@@ -249,12 +250,20 @@ class CallAudioEngine(
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val devices = audioManager.availableCommunicationDevices
-                val targetType = if (enabled) {
-                    AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                val targetDevice = if (enabled) {
+                    devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
                 } else {
-                    AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                    val externalTypes = listOf(
+                        AudioDeviceInfo.TYPE_BLE_HEADSET,
+                        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                        AudioDeviceInfo.TYPE_USB_HEADSET,
+                        AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                        AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+                    )
+                    externalTypes.firstNotNullOfOrNull { extType ->
+                        devices.firstOrNull { it.type == extType }
+                    } ?: devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
                 }
-                val targetDevice = devices.firstOrNull { it.type == targetType }
                 if (targetDevice != null) {
                     val ok = audioManager.setCommunicationDevice(targetDevice)
                     if (!ok) {
@@ -337,7 +346,10 @@ class CallAudioEngine(
             var totalRead = 0
             while (totalRead < targetSamples && running.get()) {
                 val read = record.read(pcmBuffer, totalRead, targetSamples - totalRead)
-                if (read <= 0) break
+                if (read <= 0) {
+                    try { Thread.sleep(10L) } catch (_: Exception) {}
+                    break
+                }
                 totalRead += read
             }
             if (totalRead < targetSamples || !running.get()) continue
@@ -439,9 +451,9 @@ class CallAudioEngine(
             }
 
             var frame = jitterQueue.poll()
-            // Only discard frames that are genuinely stale (> 8 frames behind lastPlayedSequence).
-            // Slightly out-of-order frames within the 8-frame window are still played cleanly!
-            while (frame != null && lastPlayedSequence != -1L && frame.sequence < lastPlayedSequence - 8L) {
+            // Strictly drop any frame at or behind lastPlayedSequence so late packets
+            // never cause time-reversal glitches.
+            while (frame != null && lastPlayedSequence != -1L && frame.sequence <= lastPlayedSequence) {
                 frame = jitterQueue.poll()
             }
 

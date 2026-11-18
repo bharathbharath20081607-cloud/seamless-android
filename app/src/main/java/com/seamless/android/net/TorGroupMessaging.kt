@@ -11,6 +11,7 @@ import com.seamless.android.data.PrivateGroupEntity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -139,6 +140,9 @@ class TorGroupMessaging private constructor(context: Context) {
     private val _deliveryProgressFlow = MutableStateFlow<Map<String, Pair<Int, Int>>>(emptyMap())
     val deliveryProgressFlow: StateFlow<Map<String, Pair<Int, Int>>> = _deliveryProgressFlow.asStateFlow()
 
+    private val _lastReadAtFlow = MutableStateFlow<Map<String, Long>>(emptyMap())
+    val lastReadAtFlow: StateFlow<Map<String, Long>> = _lastReadAtFlow.asStateFlow()
+
     // messageId -> (senderNickname -> emoji)
     private val _reactionsFlow = MutableStateFlow<Map<String, Map<String, String>>>(emptyMap())
     val reactionsFlow: StateFlow<Map<String, Map<String, String>>> = _reactionsFlow.asStateFlow()
@@ -148,14 +152,31 @@ class TorGroupMessaging private constructor(context: Context) {
 
     init {
         loadSavedReactions()
+        loadSavedReadTimestamps()
     }
 
     // ───────────────────────────── Read state ─────────────────────────────
 
-    fun lastReadAt(groupId: String): Long = prefs.getLong("read:$groupId", 0L)
+    fun lastReadAt(groupId: String): Long =
+        _lastReadAtFlow.value[groupId] ?: prefs.getLong("read:$groupId", 0L)
 
     fun markRead(groupId: String) {
-        prefs.edit().putLong("read:$groupId", System.currentTimeMillis()).apply()
+        val now = System.currentTimeMillis()
+        prefs.edit().putLong("read:$groupId", now).apply()
+        _lastReadAtFlow.update { it + (groupId to now) }
+        notifier.cancelGroup(groupId)
+    }
+
+    private fun loadSavedReadTimestamps() {
+        runCatching {
+            val loaded = mutableMapOf<String, Long>()
+            prefs.all.forEach { (key, value) ->
+                if (key.startsWith("read:") && value is Long) {
+                    loaded[key.removePrefix("read:")] = value
+                }
+            }
+            _lastReadAtFlow.value = loaded
+        }
     }
 
     // ───────────────────────────── Commands ─────────────────────────────
@@ -267,9 +288,10 @@ class TorGroupMessaging private constructor(context: Context) {
         require(group.isCreatedByMe) {
             "Only the group creator can remove members"
         }
-        val target = memberOnion.trim().lowercase()
-        require(target != me.onionAddress.lowercase()) { "Use leave to exit your own group" }
-        val removed = requireNotNull(members.firstOrNull { it.memberOnionAddress.lowercase() == target }) {
+        val target = canonical(memberOnion)
+        val myCanonical = canonical(me.onionAddress)
+        require(target != myCanonical) { "Use leave to exit your own group" }
+        val removed = requireNotNull(members.firstOrNull { canonical(it.memberOnionAddress) == target }) {
             "Member not found"
         }
         groupDao.removeMember(groupId, removed.memberOnionAddress)
@@ -282,7 +304,7 @@ class TorGroupMessaging private constructor(context: Context) {
                 member = WireMember(removed.memberOnionAddress, removed.memberNickname)
             )
         )
-        members.filter { it.memberOnionAddress != me.onionAddress }
+        members.filter { canonical(it.memberOnionAddress) != myCanonical }
             .forEach { queue(it.memberOnionAddress, event) }
     }
 
@@ -292,6 +314,7 @@ class TorGroupMessaging private constructor(context: Context) {
         val me = contacts.getMyContactInfo()
         ensureLocalMembership(group, me)
         val members = groupDao.getMembersForGroupNow(groupId)
+        val myCanonical = canonical(me.onionAddress)
         val event = encode(
             WireEvent(
                 type = "leave",
@@ -300,7 +323,7 @@ class TorGroupMessaging private constructor(context: Context) {
                 member = WireMember(me.onionAddress, me.nickname)
             )
         )
-        members.filter { it.memberOnionAddress != me.onionAddress }
+        members.filter { canonical(it.memberOnionAddress) != myCanonical }
             .forEach { queue(it.memberOnionAddress, event) }
         deleteLocal(groupId)
     }
@@ -317,18 +340,27 @@ class TorGroupMessaging private constructor(context: Context) {
         val clean = newName.trim()
         require(clean.length in 1..80) { "Group name must be between 1 and 80 characters" }
         groupDao.renameGroup(groupId, clean)
+        val myCanonical = canonical(me.onionAddress)
         val event = encode(WireEvent(type = "rename", groupId = groupId, groupName = clean, creatorOnion = me.onionAddress))
-        members.filter { it.memberOnionAddress != me.onionAddress }
+        members.filter { canonical(it.memberOnionAddress) != myCanonical }
             .forEach { queue(it.memberOnionAddress, event) }
     }
 
     /** Deletes the local copy only (history + roster). Does not notify anyone. */
     suspend fun deleteLocal(groupId: String) {
+        val existingMessages = runCatching { groupDao.getGroupMessages(groupId).first() }.getOrDefault(emptyList())
+        existingMessages.forEach { msg ->
+            msg.attachmentPath?.let { path ->
+                runCatching { File(path).delete() }
+            }
+        }
         groupDao.deleteMessagesForGroup(groupId)
         groupDao.deleteMembersForGroup(groupId)
         groupDao.deleteGroupById(groupId)
-        clearTracking(groupId)
+        clearTracking(groupId, existingMessages.map { it.id })
         prefs.edit().remove("read:$groupId").apply()
+        _lastReadAtFlow.update { it - groupId }
+        notifier.cancelGroup(groupId)
     }
 
     suspend fun sendGroupMessage(
@@ -390,23 +422,29 @@ class TorGroupMessaging private constructor(context: Context) {
             error("Verify group members before sending")
         }
 
+        val plannedIds = recipients.associateWith { UUID.randomUUID() }
+        trackDelivery(id, plannedIds.values.map { it.toString() }, expectedRecipients.size)
         val accepted = mutableListOf<String>()
+        val failedIds = mutableListOf<String>()
         var failed = expectedRecipients.size - recipients.size
-        recipients.forEach { contact ->
-            val perRecipientId = UUID.randomUUID()
+        plannedIds.forEach { (contact, perRecipientId) ->
             val ok = TorMessagingService.getInstance(appContext).sendMessageToOnion(
                 recipientOnion = contact.onionAddress,
                 text = payload,
                 messageId = perRecipientId,
                 completesUiMessage = false
             ).isSuccess
-            if (ok) accepted += perRecipientId.toString() else failed++
+            if (ok) accepted += perRecipientId.toString() else {
+                failed++
+                failedIds += perRecipientId.toString()
+            }
         }
+        untrackFailedRecipients(id, failedIds)
         if (accepted.isEmpty()) {
+            _deliveryProgressFlow.update { it - id }
             groupDao.updateGroupMessageState(id, STATE_FAILED)
             error("Could not queue message for any member")
         }
-        trackDelivery(id, accepted)
         if (failed > 0) {
             groupDao.updateGroupMessageState(id, STATE_PARTIAL)
         }
@@ -442,16 +480,22 @@ class TorGroupMessaging private constructor(context: Context) {
             val bytes = File(attachmentPath).takeIf { it.exists() }?.readBytes()
                 ?: error("Attachment file no longer available")
             val mime = existing.attachmentMimeType ?: "image/jpeg"
-            val transportIds = recipients.mapNotNull { contact ->
-                TorMessagingService.getInstance(appContext)
-                    .sendImage(contact.id, bytes, mime, group.groupId, messageId)
+            val plannedChunkIds = recipients.associateWith { UUID.randomUUID() }
+            trackDelivery(messageId, plannedChunkIds.values.map { it.toString() }, expectedRecipients.size)
+            val failedIds = mutableListOf<String>()
+            val transportIds = plannedChunkIds.mapNotNull { (contact, chunkId) ->
+                val sentId = TorMessagingService.getInstance(appContext)
+                    .sendImage(contact.id, bytes, mime, group.groupId, messageId, finalChunkMessageId = chunkId)
                     .getOrNull()
+                if (sentId == null) failedIds += chunkId.toString()
+                sentId
             }
+            untrackFailedRecipients(messageId, failedIds)
             if (transportIds.isEmpty()) {
+                _deliveryProgressFlow.update { it - messageId }
                 groupDao.updateGroupMessageState(messageId, STATE_FAILED)
                 error("Could not queue group photo retry")
             }
-            trackDelivery(messageId, transportIds)
             if (transportIds.size != expectedRecipients.size) {
                 groupDao.updateGroupMessageState(messageId, STATE_PARTIAL)
             }
@@ -470,23 +514,29 @@ class TorGroupMessaging private constructor(context: Context) {
                 replyToPreview = parsed.replyToPreview
             )
         )
+        val plannedIds = recipients.associateWith { UUID.randomUUID() }
+        trackDelivery(messageId, plannedIds.values.map { it.toString() }, expectedRecipients.size)
         val accepted = mutableListOf<String>()
+        val failedIds = mutableListOf<String>()
         var failed = expectedRecipients.size - recipients.size
-        recipients.forEach { contact ->
-            val perRecipientId = UUID.randomUUID()
+        plannedIds.forEach { (contact, perRecipientId) ->
             val ok = TorMessagingService.getInstance(appContext).sendMessageToOnion(
                 recipientOnion = contact.onionAddress,
                 text = payload,
                 messageId = perRecipientId,
                 completesUiMessage = false
             ).isSuccess
-            if (ok) accepted += perRecipientId.toString() else failed++
+            if (ok) accepted += perRecipientId.toString() else {
+                failed++
+                failedIds += perRecipientId.toString()
+            }
         }
+        untrackFailedRecipients(messageId, failedIds)
         if (accepted.isEmpty()) {
+            _deliveryProgressFlow.update { it - messageId }
             groupDao.updateGroupMessageState(messageId, STATE_FAILED)
             error("Could not queue message for any member")
         }
-        trackDelivery(messageId, accepted)
         if (failed > 0) {
             groupDao.updateGroupMessageState(messageId, STATE_PARTIAL)
         }
@@ -547,14 +597,22 @@ class TorGroupMessaging private constructor(context: Context) {
             groupDao.updateGroupMessageState(id, STATE_FAILED)
             error("Verify group members before sending media")
         }
-        val transportIds = recipients.mapNotNull { contact ->
-            TorMessagingService.getInstance(appContext).sendImage(contact.id, image, mimeType, groupId, id).getOrNull()
+        val plannedChunkIds = recipients.associateWith { UUID.randomUUID() }
+        trackDelivery(id, plannedChunkIds.values.map { it.toString() }, expectedRecipients.size)
+        val failedIds = mutableListOf<String>()
+        val transportIds = plannedChunkIds.mapNotNull { (contact, chunkId) ->
+            val sentId = TorMessagingService.getInstance(appContext)
+                .sendImage(contact.id, image, mimeType, groupId, id, finalChunkMessageId = chunkId)
+                .getOrNull()
+            if (sentId == null) failedIds += chunkId.toString()
+            sentId
         }
+        untrackFailedRecipients(id, failedIds)
         if (transportIds.isEmpty()) {
+            _deliveryProgressFlow.update { it - id }
             groupDao.updateGroupMessageState(id, STATE_FAILED)
             error("Could not queue group photo")
         }
-        trackDelivery(id, transportIds)
         if (transportIds.size != expectedRecipients.size) {
             groupDao.updateGroupMessageState(id, STATE_PARTIAL)
         }
@@ -575,22 +633,46 @@ class TorGroupMessaging private constructor(context: Context) {
 
     // ───────────────────── Delivery tracking (ACK driven) ─────────────────────
 
-    private fun trackDelivery(groupMessageId: String, perRecipientIds: List<String>) {
+    private fun trackDelivery(
+        groupMessageId: String,
+        perRecipientIds: List<String>,
+        totalExpected: Int = perRecipientIds.size
+    ) {
+        val expected = totalExpected.coerceAtLeast(1)
         synchronized(prefsLock) {
             val e = prefs.edit()
             perRecipientIds.forEach { e.putString("p:$it", groupMessageId) }
-            e.putInt("n:$groupMessageId", perRecipientIds.size)
+            e.putInt("n:$groupMessageId", expected)
             e.putInt("a:$groupMessageId", 0)
             e.apply()
         }
         _deliveryProgressFlow.update { current ->
-            current + (groupMessageId to (0 to perRecipientIds.size))
+            current + (groupMessageId to (0 to expected))
         }
     }
 
-    private fun clearTracking(groupId: String) {
-        // Tracking keys are tiny and keyed by message id; stale ones are inert
-        // because the group message row they update no longer exists.
+    private fun untrackFailedRecipients(groupMessageId: String, failedIds: List<String>) {
+        if (failedIds.isEmpty()) return
+        synchronized(prefsLock) {
+            val e = prefs.edit()
+            failedIds.forEach { e.remove("p:$it") }
+            e.apply()
+        }
+    }
+
+    private fun clearTracking(groupId: String, messageIds: List<String> = emptyList()) {
+        if (messageIds.isEmpty()) return
+        synchronized(prefsLock) {
+            val e = prefs.edit()
+            messageIds.forEach { msgId ->
+                e.remove("n:$msgId")
+                e.remove("a:$msgId")
+                e.remove("react:$msgId")
+            }
+            e.apply()
+        }
+        _deliveryProgressFlow.update { it - messageIds.toSet() }
+        _reactionsFlow.update { it - messageIds.toSet() }
     }
 
     /**
@@ -734,13 +816,16 @@ class TorGroupMessaging private constructor(context: Context) {
     }
 
     private suspend fun handleInvite(sender: OnionContactManager.OnionContact, event: WireEvent): InboundResult {
-        if (event.creatorOnion != sender.onionAddress || event.groupName.trim().length !in 1..80) {
+        val canonicalCreator = canonical(event.creatorOnion)
+        val canonicalSender = canonical(sender.onionAddress)
+        if (canonicalCreator != canonicalSender || event.groupName.trim().length !in 1..80) {
             return InboundResult.REJECTED
         }
         val me = contacts.getMyContactInfo()
+        val myCanonical = canonical(me.onionAddress)
         val normalizedMembers = event.members.map { member ->
             WireMember(
-                onionAddress = member.onionAddress.trim().lowercase(),
+                onionAddress = canonical(member.onionAddress),
                 nickname = member.nickname.trim(),
                 publicKey = member.publicKey.trim().lowercase(),
                 mailboxOnion = member.mailboxOnion
@@ -759,22 +844,22 @@ class TorGroupMessaging private constructor(context: Context) {
                     member.nickname.length in 1..80 &&
                     member.publicKey.matches(HEX_PUBLIC_KEY)
             }
-        if (!validMembers || normalizedMembers.none { it.onionAddress == me.onionAddress.lowercase() }) {
+        if (!validMembers || normalizedMembers.none { it.onionAddress == myCanonical }) {
             return InboundResult.REJECTED
         }
         val creatorMembership = normalizedMembers.firstOrNull {
-            it.onionAddress == sender.onionAddress.lowercase()
+            it.onionAddress == canonicalSender
         }
         if (creatorMembership == null || !creatorMembership.publicKey.equals(sender.publicKey, ignoreCase = true)) {
             return InboundResult.REJECTED
         }
         val existing = groupDao.getGroup(event.groupId)
-        if (existing != null && existing.creatorOnionAddress != sender.onionAddress) return InboundResult.REJECTED
+        if (existing != null && canonical(existing.creatorOnionAddress) != canonicalSender) return InboundResult.REJECTED
         groupDao.insertGroup(
             PrivateGroupEntity(
                 groupId = event.groupId,
                 name = event.groupName.trim(),
-                creatorOnionAddress = sender.onionAddress,
+                creatorOnionAddress = canonicalSender,
                 creatorNickname = sender.nickname,
                 isCreatedByMe = false,
                 createdAt = existing?.createdAt ?: System.currentTimeMillis()
@@ -782,7 +867,7 @@ class TorGroupMessaging private constructor(context: Context) {
         )
         val keep = normalizedMembers.map { it.onionAddress }.toSet()
         groupDao.getMembersForGroupNow(event.groupId)
-            .filter { it.memberOnionAddress.lowercase() !in keep }
+            .filter { canonical(it.memberOnionAddress) !in keep }
             .forEach { groupDao.removeMember(event.groupId, it.memberOnionAddress) }
         normalizedMembers.forEach { member ->
             groupDao.insertMember(GroupMemberEntity(event.groupId, member.onionAddress, member.nickname))
@@ -816,18 +901,19 @@ class TorGroupMessaging private constructor(context: Context) {
     private suspend fun handleMemberAdded(sender: OnionContactManager.OnionContact, event: WireEvent): InboundResult {
         val group = groupDao.getGroup(event.groupId) ?: return InboundResult.REJECTED
         val member = event.member ?: return InboundResult.REJECTED
-        if (group.creatorOnionAddress != sender.onionAddress ||
+        if (canonical(group.creatorOnionAddress) != canonical(sender.onionAddress) ||
             member.onionAddress.isBlank() ||
             member.nickname.trim().length !in 1..80 ||
             !member.publicKey.trim().matches(HEX_PUBLIC_KEY)
         ) {
             return InboundResult.REJECTED
         }
+        val normalizedOnion = canonical(member.onionAddress)
         if (groupDao.getMemberCount(event.groupId) >= MAX_MEMBERS &&
-            groupDao.getMember(event.groupId, member.onionAddress) == null
+            !isGroupMember(event.groupId, normalizedOnion)
         ) return InboundResult.REJECTED
         val normalized = member.copy(
-            onionAddress = member.onionAddress.trim().lowercase(),
+            onionAddress = normalizedOnion,
             nickname = member.nickname.trim(),
             publicKey = member.publicKey.trim().lowercase(),
             mailboxOnion = member.mailboxOnion
@@ -840,39 +926,49 @@ class TorGroupMessaging private constructor(context: Context) {
         }
         groupDao.insertMember(GroupMemberEntity(event.groupId, normalized.onionAddress, normalized.nickname))
         importGroupPeer(normalized, contacts.getMyContactInfo().onionAddress)
+        insertSystemBanner(event.groupId, "${normalized.nickname} joined the group")
         return InboundResult.HANDLED
     }
 
     private suspend fun handleMemberRemoved(sender: OnionContactManager.OnionContact, event: WireEvent): InboundResult {
         val group = groupDao.getGroup(event.groupId) ?: return InboundResult.HANDLED
-        if (group.creatorOnionAddress != sender.onionAddress) return InboundResult.REJECTED
-        val target = event.member?.onionAddress?.trim()?.lowercase() ?: return InboundResult.REJECTED
+        if (canonical(group.creatorOnionAddress) != canonical(sender.onionAddress)) return InboundResult.REJECTED
+        val target = canonical(event.member?.onionAddress ?: return InboundResult.REJECTED)
         val me = contacts.getMyContactInfo()
-        if (target == me.onionAddress.lowercase()) {
+        if (target == canonical(me.onionAddress)) {
             notifier.showGroupEvent(event.groupId, group.name, "You were removed from this group")
             deleteLocal(event.groupId)
         } else {
-            groupDao.getMembersForGroupNow(event.groupId)
-                .firstOrNull { it.memberOnionAddress.lowercase() == target }
-                ?.let { groupDao.removeMember(event.groupId, it.memberOnionAddress) }
+            val removed = groupDao.getMembersForGroupNow(event.groupId)
+                .firstOrNull { canonical(it.memberOnionAddress) == target }
+            if (removed != null) {
+                groupDao.removeMember(event.groupId, removed.memberOnionAddress)
+                insertSystemBanner(event.groupId, "${removed.memberNickname} was removed")
+            }
         }
         return InboundResult.HANDLED
     }
 
     private suspend fun handleLeave(sender: OnionContactManager.OnionContact, event: WireEvent): InboundResult {
         if (groupDao.getGroup(event.groupId) == null) return InboundResult.HANDLED
-        groupDao.getMember(event.groupId, sender.onionAddress)?.let {
-            groupDao.removeMember(event.groupId, it.memberOnionAddress)
+        val senderCanonical = canonical(sender.onionAddress)
+        val leaving = groupDao.getMembersForGroupNow(event.groupId)
+            .firstOrNull { canonical(it.memberOnionAddress) == senderCanonical }
+        if (leaving != null) {
+            groupDao.removeMember(event.groupId, leaving.memberOnionAddress)
+            insertSystemBanner(event.groupId, "${leaving.memberNickname} left the group")
         }
         return InboundResult.HANDLED
     }
 
     private suspend fun handleRename(sender: OnionContactManager.OnionContact, event: WireEvent): InboundResult {
         val group = groupDao.getGroup(event.groupId) ?: return InboundResult.REJECTED
-        if (group.creatorOnionAddress != sender.onionAddress || event.groupName.trim().length !in 1..80) {
+        if (canonical(group.creatorOnionAddress) != canonical(sender.onionAddress) || event.groupName.trim().length !in 1..80) {
             return InboundResult.REJECTED
         }
-        groupDao.renameGroup(event.groupId, event.groupName.trim())
+        val cleanName = event.groupName.trim()
+        groupDao.renameGroup(event.groupId, cleanName)
+        insertSystemBanner(event.groupId, "${sender.nickname} renamed the group to $cleanName")
         return InboundResult.HANDLED
     }
 
@@ -984,8 +1080,28 @@ class TorGroupMessaging private constructor(context: Context) {
             effectiveTrustState() != TorContactTrustState.BLOCKED &&
             effectiveTrustState() != TorContactTrustState.KEY_CHANGED
 
+    private fun canonical(endpoint: String): String =
+        OnionContactManager.OnionContact.canonicalizeOnionEndpoint(endpoint).ifBlank {
+            endpoint.trim().lowercase()
+        }
+
+    private suspend fun insertSystemBanner(groupId: String, text: String) {
+        groupDao.insertGroupMessageIfAbsent(
+            GroupMessageEntity(
+                id = UUID.randomUUID().toString(),
+                groupId = groupId,
+                senderOnionAddress = SYSTEM_SENDER,
+                senderNickname = SYSTEM_SENDER,
+                text = text,
+                timestamp = System.currentTimeMillis(),
+                isFromMe = false,
+                deliveryState = STATE_DELIVERED
+            )
+        )
+    }
+
     private fun importGroupPeer(member: WireMember, myOnionAddress: String) {
-        if (member.onionAddress == myOnionAddress.lowercase()) return
+        if (canonical(member.onionAddress) == canonical(myOnionAddress)) return
         val wasKnown = contacts.getContactByOnion(member.onionAddress) != null
         contacts.addContact(
             OnionContactManager.OnionContact(
