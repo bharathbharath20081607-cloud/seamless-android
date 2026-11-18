@@ -25,7 +25,7 @@
 
 ## Overview
 
-**Seamless** is an advanced peer-to-peer communication client engineered by Aquarius Groups. It provides private, censorship-resistant messaging across multiple complementary transports:
+**Seamless** is an advanced peer-to-peer communication client engineered by AJ, JD, DR. It provides private, censorship-resistant messaging across multiple complementary transports:
 
 1. **Local Bluetooth Low Energy (BLE) Mesh (100% Offline)**: Communicate with nearby peers without internet, Wi-Fi, or cellular towers. Messages automatically hop across intermediate devices to reach distant recipients.
 2. **Tor v3 Onion Services (Global Internet P2P & Group Rooms)**: Private 1:1 and multi-party group communication routed through end-to-end encrypted Tor hidden services and untrusted offline store-and-forward mailboxes. IP addresses are completely masked with zero central servers.
@@ -203,7 +203,7 @@ Seamless features an IRC-inspired command line interface directly in the chat ba
 | **[Nordic Semiconductor BLE](https://github.com/NordicSemiconductor/Android-BLE-Library)** & **[NanoHTTPD](https://github.com/NanoHttpd/nanohttpd)** | Reliable Android BLE GATT operations and embedded Tor mailbox HTTP server. | BSD-3-Clause License |
 
 ### Summary of Major Modifications & Upgrades (per GPLv3 §5a)
-While preserving wire compatibility with the `bitchat` BLE mesh protocol, **Seamless** has been extensively modified and expanded (2025–2026) by Aquarius Groups with new subsystems:
+While preserving wire compatibility with the `bitchat` BLE mesh protocol, **Seamless** has been extensively modified and expanded (2025–2026) by AJ, JD, DR with new subsystems:
 - **Global Tor v3 Onion P2P Engine**: Dual-engine Arti + C-Tor hidden service hosting, IPv6-aware guard selection, persistent circuit pooling, and `.onion` peer-to-peer messaging.
 - **Encrypted Tor Group Messaging**: Multi-party Tor group chat with canonical `groupMessageId` synchronization, quoted replies, encrypted emoji reactions, live per-recipient delivery counters, and one-tap retry.
 - **Untrusted Offline Mailboxes**: Embedded NanoHTTPD Tor mailbox server and client for asynchronous store-and-forward delivery when peers are offline.
@@ -212,7 +212,7 @@ While preserving wire compatibility with the `bitchat` BLE mesh protocol, **Seam
 - **Obsidian & Optical Light UI**: Complete Jetpack Compose redesign, voice notes with dynamic waveforms, full-screen photo lightbox, and biometric app lock.
 
 ### Trademark & Non-Endorsement Disclaimer
-*Seamless is an independent open-source project developed by Aquarius Groups. It is **not** affiliated with, sponsored by, or officially endorsed by PermissionlessTech (`bitchat`), The Briar Project, The Tor Project, Inc., The Guardian Project, Open Privacy (`Cwtch`), Signal Technology Foundation, or Zetetic LLC. "Tor" and the "Onion Logo" are registered trademarks of The Tor Project, Inc.*
+*Seamless is an independent open-source project developed by AJ, JD, DR. It is **not** affiliated with, sponsored by, or officially endorsed by PermissionlessTech (`bitchat`), The Briar Project, The Tor Project, Inc., The Guardian Project, Open Privacy (`Cwtch`), Signal Technology Foundation, or Zetetic LLC. "Tor" and the "Onion Logo" are registered trademarks of The Tor Project, Inc.*
 
 ---
 
@@ -237,6 +237,6 @@ This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**
 ---
 
 <p align="center">
-    <strong>Engineered with privacy by Aquarius Groups.</strong><br>
+    <strong>Engineered with privacy by AJ, JD, DR.</strong><br>
     <em>Zero central servers. Zero phone numbers. Pure encrypted communication.</em>
 </p>
