@@ -20,6 +20,10 @@ class SeamlessApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        com.seamless.android.util.AppForegroundTracker.init(this)
+        com.seamless.android.util.AppForegroundTracker.addOnEnterForegroundListener {
+            runCatching { com.seamless.android.net.TorMessageNotifier(this@SeamlessApplication).cancelAllMessageNotifications() }
+        }
         
         // PRODUCTION FIX: Install global uncaught exception handler to log crashes
         installGlobalExceptionHandler()

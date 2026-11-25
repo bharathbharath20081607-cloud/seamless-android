@@ -71,10 +71,26 @@ class TorBackgroundWorker(
             // Start the TorMessagingService (includes mailbox polling)
             messagingService.start()
 
-            // Keep the worker alive for 3 minutes to allow Tor to bootstrap, send all queued messages,
-            // poll mailboxes for offline messages, and receive any inbound messages/receipts.
-            Log.i(TAG, "⏳ Waiting 3 minutes for Tor P2P sync + mailbox poll to complete...")
-            delay(3 * 60 * 1000L)
+            // Wait up to 90s for Tor + messaging stack to reach RUNNING, then flush & poll immediately
+            val bootstrapDeadlineMs = System.currentTimeMillis() + 90_000L
+            while (System.currentTimeMillis() < bootstrapDeadlineMs) {
+                if (messagingService.serviceState.value == TorMessagingService.ServiceState.RUNNING) {
+                    break
+                }
+                delay(5_000L)
+            }
+
+            if (messagingService.serviceState.value == TorMessagingService.ServiceState.RUNNING) {
+                messagingService.onNetworkRestored()
+            } else {
+                Log.w(TAG, "⏳ Tor did not reach RUNNING within 90s (state=${messagingService.serviceState.value})")
+            }
+
+            // Listen for inbound replies/receipts (longer window if queue still has pending items)
+            val remainingAfterReady = queue.getAllPendingMessages().values.sumOf { it.size }
+            val listenMs = if (remainingAfterReady > 0) 90_000L else 45_000L
+            Log.i(TAG, "⏳ Listening ${listenMs / 1000}s for Tor P2P sync/replies (pending=$remainingAfterReady)...")
+            delay(listenMs)
 
             // Force a final mailbox poll before sleeping
             if (mailboxClient.isInitialized() && mailboxClient.getMailboxes().isNotEmpty()) {

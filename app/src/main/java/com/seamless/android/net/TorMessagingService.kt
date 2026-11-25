@@ -63,7 +63,7 @@ class TorMessagingService private constructor(private val context: Context) {
         // How long a delivery waits for a cold onion rendezvous before also
         // depositing in the peer's mailbox. The dial itself is never cancelled
         // (see TorCircuitManager.getConnectionWithin), so this only bounds latency.
-        private const val INITIAL_DIRECT_DIAL_BUDGET_MS = 20_000L
+        private const val INITIAL_DIRECT_DIAL_BUDGET_MS = 4_500L
         // Leave room for the encrypted envelope and fixed Tor frame metadata.
         // Enforce this at queue time so an accepted message is always sendable.
         private const val MAX_DIRECT_TEXT_BYTES = 3_700
@@ -118,10 +118,148 @@ class TorMessagingService private constructor(private val context: Context) {
     // Connected peers — observable from UI for presence indicators
     private val _connectedPeers = MutableStateFlow<Set<String>>(emptySet())
     val connectedPeersFlow: StateFlow<Set<String>> = _connectedPeers.asStateFlow()
+    private val _lanPeersFlow = MutableStateFlow<Set<String>>(emptySet())
+    val lanPeersFlow: StateFlow<Set<String>> = _lanPeersFlow.asStateFlow()
     private val _typingPeers = MutableStateFlow<Map<String, Long>>(emptyMap())
     val typingPeersFlow: StateFlow<Set<String>> = _typingPeers
         .map { it.keys }
         .stateIn(scope, SharingStarted.Eagerly, emptySet())
+
+    // 1-to-1 Rich Chat State sidecar (zero Room DB schema migration)
+    private val directRichLock = Any()
+    @Suppress("DEPRECATION")
+    private val directRichPrefs: android.content.SharedPreferences by lazy {
+        try {
+            val masterKey = androidx.security.crypto.MasterKey.Builder(
+                context,
+                androidx.security.crypto.MasterKey.DEFAULT_MASTER_KEY_ALIAS
+            )
+                .setKeyScheme(androidx.security.crypto.MasterKey.KeyScheme.AES256_GCM)
+                .build()
+            androidx.security.crypto.EncryptedSharedPreferences.create(
+                context,
+                "tor_direct_rich_state",
+                masterKey,
+                androidx.security.crypto.EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                androidx.security.crypto.EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "EncryptedSharedPreferences unavailable for rich state (${e.message}); falling back")
+            context.getSharedPreferences("tor_direct_rich_state_plain", Context.MODE_PRIVATE)
+        }
+    }
+
+    private val _directReactionsFlow = MutableStateFlow<Map<String, Map<String, String>>>(emptyMap())
+    val directReactionsFlow: StateFlow<Map<String, Map<String, String>>> = _directReactionsFlow.asStateFlow()
+
+    private val _directEditedIdsFlow = MutableStateFlow<Set<String>>(emptySet())
+    val directEditedIdsFlow: StateFlow<Set<String>> = _directEditedIdsFlow.asStateFlow()
+
+    private val _directDeletedIdsFlow = MutableStateFlow<Set<String>>(emptySet())
+    val directDeletedIdsFlow: StateFlow<Set<String>> = _directDeletedIdsFlow.asStateFlow()
+
+    private val _directBurnedIdsFlow = MutableStateFlow<Set<String>>(emptySet())
+    val directBurnedIdsFlow: StateFlow<Set<String>> = _directBurnedIdsFlow.asStateFlow()
+
+    private val _directShredReceiptsFlow = MutableStateFlow<Set<String>>(emptySet())
+    val directShredReceiptsFlow: StateFlow<Set<String>> = _directShredReceiptsFlow.asStateFlow()
+
+    init {
+        loadDirectRichState()
+    }
+
+    private fun loadDirectRichState() {
+        runCatching {
+            val reactions = mutableMapOf<String, Map<String, String>>()
+            val edited = mutableSetOf<String>()
+            val deleted = mutableSetOf<String>()
+            val burned = mutableSetOf<String>()
+            val shredReceipts = mutableSetOf<String>()
+            synchronized(directRichLock) {
+                directRichPrefs.all.forEach { (key, value) ->
+                    when {
+                        key.startsWith("react:") && value is String -> {
+                            val msgId = key.removePrefix("react:")
+                            val json = org.json.JSONObject(value)
+                            val perSender = mutableMapOf<String, String>()
+                            json.keys().forEach { senderKey ->
+                                val emoji = json.optString(senderKey)
+                                if (emoji.isNotBlank()) perSender[senderKey] = emoji
+                            }
+                            if (perSender.isNotEmpty()) reactions[msgId] = perSender
+                        }
+                        key.startsWith("edited:") && value == true -> edited.add(key.removePrefix("edited:"))
+                        key.startsWith("deleted:") && value == true -> deleted.add(key.removePrefix("deleted:"))
+                        key.startsWith("burned:") && value == true -> burned.add(key.removePrefix("burned:"))
+                        key.startsWith("shred:") && value == true -> shredReceipts.add(key.removePrefix("shred:"))
+                    }
+                }
+            }
+            _directReactionsFlow.value = reactions
+            _directEditedIdsFlow.value = edited
+            _directDeletedIdsFlow.value = deleted
+            _directBurnedIdsFlow.value = burned
+            _directShredReceiptsFlow.value = shredReceipts
+        }
+    }
+
+    private fun updateDirectReactionState(targetMessageId: String, actorKey: String, emoji: String, action: String) {
+        synchronized(directRichLock) {
+            val current = _directReactionsFlow.value[targetMessageId]?.toMutableMap() ?: mutableMapOf()
+            if (action == "remove" || emoji.isBlank()) {
+                current.remove(actorKey)
+            } else {
+                current[actorKey] = emoji
+            }
+            val editor = directRichPrefs.edit()
+            if (current.isEmpty()) {
+                editor.remove("react:$targetMessageId")
+                _directReactionsFlow.update { it - targetMessageId }
+            } else {
+                val json = org.json.JSONObject()
+                current.forEach { (k, v) -> json.put(k, v) }
+                editor.putString("react:$targetMessageId", json.toString())
+                _directReactionsFlow.update { it + (targetMessageId to current.toMap()) }
+            }
+            editor.apply()
+        }
+    }
+
+    enum class ActiveTransportTier {
+        PHANTOM_LAN,
+        WARP_DUAL_TOR,
+        TOR_EXPRESS
+    }
+
+    private val phantomLanBridge: PhantomLanBridge by lazy {
+        PhantomLanBridge(
+            context = context,
+            contactManager = contactManager,
+            onIncomingLanSocket = { socket -> handleIncomingSocket(socket) },
+            onPeerDiscoveredOnLan = { peer ->
+                scope.launch {
+                    if (circuitManager.upgradeToLanIfAvailable(peer)) {
+                        refreshLanPeersState()
+                        ensureReadLoop(peer)
+                        wakeQueueDispatcher()
+                    }
+                }
+            }
+        )
+    }
+
+    private fun refreshLanPeersState() {
+        _lanPeersFlow.value = circuitManager.getConnectedLanPeers().mapTo(HashSet()) { canonicalPeerKey(it) }
+    }
+
+    fun getActiveTransportTier(onionAddress: String): ActiveTransportTier {
+        val canonical = canonicalPeerKey(onionAddress)
+        return when {
+            circuitManager.isLanDirectConnection(canonical) -> ActiveTransportTier.PHANTOM_LAN
+            circuitManager.hasActiveBulkConnection(canonical) -> ActiveTransportTier.WARP_DUAL_TOR
+            else -> ActiveTransportTier.TOR_EXPRESS
+        }
+    }
     
     private var processingJob: Job? = null
     private var heartbeatJob: Job? = null
@@ -142,6 +280,7 @@ class TorMessagingService private constructor(private val context: Context) {
     // to prevent processIncomingMessages from racing on the same socket
     private val peersWithReadLoop = ConcurrentHashMap.newKeySet<String>()
     private val readLoopConnections = ConcurrentHashMap<String, String>()
+    private val bulkReadLoopConnections = ConcurrentHashMap<String, String>()
     private val visibleChatContacts = ConcurrentHashMap.newKeySet<String>()
     
     // Track peers we've introduced ourselves to on outbound connections.
@@ -163,7 +302,31 @@ class TorMessagingService private constructor(private val context: Context) {
     private val pendingAttachmentParts = ConcurrentHashMap<String, MutableSet<String>>()
     private val activeRecipientDeliveries = ConcurrentHashMap.newKeySet<String>()
     private val recipientDeliveryLocks = ConcurrentHashMap<String, Mutex>()
+    private val secureRandom = SecureRandom()
+    private val peerBulkChannels = ConcurrentHashMap<String, Channel<ByteArray>>()
+    private val peerBulkWorkers = ConcurrentHashMap<String, Job>()
+    private val directSendCounters = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
+    private val directReplayWindows = ConcurrentHashMap<String, com.seamless.android.crypto.AegisTorCrypto.ReplayWindow512>()
+    private val deferredFinalChunkIds = ConcurrentHashMap<String, UUID>()
+    private val lastSpeculativeTypingDialAt = ConcurrentHashMap<String, Long>()
+    private val lastSpeculativeBulkDialAt = ConcurrentHashMap<String, Long>()
+    private val previewShownTransfers = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var ownMailboxOnion: String? = null
+
+    private fun canonicalPeerKey(peerOnion: String): String =
+        OnionContactManager.OnionContact.canonicalizeOnionEndpoint(peerOnion)
+            .ifBlank { peerOnion.trim().lowercase() }
+
+    private fun fastHexEncode(bytes: ByteArray): String {
+        val hexChars = "0123456789abcdef"
+        val chars = CharArray(bytes.size * 2)
+        for (i in bytes.indices) {
+            val v = bytes[i].toInt() and 0xFF
+            chars[i * 2] = hexChars[v ushr 4]
+            chars[i * 2 + 1] = hexChars[v and 0x0F]
+        }
+        return String(chars)
+    }
     
     /**
      * Service states
@@ -271,18 +434,24 @@ class TorMessagingService private constructor(private val context: Context) {
             
             // Both peers must pick the same socket when they dial each other at once.
             circuitManager.preferIncomingResolver = { peer -> shouldPreferIncomingCircuit(peer) }
+            circuitManager.bulkHelloFrameProvider = { peer -> createEncryptedBulkHelloFrame(peer) }
+            circuitManager.lanEndpointResolver = { peer -> phantomLanBridge.getVerifiedLanEndpoint(peer) }
 
             // ━━━ START HIDDEN SERVICE (inbound) ━━━
             // This makes us reachable via .onion address.
             // Without this, no one can connect to us and messages can never arrive.
             val hiddenServiceStarted = startHiddenService()
 
+            // Start Phantom-LAN blinded Wi-Fi discovery BEFORE waitForTor so LAN chats/calls
+            // become ready in seconds even during an upstream ISP blackout.
+            phantomLanBridge.start()
+
             // Wait for Tor SOCKS proxy to be ready (outbound). If Arti is slow or
             // unavailable but the embedded daemon is connected, continue with daemon
             // SOCKS fallback so direct onion messaging can still work.
             _serviceState.value = ServiceState.WAITING_FOR_TOR
             val outboundTorReady = waitForTor()
-            if (!hiddenServiceStarted && !outboundTorReady) {
+            if (!hiddenServiceStarted && !outboundTorReady && !phantomLanBridge.hasActiveLanInterface()) {
                 error(_lastError.value ?: "Tor could not start")
             }
 
@@ -312,6 +481,7 @@ class TorMessagingService private constructor(private val context: Context) {
             startMailboxPolling()
             
             _serviceState.value = ServiceState.RUNNING
+            prewarmActiveContacts()
             Log.i(TAG, "✅ TorMessagingService started successfully")
             
         } catch (e: Exception) {
@@ -358,13 +528,25 @@ class TorMessagingService private constructor(private val context: Context) {
         mailboxPollJob?.cancel()
         mailboxHostJob?.cancel()
         hiddenServiceObserverJob?.cancel()
+        peerBulkWorkers.values.forEach { it.cancel() }
+        peerBulkWorkers.clear()
+        peerBulkChannels.values.forEach { it.close() }
+        peerBulkChannels.clear()
         pendingContactExchanges.clear()
         connectionEventsJob?.cancel()
         introducedConnectionIds.clear()
+        bulkReadLoopConnections.clear()
+        previewShownTransfers.clear()
+        deferredFinalChunkIds.clear()
+        runCatching { messageQueue.flush() }
+        runCatching { attachmentTransfer.cleanupStaleTransfers() }
         mailboxClient.stopPolling()
         mailboxService.stop()
         ownMailboxOnion = null
         syncEngine.stopSyncLoop()
+        phantomLanBridge.stop()
+        circuitManager.lanEndpointResolver = null
+        _lanPeersFlow.value = emptySet()
         circuitManager.disconnectAll()
         hiddenServiceManager.stop()
         peersIntroducedOnConnection.clear()
@@ -516,13 +698,15 @@ class TorMessagingService private constructor(private val context: Context) {
     // ========== Messaging ==========
     
     /**
-     * Send a text message to a contact
-     * Returns the message ID for tracking delivery status
+     * Send a text message (optionally with quoted reply or Aegis Burn-On-Read™ capsule) to a contact.
+     * Returns the message ID for tracking delivery status.
      */
     suspend fun sendMessage(
         contactId: String,
         text: String,
-        replyToId: String? = null
+        replyToId: String? = null,
+        burnOnRead: Boolean = false,
+        burnTtlSeconds: Int = 12
     ): Result<String> {
         val contact = contactManager.getContact(contactId)
             ?: return Result.failure(IllegalArgumentException("Contact not found: $contactId"))
@@ -537,8 +721,31 @@ class TorMessagingService private constructor(private val context: Context) {
                 )
             )
         }
-        
-        return enqueueTorMessage(contact, text, replyToId).map { it.messageId }
+
+        val cleanText = text.trim()
+        require(cleanText.isNotEmpty()) { "Message cannot be empty" }
+        val bodyPayload = if (burnOnRead) {
+            TorRichChatCodec.encodeBurnText(cleanText, burnTtlSeconds)
+        } else {
+            cleanText
+        }
+        val replyTarget = replyToId?.takeIf { it.isNotBlank() }?.let { messageRepository.getMessage(it) }
+        val wireText = if (replyTarget != null) {
+            val senderLabel = if (replyTarget.isFromMe) {
+                contactManager.getMyContactInfo().nickname.ifBlank { "You" }
+            } else {
+                contact.nickname
+            }
+            val preview = TorRichChatCodec.friendlyPreviewText(
+                replyTarget.text,
+                replyTarget.attachmentMimeType
+            ).take(90)
+            TorRichChatCodec.formatWithReply(bodyPayload, replyTarget.id, senderLabel, preview)
+        } else {
+            bodyPayload
+        }
+
+        return enqueueTorMessage(contact, wireText, replyToId).map { it.messageId }
     }
 
     fun sendTorMessage(
@@ -665,33 +872,87 @@ class TorMessagingService private constructor(private val context: Context) {
         mimeType: String,
         groupId: String? = null,
         groupMessageId: String? = null,
-        finalChunkMessageId: UUID? = null
-    ): Result<String> = mutex.withLock {
+        finalChunkMessageId: UUID? = null,
+        previewBytes: ByteArray? = null
+    ): Result<String> = sendAttachment(
+        contactId = contactId,
+        bytes = imageBytes,
+        mimeType = mimeType,
+        groupId = groupId,
+        groupMessageId = groupMessageId,
+        finalChunkMessageId = finalChunkMessageId,
+        previewBytes = previewBytes
+    )
+
+    /** Send a bounded image, voice note, or document (up to 1 MB) over Fountain-Warp Tor frames. */
+    suspend fun sendAttachment(
+        contactId: String,
+        bytes: ByteArray,
+        mimeType: String,
+        fileName: String = "",
+        durationMs: Int = 0,
+        viewOnce: Boolean = false,
+        groupId: String? = null,
+        groupMessageId: String? = null,
+        finalChunkMessageId: UUID? = null,
+        previewBytes: ByteArray? = null
+    ): Result<String> {
         val contact = contactManager.getContact(contactId)
-            ?: return@withLock Result.failure(IllegalArgumentException("Contact not found"))
+            ?: return Result.failure(IllegalArgumentException("Contact not found"))
         if (contact.effectiveTrustState() == TorContactTrustState.BLOCKED ||
             contact.effectiveTrustState() == TorContactTrustState.KEY_CHANGED
         ) {
-            return@withLock Result.failure(IllegalStateException("Verify this contact before sending media"))
+            return Result.failure(IllegalStateException("Verify this contact before sending media"))
         }
 
-        try {
+        return try {
             val transferId = UUID.randomUUID()
-            val imageMessageId = UUID.randomUUID()
+            val attachmentMessageId = UUID.randomUUID()
             val meta = attachmentTransfer.createMeta(
                 transferId = transferId,
                 mimeType = mimeType,
-                totalBytes = imageBytes.size,
-                senderPublicKey = getMyStaticPublicKeyHex(), groupId = groupId, groupMessageId = groupMessageId
+                totalBytes = bytes.size,
+                senderPublicKey = getMyStaticPublicKeyHex(),
+                groupId = groupId,
+                groupMessageId = groupMessageId,
+                previewBytes = if (viewOnce) null else previewBytes,
+                fileName = fileName,
+                durationMs = durationMs,
+                viewOnce = viewOnce
             )
-            val localPath = attachmentTransfer.saveOutgoing(transferId, imageBytes, meta.mimeType)
+            val localPath = if (groupId == null) {
+                attachmentTransfer.saveOutgoing(transferId, bytes, meta.mimeType)
+            } else {
+                ""
+            }
+            if (contact.publicKey.isNotBlank()) {
+                circuitManager.ensureBulkConnectionAsync(contact.onionAddress)
+            }
             val sequenceManager = getSequenceManager(contact.onionAddress)
             val now = System.currentTimeMillis()
+            val kind = when {
+                meta.mimeType.startsWith("audio/") -> "voice"
+                meta.mimeType.startsWith("image/") -> "photo"
+                else -> "file"
+            }
+            val rowText = if (kind == "photo" && !viewOnce && meta.fileName.isBlank()) {
+                "Photo"
+            } else {
+                TorRichChatCodec.encodeAttachmentDescriptor(
+                    TorRichChatCodec.AttachmentDescriptor(
+                        kind = kind,
+                        fileName = meta.fileName,
+                        totalBytes = bytes.size,
+                        durationMs = durationMs,
+                        viewOnce = viewOnce
+                    )
+                )
+            }
 
             if (groupId == null) messageRepository.saveSentMessage(
-                messageId = imageMessageId.toString(),
+                messageId = attachmentMessageId.toString(),
                 contact = contact,
-                text = "Photo",
+                text = rowText,
                 timestamp = now,
                 deliveryRoute = OnionMessageProtocol.DeliveryRoute.QUEUED,
                 attachmentPath = localPath,
@@ -705,18 +966,23 @@ class TorMessagingService private constructor(private val context: Context) {
                 frameType = OnionMessageProtocol.FrameType.FILE_META,
                 payload = attachmentTransfer.encodeMeta(meta)
             )
-            val queuedMetaId = messageQueue.enqueue(
-                recipientOnion = contact.onionAddress,
-                frame = metaFrame,
-                uiMessageId = imageMessageId.toString(),
-                completesUiMessage = false
+            val chunks = attachmentTransfer.split(bytes)
+            val paritiesByAfterIdx = attachmentTransfer
+                .generateFountainParities(transferId, chunks)
+                .associateBy { it.afterChunkIndex }
+            val batchSpecs = ArrayList<OnionMessageQueue.BatchFrameSpec>(1 + chunks.size + paritiesByAfterIdx.size)
+            batchSpecs.add(
+                OnionMessageQueue.BatchFrameSpec(
+                    frame = metaFrame,
+                    uiMessageId = attachmentMessageId.toString(),
+                    completesUiMessage = false
+                )
             )
-            val chunks = attachmentTransfer.split(imageBytes)
-            var finalChunkId = queuedMetaId
+            var completionFrameId = ""
             chunks.forEachIndexed { index, chunk ->
                 val chunkFrame = OnionMessageProtocol.OnionFrame(
                     // Every frame needs its own transport identity. The final
-                    // chunk alone completes the single visible photo message.
+                    // chunk alone completes the single visible attachment message.
                     messageId = if (index == chunks.lastIndex && finalChunkMessageId != null) {
                         finalChunkMessageId
                     } else {
@@ -727,20 +993,212 @@ class TorMessagingService private constructor(private val context: Context) {
                     frameType = OnionMessageProtocol.FrameType.FILE_CHUNK,
                     payload = attachmentTransfer.encodeChunk(transferId, index, chunk)
                 )
-                val chunkId = messageQueue.enqueue(
-                    recipientOnion = contact.onionAddress,
-                    frame = chunkFrame,
-                    uiMessageId = imageMessageId.toString(),
-                    completesUiMessage = index == chunks.lastIndex
-                )
-                if (index == chunks.lastIndex) finalChunkId = chunkId
+                val parity = paritiesByAfterIdx[index]
+                if (index == chunks.lastIndex) {
+                    if (parity != null) {
+                        batchSpecs.add(
+                            OnionMessageQueue.BatchFrameSpec(
+                                frame = OnionMessageProtocol.OnionFrame(
+                                    messageId = UUID.randomUUID(),
+                                    sequence = sequenceManager.nextOutbound(),
+                                    timestamp = now,
+                                    frameType = OnionMessageProtocol.FrameType.FILE_PARITY,
+                                    payload = parity.payload
+                                ),
+                                uiMessageId = attachmentMessageId.toString(),
+                                completesUiMessage = false
+                            )
+                        )
+                    }
+                    completionFrameId = chunkFrame.messageId.toString()
+                    batchSpecs.add(
+                        OnionMessageQueue.BatchFrameSpec(
+                            frame = chunkFrame,
+                            uiMessageId = attachmentMessageId.toString(),
+                            completesUiMessage = true
+                        )
+                    )
+                } else {
+                    batchSpecs.add(
+                        OnionMessageQueue.BatchFrameSpec(
+                            frame = chunkFrame,
+                            uiMessageId = attachmentMessageId.toString(),
+                            completesUiMessage = false
+                        )
+                    )
+                    if (parity != null) {
+                        batchSpecs.add(
+                            OnionMessageQueue.BatchFrameSpec(
+                                frame = OnionMessageProtocol.OnionFrame(
+                                    messageId = UUID.randomUUID(),
+                                    sequence = sequenceManager.nextOutbound(),
+                                    timestamp = now,
+                                    frameType = OnionMessageProtocol.FrameType.FILE_PARITY,
+                                    payload = parity.payload
+                                ),
+                                uiMessageId = attachmentMessageId.toString(),
+                                completesUiMessage = false
+                            )
+                        )
+                    }
+                }
             }
-            deliveryRoutes[imageMessageId.toString()] = TorDeliveryRoute.QUEUED
+            val queuedIds = messageQueue.enqueueBatch(contact.onionAddress, batchSpecs)
+            val finalChunkId = completionFrameId.ifBlank { queuedIds.lastOrNull() ?: "" }
+            deliveryRoutes[attachmentMessageId.toString()] = TorDeliveryRoute.QUEUED
             dispatchRecipientNow(contact.onionAddress)
             Result.success(finalChunkId)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to queue image: ${e.message}")
+            Log.e(TAG, "Failed to queue attachment: ${e.message}")
             Result.failure(e)
+        }
+    }
+
+    /** Marks local messages read and sends batched READ_RECEIPT(0x0B) frames so sender sees emerald double ticks. */
+    suspend fun markContactReadAndSendReceipts(contact: OnionContactManager.OnionContact) {
+        val unreadIds = runCatching { messageRepository.markAsReadReturningIds(contact) }
+            .getOrDefault(emptyList())
+        messageNotifier.cancelContact(contact.id)
+        if (unreadIds.isEmpty() ||
+            contact.requiresRendezvous() ||
+            contact.effectiveTrustState() == TorContactTrustState.BLOCKED ||
+            contact.effectiveTrustState() == TorContactTrustState.KEY_CHANGED
+        ) {
+            return
+        }
+        val uuids = unreadIds.mapNotNull { id -> runCatching { UUID.fromString(id) }.getOrNull() }
+        if (uuids.isEmpty()) return
+        val canonicalRecipient = canonicalPeerKey(contact.onionAddress)
+        if (!OnionContactManager.OnionContact.isValidOnionEndpoint(canonicalRecipient)) return
+        val seqManager = getSequenceManager(canonicalRecipient)
+        uuids.chunked(20).forEach { batch ->
+            val receiptFrame = OnionMessageProtocol.createBatchReadReceiptFrame(
+                messageIds = batch,
+                sequence = seqManager.nextOutbound()
+            )
+            messageQueue.enqueue(
+                recipientOnion = canonicalRecipient,
+                frame = receiptFrame,
+                completesUiMessage = false
+            )
+        }
+        dispatchRecipientNow(canonicalRecipient)
+    }
+
+    /** Sends a 1-to-1 quick emoji reaction toggle over Tor. */
+    suspend fun sendDirectReaction(
+        contactId: String,
+        targetMessageId: String,
+        emoji: String
+    ): Result<Unit> = runCatching {
+        val contact = requireNotNull(contactManager.getContact(contactId)) { "Contact not found" }
+        val cleanEmoji = emoji.trim().take(8)
+        require(cleanEmoji.isNotEmpty()) { "Invalid reaction" }
+        val existingEmoji = _directReactionsFlow.value[targetMessageId]?.get("me")
+        val action = if (existingEmoji == cleanEmoji) "remove" else "add"
+        updateDirectReactionState(targetMessageId, "me", cleanEmoji, action)
+        val ctrl = TorRichChatCodec.encodeDirectControl(
+            TorRichChatCodec.DirectControlEvent(
+                action = "react",
+                targetMessageId = targetMessageId,
+                emoji = cleanEmoji,
+                reactionAction = action
+            )
+        )
+        sendMessageToOnion(contact.onionAddress, ctrl, completesUiMessage = false).getOrThrow()
+    }
+
+    /** Sender-only 1-to-1 message edit over Tor (preserving reply header). */
+    suspend fun editDirectMessage(
+        contactId: String,
+        targetMessageId: String,
+        newText: String
+    ): Result<Unit> = runCatching {
+        val cleanText = newText.trim()
+        require(cleanText.isNotEmpty()) { "Message cannot be empty" }
+        val contact = requireNotNull(contactManager.getContact(contactId)) { "Contact not found" }
+        val existing = requireNotNull(messageRepository.getMessage(targetMessageId)) { "Message not found" }
+        require(existing.isFromMe && existing.attachmentPath == null) {
+            "Only your own text messages can be edited"
+        }
+        val body = TorRichChatCodec.parseReply(existing.text).body
+        require(
+            existing.id !in _directDeletedIdsFlow.value &&
+                existing.id !in _directBurnedIdsFlow.value &&
+                body != TorRichChatCodec.DELETED_DIRECT_MESSAGE_TEXT &&
+                body != TorRichChatCodec.BURNED_CAPSULE_TEXT &&
+                !TorRichChatCodec.isUnburnedSecretText(existing.text)
+        ) {
+            "This message cannot be edited"
+        }
+        val parsed = TorRichChatCodec.parseReply(existing.text)
+        val updatedStored = TorRichChatCodec.formatWithReply(
+            cleanText,
+            parsed.replyToId,
+            parsed.replyToSender,
+            parsed.replyToPreview
+        )
+        messageRepository.updateMessageText(targetMessageId, updatedStored)
+        synchronized(directRichLock) {
+            directRichPrefs.edit().putBoolean("edited:$targetMessageId", true).apply()
+        }
+        _directEditedIdsFlow.update { it + targetMessageId }
+
+        val ctrl = TorRichChatCodec.encodeDirectControl(
+            TorRichChatCodec.DirectControlEvent(
+                action = "edit",
+                targetMessageId = targetMessageId,
+                text = cleanText
+            )
+        )
+        sendMessageToOnion(contact.onionAddress, ctrl, completesUiMessage = false).getOrThrow()
+    }
+
+    /** Sender-only 1-to-1 delete for everyone over Tor + local attachment shredding. */
+    suspend fun deleteDirectMessageForEveryone(
+        contactId: String,
+        targetMessageId: String
+    ): Result<Unit> = runCatching {
+        val contact = requireNotNull(contactManager.getContact(contactId)) { "Contact not found" }
+        val existing = requireNotNull(messageRepository.getMessage(targetMessageId)) { "Message not found" }
+        require(existing.isFromMe) { "Only your own messages can be deleted for everyone" }
+        TorRichChatCodec.AegisShredder.shredPath(existing.attachmentPath)
+        messageRepository.clearAttachmentAndUpdateText(targetMessageId, TorRichChatCodec.DELETED_DIRECT_MESSAGE_TEXT)
+        synchronized(directRichLock) {
+            directRichPrefs.edit().putBoolean("deleted:$targetMessageId", true).apply()
+        }
+        _directDeletedIdsFlow.update { it + targetMessageId }
+
+        val ctrl = TorRichChatCodec.encodeDirectControl(
+            TorRichChatCodec.DirectControlEvent(
+                action = "delete",
+                targetMessageId = targetMessageId
+            )
+        )
+        sendMessageToOnion(contact.onionAddress, ctrl, completesUiMessage = false).getOrThrow()
+    }
+
+    /** Cryptographically shreds a viewed View-Once capsule on disk & DB and transmits a SHRED_RECEIPT. */
+    suspend fun consumeAndShredDirectCapsule(
+        contactId: String,
+        messageId: String
+    ): Result<Unit> = runCatching {
+        val contact = contactManager.getContact(contactId)
+        val existing = messageRepository.getMessage(messageId)
+        TorRichChatCodec.AegisShredder.shredPath(existing?.attachmentPath)
+        messageRepository.clearAttachmentAndUpdateText(messageId, TorRichChatCodec.BURNED_CAPSULE_TEXT)
+        synchronized(directRichLock) {
+            directRichPrefs.edit().putBoolean("burned:$messageId", true).apply()
+        }
+        _directBurnedIdsFlow.update { it + messageId }
+        if (contact != null && existing != null && !existing.isFromMe) {
+            val ctrl = TorRichChatCodec.encodeDirectControl(
+                TorRichChatCodec.DirectControlEvent(
+                    action = "shred_receipt",
+                    targetMessageId = messageId
+                )
+            )
+            sendMessageToOnion(contact.onionAddress, ctrl, completesUiMessage = false)
         }
     }
 
@@ -874,7 +1332,6 @@ class TorMessagingService private constructor(private val context: Context) {
                         )
                         if (circuitManager.sendData(onionAddress, introFrame.encode())) {
                             currentConnId?.let { introducedConnectionIds[onionAddress] = it }
-                            delay(50L)
                         } else {
                             peersIntroducedOnConnection.remove(onionAddress)
                         }
@@ -924,6 +1381,7 @@ class TorMessagingService private constructor(private val context: Context) {
         val application = context.applicationContext as? Application
         val daemonManager = application?.let { TorDaemonManager.getInstance(it) }
 
+        val startMs = System.currentTimeMillis()
         var ready = false
         withTimeoutOrNull(150_000L) {
             while (!ready) {
@@ -940,6 +1398,12 @@ class TorMessagingService private constructor(private val context: Context) {
                 val daemonStatus = daemonManager?.statusFlow?.value
                 if (daemonStatus?.state == TorDaemonManager.DaemonState.CONNECTED) {
                     Log.i(TAG, "Tor daemon SOCKS fallback is ready")
+                    ready = true
+                    break
+                }
+
+                if (System.currentTimeMillis() - startMs >= 6_000L && phantomLanBridge.hasActiveLanInterface()) {
+                    Log.i(TAG, "⚡ Local Wi-Fi active — starting Phantom-LAN messaging immediately while Tor bootstraps in background")
                     ready = true
                     break
                 }
@@ -999,6 +1463,39 @@ class TorMessagingService private constructor(private val context: Context) {
     }
 
     /**
+     * Proactively prefetches v3 onion descriptors and warms rendezvous circuits for
+     * top active contacts while the user is browsing Contacts/Groups so sends & calls start at 0ms.
+     */
+    fun prewarmActiveContacts(maxPeers: Int = 6) {
+        if (_serviceState.value != ServiceState.RUNNING) return
+        scope.launch {
+            runCatching { prefetchKnownContactDescriptors() }
+            val now = System.currentTimeMillis()
+            val topPeers = contactManager.getAllContacts()
+                .asSequence()
+                .filter { !it.requiresRendezvous() }
+                .filter {
+                    it.effectiveTrustState() != TorContactTrustState.BLOCKED &&
+                        it.effectiveTrustState() != TorContactTrustState.KEY_CHANGED
+                }
+                .sortedWith(
+                    compareByDescending<OnionContactManager.OnionContact> { it.isFavorite }
+                        .thenByDescending { it.lastSeenOnline }
+                )
+                .take(maxPeers)
+                .toList()
+            for (contact in topPeers) {
+                val canonical = canonicalPeerKey(contact.onionAddress)
+                if (circuitManager.hasActiveConnection(canonical)) continue
+                val lastTry = lastPeerDialAttempt[canonical] ?: 0L
+                if (now - lastTry < 20_000L) continue
+                lastPeerDialAttempt[canonical] = now
+                scope.launch { pingPeer(canonical) }
+            }
+        }
+    }
+
+    /**
      * Send an encrypted real-time call signaling frame (OFFER, RINGING, ACCEPT, DECLINE, HANGUP)
      * directly over the Tor peer circuit without storing in offline mailboxes.
      */
@@ -1024,7 +1521,6 @@ class TorMessagingService private constructor(private val context: Context) {
                     )
                     if (circuitManager.sendData(canonical, introFrame.encode())) {
                         currentConnId?.let { introducedConnectionIds[canonical] = it }
-                        delay(40L)
                     } else {
                         peersIntroducedOnConnection.remove(canonical)
                     }
@@ -1084,21 +1580,128 @@ class TorMessagingService private constructor(private val context: Context) {
                 frameType = OnionMessageProtocol.FrameType.CALL_AUDIO,
                 payload = payload
             )
-            circuitManager.sendData(canonical, frame.encode(padToFixedSize = false))
+            circuitManager.sendDataIfConnected(canonical, frame.encode(padToFixedSize = false))
         } catch (e: Exception) {
             Log.w(TAG, "Failed to send CALL_AUDIO to ${redactEndpoint(recipientOnion)}: ${e.message}")
             false
         }
     }
 
-    /** Sends a short-lived direct presence hint. Typing is intentionally never queued. */
+    /**
+     * Send an unpadded real-time encrypted video fragment frame over the Tor peer circuit.
+     */
+    suspend fun sendCallVideoFrame(
+        recipientOnion: String,
+        sequence: Long,
+        timestampMs: Long,
+        payload: ByteArray
+    ): Boolean {
+        return try {
+            val canonical = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(recipientOnion)
+                .ifBlank { recipientOnion.trim() }
+            if (!circuitManager.hasActiveConnection(canonical)) {
+                return false
+            }
+            ensureReadLoop(canonical)
+            val frame = OnionMessageProtocol.OnionFrame(
+                messageId = UUID.randomUUID(),
+                sequence = sequence,
+                timestamp = timestampMs,
+                frameType = OnionMessageProtocol.FrameType.CALL_VIDEO,
+                payload = payload
+            )
+            circuitManager.sendDataIfConnected(canonical, frame.encode(padToFixedSize = false))
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send CALL_VIDEO to ${redactEndpoint(recipientOnion)}: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Send an encrypted voice FEC parity frame over Lane 1 (BULK_MEDIA) when available,
+     * falling back to Lane 0 so primary voice and 2D parity traverse independent Tor paths.
+     */
+    suspend fun sendCallAudioFecFrame(
+        recipientOnion: String,
+        sequence: Long,
+        timestampMs: Long,
+        payload: ByteArray,
+        preferBulkLane: Boolean = true
+    ): Boolean {
+        return try {
+            val canonical = canonicalPeerKey(recipientOnion)
+            if (preferBulkLane && circuitManager.hasActiveBulkConnection(canonical)) {
+                ensureBulkReadLoop(canonical)
+                val frame = OnionMessageProtocol.OnionFrame(
+                    messageId = UUID.randomUUID(),
+                    sequence = sequence,
+                    timestamp = timestampMs,
+                    frameType = OnionMessageProtocol.FrameType.CALL_AUDIO,
+                    payload = payload
+                )
+                if (circuitManager.sendBulkDataIfConnected(canonical, frame.encode(padToFixedSize = false))) {
+                    return true
+                }
+            }
+            sendCallAudioFrame(recipientOnion, sequence, timestampMs, payload)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send CALL_AUDIO FEC to ${redactEndpoint(recipientOnion)}: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Burst-flush up to a small slice of real-time CALL_VIDEO fragments over Lane 1 (BULK_MEDIA)
+     * or Lane 0 while warming Lane 1 in the background.
+     */
+    suspend fun sendCallVideoFramesBurst(
+        recipientOnion: String,
+        sequence: Long,
+        timestampMs: Long,
+        payloads: List<ByteArray>
+    ): Boolean {
+        if (payloads.isEmpty()) return true
+        return try {
+            val canonical = canonicalPeerKey(recipientOnion)
+            val wireFrames = payloads.map { payload ->
+                OnionMessageProtocol.OnionFrame(
+                    messageId = UUID.randomUUID(),
+                    sequence = sequence,
+                    timestamp = timestampMs,
+                    frameType = OnionMessageProtocol.FrameType.CALL_VIDEO,
+                    payload = payload
+                ).encode(padToFixedSize = false)
+            }
+            if (circuitManager.hasActiveBulkConnection(canonical)) {
+                ensureBulkReadLoop(canonical)
+                return circuitManager.sendBulkFramesBurst(canonical, wireFrames, allowPrimaryFallback = false)
+            }
+            circuitManager.ensureBulkConnectionAsync(canonical)
+            if (!circuitManager.hasActiveConnection(canonical)) {
+                return false
+            }
+            ensureReadLoop(canonical)
+            circuitManager.sendFramesBurstIfConnected(canonical, wireFrames)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send CALL_VIDEO burst to ${redactEndpoint(recipientOnion)}: ${e.message}")
+            false
+        }
+    }
+
+    /** Sends a short-lived direct presence hint and speculatively warms circuits on compose. */
     fun setTyping(contactId: String, isTyping: Boolean) {
         val contact = contactManager.getContact(contactId) ?: return
         val onion = contact.onionAddress
-        if (contact.requiresRendezvous() ||
-            circuitManager.getConnectionState(onion) != TorCircuitManager.ConnectionState.CONNECTED
-        ) return
+        if (contact.requiresRendezvous()) return
         val now = System.currentTimeMillis()
+        if (circuitManager.getConnectionState(onion) != TorCircuitManager.ConnectionState.CONNECTED) {
+            val canonical = canonicalPeerKey(onion)
+            if (isTyping && now - (lastSpeculativeTypingDialAt[canonical] ?: 0L) >= 15_000L) {
+                lastSpeculativeTypingDialAt[canonical] = now
+                scope.launch { pingPeer(onion) }
+            }
+            return
+        }
         val previous = lastTypingSignalAt[onion] ?: 0L
         if (isTyping && now - previous < 1_500L) return
         lastTypingSignalAt[onion] = now
@@ -1110,7 +1713,30 @@ class TorMessagingService private constructor(private val context: Context) {
                 frameType = OnionMessageProtocol.FrameType.TYPING,
                 payload = byteArrayOf(if (isTyping) 1 else 0)
             )
-            circuitManager.sendData(onion, encryptFrame(onion, frame).encode())
+            circuitManager.sendDataIfConnected(onion, encryptFrame(onion, frame).encode())
+        }
+    }
+
+    /** Chrono-Sense speculative warm-up when user opens Photo picker or media flow. */
+    fun speculativePrewarmBulk(contactId: String) {
+        val contact = contactManager.getContact(contactId) ?: return
+        if (contact.requiresRendezvous() ||
+            contact.effectiveTrustState() == TorContactTrustState.BLOCKED ||
+            contact.effectiveTrustState() == TorContactTrustState.KEY_CHANGED
+        ) {
+            return
+        }
+        val canonical = canonicalPeerKey(contact.onionAddress)
+        val now = System.currentTimeMillis()
+        if (now - (lastSpeculativeBulkDialAt[canonical] ?: 0L) < 20_000L) return
+        lastSpeculativeBulkDialAt[canonical] = now
+        scope.launch {
+            if (!circuitManager.hasActiveConnection(contact.onionAddress)) {
+                pingPeer(contact.onionAddress)
+            }
+            if (contact.publicKey.isNotBlank()) {
+                circuitManager.ensureBulkConnectionAsync(contact.onionAddress)
+            }
         }
     }
     
@@ -1161,21 +1787,52 @@ class TorMessagingService private constructor(private val context: Context) {
      * CONTACT_EXCHANGE frames always contain the sender's onion address.
      * For encrypted MESSAGE frames, we try to match against known contacts.
      */
+    private fun readFirstIncomingFrame(input: java.io.DataInputStream): ByteArray? {
+        val header = ByteArray(4)
+        var headerRead = 0
+        var stalls = 0
+        while (headerRead < 4) {
+            try {
+                val n = input.read(header, headerRead, 4 - headerRead)
+                if (n < 0) return null
+                headerRead += n
+            } catch (e: java.net.SocketTimeoutException) {
+                if (headerRead == 0 || ++stalls > 3) throw e
+            }
+        }
+        val size = ((header[0].toInt() and 0xFF) shl 24) or
+            ((header[1].toInt() and 0xFF) shl 16) or
+            ((header[2].toInt() and 0xFF) shl 8) or
+            (header[3].toInt() and 0xFF)
+        if (size <= 0 || size > OnionMessageProtocol.FRAME_SIZE * 2) {
+            Log.w(TAG, "Invalid incoming frame size: $size")
+            return null
+        }
+        val data = ByteArray(size)
+        var bodyRead = 0
+        stalls = 0
+        while (bodyRead < size) {
+            try {
+                val n = input.read(data, bodyRead, size - bodyRead)
+                if (n < 0) return null
+                bodyRead += n
+            } catch (e: java.net.SocketTimeoutException) {
+                if (++stalls > 3) throw e
+            }
+        }
+        return data
+    }
+
     private suspend fun handleIncomingSocket(socket: java.net.Socket) {
         try {
             socket.soTimeout = TorCircuitManager.READ_TIMEOUT_MS
             val input = java.io.DataInputStream(socket.inputStream)
-            
-            // Read the first data: [size:int][data:bytes]
-            val size = input.readInt()
-            if (size <= 0 || size > OnionMessageProtocol.FRAME_SIZE * 2) {
-                Log.w(TAG, "Invalid incoming frame size: $size")
+
+            val data = readFirstIncomingFrame(input)
+            if (data == null) {
                 socket.close()
                 return
             }
-            
-            val data = ByteArray(size)
-            input.readFully(data)
             
             // Try to decode the frame to identify the sender
             val frame = OnionMessageProtocol.OnionFrame.decode(data)
@@ -1191,27 +1848,31 @@ class TorMessagingService private constructor(private val context: Context) {
             
             when (frame.frameType) {
                 OnionMessageProtocol.FrameType.CONTACT_EXCHANGE -> {
-                    // CONTACT_EXCHANGE always contains sender info — this is the normal pairing flow
+                    // CONTACT_EXCHANGE is only allowed to supply a missing onion or create a new contact;
+                    // never allow an unauthenticated frame to hijack a pinned contact's socket/route.
                     val exchange = OnionMessageProtocol.ContactExchange.fromBytes(frame.payload)
                     if (exchange != null) {
-                        // If the sender's onion address is empty (their hidden service wasn't
-                        // ready), try to resolve via their public key from existing contacts.
+                        val existingContact = contactManager.getContactByPublicKey(exchange.publicKey)
                         var peerOnion = exchange.onionAddress
-                        if (peerOnion.isBlank() || peerOnion.equals("not-available.onion:18888", ignoreCase = true)) {
-                            val existingContact = contactManager.getContactByPublicKey(exchange.publicKey)
-                            if (existingContact != null && existingContact.onionAddress.isNotBlank()) {
-                                peerOnion = existingContact.onionAddress
-                                Log.i(TAG, "📥 Resolved empty onion via pubkey to ${peerOnion.take(20)}...")
-                            } else {
-                                // Use a stable identifier derived from their public key so the
-                                // connection is keyed consistently across frames
-                                peerOnion = "pubkey:${exchange.publicKey.take(32)}"
-                                Log.w(TAG, "📥 Sender has no onion address, using pubkey-based ID: ${peerOnion.take(20)}")
-                            }
-                        }
-                        if (!peerOnion.startsWith("pubkey:", ignoreCase = true)) {
+                        val isPlaceholder = peerOnion.isBlank() ||
+                            peerOnion.equals("not-available.onion:18888", ignoreCase = true)
+                        if (!isPlaceholder) {
                             val canonical = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(peerOnion)
                             if (canonical.isNotBlank()) peerOnion = canonical
+                        }
+                        if (existingContact != null && !existingContact.requiresRendezvous()) {
+                            val pinnedOnion = OnionContactManager.OnionContact
+                                .canonicalizeOnionEndpoint(existingContact.onionAddress)
+                            if (isPlaceholder) {
+                                peerOnion = pinnedOnion
+                            } else if (!peerOnion.equals(pinnedOnion, ignoreCase = true)) {
+                                Log.w(TAG, "Blocked unauthenticated CONTACT_EXCHANGE route hijack for ${existingContact.nickname}")
+                                socket.close()
+                                return
+                            }
+                        } else if (isPlaceholder) {
+                            peerOnion = "pubkey:${exchange.publicKey.take(32)}"
+                            Log.w(TAG, "📥 Sender has no onion address, using pubkey-based ID: ${peerOnion.take(20)}")
                         }
                         resolvedPeerOnion = peerOnion
                         val accepted = circuitManager.addIncomingConnection(
@@ -1247,6 +1908,15 @@ class TorMessagingService private constructor(private val context: Context) {
                             .canonicalizeOnionEndpoint(identified.first)
                             .ifBlank { identified.first }
                         resolvedPeerOnion = canonicalPeer
+                        if (frame.frameType == OnionMessageProtocol.FrameType.BULK_HELLO) {
+                            val bulkAccepted = circuitManager.addIncomingBulkConnection(canonicalPeer, socket)
+                            if (bulkAccepted) {
+                                markPeerResponsive(canonicalPeer)
+                                ensureBulkReadLoop(canonicalPeer)
+                                wakeQueueDispatcher()
+                            }
+                            return
+                        }
                         val accepted = circuitManager.addIncomingConnection(
                             canonicalPeer,
                             socket,
@@ -1303,7 +1973,15 @@ class TorMessagingService private constructor(private val context: Context) {
                 try {
                     val data = circuitManager.receiveData(peerOnion, connectionId)
                     if (data != null) {
-                        handleIncomingData(peerOnion, data, isAlreadyDecrypted = false)
+                        if (data.size >= OnionMessageProtocol.HEADER_SIZE &&
+                            (data[33] == OnionMessageProtocol.FrameType.FILE_CHUNK.code ||
+                                data[33] == OnionMessageProtocol.FrameType.FILE_PARITY.code ||
+                                data[33] == OnionMessageProtocol.FrameType.SYNC_BATCH.code)
+                        ) {
+                            enqueueBulkInboundFrame(peerOnion, data)
+                        } else {
+                            handleIncomingData(peerOnion, data, isAlreadyDecrypted = false)
+                        }
                     } else if (circuitManager.getActiveConnectionId(peerOnion) != connectionId ||
                         circuitManager.getConnectionState(peerOnion) != TorCircuitManager.ConnectionState.CONNECTED
                     ) {
@@ -1326,6 +2004,7 @@ class TorMessagingService private constructor(private val context: Context) {
                 peersWithReadLoop.remove(peerOnion)
                 peersIntroducedOnConnection.remove(peerOnion)
             }
+            refreshLanPeersState()
             Log.d(TAG, "📡 Read loop ended for $peerOnion")
         }
     }
@@ -1436,22 +2115,36 @@ class TorMessagingService private constructor(private val context: Context) {
                     // reachable. Only show a contact online after we have seen
                     // valid encrypted traffic from it recently.
                     val peers = circuitManager.getConnectedPeers()
-                    val peerSet = peers.toSet()
+                    val peerSet = peers.mapTo(HashSet()) { canonicalPeerKey(it) }
                     val cutoff = now - PEER_PRESENCE_TIMEOUT_MS
                     val verifiedPeers = peers.filter { peer ->
-                        (lastVerifiedPeerActivity[peer] ?: 0L) >= cutoff
+                        val canonical = canonicalPeerKey(peer)
+                        val lastActive = maxOf(
+                            lastVerifiedPeerActivity[canonical] ?: 0L,
+                            lastVerifiedPeerActivity[peer] ?: 0L
+                        )
+                        lastActive >= cutoff
                     }.toSet()
                     _connectedPeers.value = verifiedPeers
+                    refreshLanPeersState()
                     _typingPeers.update { active ->
                         active.filterValues { expiresAt -> expiresAt > now }
                     }
 
-                    // Traffic-aware keepalives: skip PINGs while messages/ACKs are actively
-                    // flowing, and silently warm-reconnect connected circuits idle >= 25s.
+                    // Traffic-aware keepalives: skip PINGs while messages/ACKs are actively flowing,
+                    // respect a 35s grace window on new circuits, and warm-reconnect only after 45s silence.
                     for (onion in peers) {
-                        val silenceMs = now - (lastVerifiedPeerActivity[onion] ?: 0L)
+                        val canonical = canonicalPeerKey(onion)
+                        val lastActive = maxOf(
+                            lastVerifiedPeerActivity[canonical] ?: 0L,
+                            lastVerifiedPeerActivity[onion] ?: 0L
+                        )
+                        val silenceMs = now - lastActive
+                        val connectedAt = circuitManager.getConnectionConnectedAt(canonical)
+                        val circuitAgeMs = if (connectedAt > 0L) now - connectedAt else Long.MAX_VALUE
                         if (silenceMs >= 8_000L) {
-                            healPeerCircuit(onion, reconnectFirst = silenceMs >= 25_000L)
+                            val shouldReconnect = circuitAgeMs >= 35_000L && silenceMs >= 45_000L
+                            healPeerCircuit(canonical, reconnectFirst = shouldReconnect)
                         }
                     }
 
@@ -1464,12 +2157,13 @@ class TorMessagingService private constructor(private val context: Context) {
                                     it.effectiveTrustState() != TorContactTrustState.KEY_CHANGED
                             }
                             ?.onionAddress
+                            ?.let(::canonicalPeerKey)
                     }.distinct()
                     for (onion in visibleOnions) {
                         if (onion in peerSet) continue
                         val silenceMs = now - (lastVerifiedPeerActivity[onion] ?: 0L)
                         val lastDial = lastPeerDialAttempt[onion] ?: 0L
-                        if (silenceMs >= 25_000L && now - lastDial >= 15_000L) {
+                        if (silenceMs >= 45_000L && now - lastDial >= 15_000L) {
                             lastPeerDialAttempt[onion] = now
                             healPeerCircuit(onion, reconnectFirst = true)
                         }
@@ -1531,6 +2225,9 @@ class TorMessagingService private constructor(private val context: Context) {
         connectionEventsJob = scope.launch {
             circuitManager.connectionEvents.collect { peer ->
                 ensureReadLoop(peer)
+                if (circuitManager.hasActiveBulkConnection(peer)) {
+                    ensureBulkReadLoop(peer)
+                }
                 wakeQueueDispatcher()
             }
         }
@@ -1577,7 +2274,11 @@ class TorMessagingService private constructor(private val context: Context) {
             it.state == OnionMessageProtocol.DeliveryState.SENT &&
                 it.retryCount >= UNACKED_RETRIES_BEFORE_RECONNECT
         }
-        val lastInbound = lastVerifiedPeerActivity[recipientOnion] ?: 0L
+        val canonicalRecipient = canonicalPeerKey(recipientOnion)
+        val lastInbound = maxOf(
+            lastVerifiedPeerActivity[canonicalRecipient] ?: 0L,
+            lastVerifiedPeerActivity[recipientOnion] ?: 0L
+        )
         val peerRecentlyActive = (System.currentTimeMillis() - lastInbound) <= 30_000L
         if (hasStuckSent && !peerRecentlyActive && circuitManager.hasActiveConnection(recipientOnion)) {
             val replaced = circuitManager.warmReconnect(recipientOnion)
@@ -1703,15 +2404,114 @@ class TorMessagingService private constructor(private val context: Context) {
             return
         }
 
-        if (introducedOnThisConnection && introductionReady && hasNormalMessages) {
-            // The contact record is installed while processing
-            // CONTACT_EXCHANGE. A small scheduling yield is
-            // sufficient; a fixed two-second pause made every
-            // first message feel unnecessarily slow.
-            delay(50L)
-        }
-        
-        for (message in messages) {
+        val isCallActive = com.seamless.android.call.SeamlessCallManager
+            .getInstance(context)
+            .isCallActiveForPeer(recipientOnion)
+
+        var idx = 0
+        while (idx < messages.size) {
+            val firstMsg = messages[idx]
+            val isBulkFrame = firstMsg.frameData.size >= OnionMessageProtocol.HEADER_SIZE &&
+                (firstMsg.frameData[33] == OnionMessageProtocol.FrameType.FILE_CHUNK.code ||
+                    firstMsg.frameData[33] == OnionMessageProtocol.FrameType.FILE_PARITY.code ||
+                    firstMsg.frameData[33] == OnionMessageProtocol.FrameType.SYNC_BATCH.code)
+            if (isBulkFrame) {
+                if (isCallActive && !circuitManager.hasActiveBulkConnection(recipientOnion)) {
+                    circuitManager.ensureBulkConnectionAsync(recipientOnion)
+                    idx++
+                    continue
+                }
+                val maxSlice = if (isCallActive) 8 else OnionMessageQueue.ATTACHMENT_DISPATCH_SLICE
+                val slice = ArrayList<OnionMessageQueue.QueuedMessage>(maxSlice)
+                while (idx < messages.size && slice.size < maxSlice) {
+                    val m = messages[idx]
+                    val mBulk = m.frameData.size >= OnionMessageProtocol.HEADER_SIZE &&
+                        (m.frameData[33] == OnionMessageProtocol.FrameType.FILE_CHUNK.code ||
+                            m.frameData[33] == OnionMessageProtocol.FrameType.FILE_PARITY.code ||
+                            m.frameData[33] == OnionMessageProtocol.FrameType.SYNC_BATCH.code)
+                    if (!mBulk) break
+                    slice.add(m)
+                    idx++
+                }
+                try {
+                    val sliceIds = slice.map { it.id }
+                    messageQueue.markSendingBatch(sliceIds)
+                    for (m in slice) {
+                        if (m.completesUiMessage) {
+                            messageRepository.updateDeliveryState(
+                                m.uiMessageId,
+                                OnionMessageProtocol.DeliveryState.SENDING
+                            )
+                        }
+                    }
+                    val wireBurst = slice.map { prepareDirectFrameForDelivery(recipientOnion, it) }
+                    val burstOk = circuitManager.sendBulkFramesBurst(
+                        onionAddress = recipientOnion,
+                        frames = wireBurst,
+                        allowPrimaryFallback = !isCallActive
+                    )
+                    if (circuitManager.hasActiveBulkConnection(recipientOnion)) {
+                        ensureBulkReadLoop(recipientOnion)
+                    }
+                    if (burstOk) {
+                        messageQueue.markSentBatch(sliceIds)
+                        for (m in slice) {
+                            deliveryRoutes[m.uiMessageId] = TorDeliveryRoute.DIRECT
+                            groupMessaging.onTransportSent(m.id)
+                            if (m.completesUiMessage) {
+                                messageRepository.updateDelivery(
+                                    m.uiMessageId,
+                                    OnionMessageProtocol.DeliveryState.SENT,
+                                    OnionMessageProtocol.DeliveryRoute.DIRECT
+                                )
+                            }
+                        }
+                        Log.i(TAG, "⚡ Delivered bulk burst (${slice.size} frames) to ${redactEndpoint(recipientOnion)}")
+                    } else if (!isCallActive) {
+                        peersIntroducedOnConnection.remove(recipientOnion)
+                        for (m in slice) {
+                            if (m.mailboxStored) {
+                                messageQueue.deferAcknowledgementRetry(m.id)
+                                continue
+                            }
+                            val delivered = tryMailboxDelivery(recipientOnion, m)
+                            if (!delivered) {
+                                messageQueue.handleSendFailure(m.id, "Direct + Mailbox both failed")
+                            } else {
+                                groupMessaging.onTransportSent(m.id)
+                            }
+                        }
+                    } else {
+                        for (m in slice) {
+                            messageQueue.handleSendFailure(m.id, "Bulk lane paused during active call")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Bulk burst send failed for ${redactEndpoint(recipientOnion)}: ${e.message}")
+                    peersIntroducedOnConnection.remove(recipientOnion)
+                    if (!isCallActive) {
+                        for (m in slice) {
+                            if (m.mailboxStored) {
+                                messageQueue.deferAcknowledgementRetry(m.id)
+                                continue
+                            }
+                            val delivered = tryMailboxDelivery(recipientOnion, m)
+                            if (!delivered) {
+                                messageQueue.handleSendFailure(m.id, e.message ?: "Unknown error")
+                            } else {
+                                groupMessaging.onTransportSent(m.id)
+                            }
+                        }
+                    } else {
+                        for (m in slice) {
+                            messageQueue.handleSendFailure(m.id, e.message ?: "Bulk lane paused during active call")
+                        }
+                    }
+                }
+                continue
+            }
+
+            val message = messages[idx++]
             try {
                 if (introducedOnThisConnection && introductionReady &&
                     OnionMessageProtocol.OnionFrame.decode(message.frameData)?.frameType ==
@@ -1779,37 +2579,106 @@ class TorMessagingService private constructor(private val context: Context) {
         circuitManager.getConnectedPeers()
             .toList()
             .forEach(::ensureReadLoop)
+        circuitManager.getConnectedBulkPeers()
+            .toList()
+            .forEach(::ensureBulkReadLoop)
     }
 
     private val peerInboundLocks = ConcurrentHashMap<String, Mutex>()
     private val directTransportKeyCache = ConcurrentHashMap<String, ByteArray>()
     @Volatile private var cachedLocalStaticKeyPair: Pair<ByteArray, ByteArray>? = null
     
+    private suspend fun enqueueBulkInboundFrame(peerOnion: String, data: ByteArray) {
+        val canonical = canonicalPeerKey(peerOnion)
+        var channel = peerBulkChannels[canonical]
+        if (channel == null) {
+            val created = Channel<ByteArray>(capacity = 32)
+            val existing = peerBulkChannels.putIfAbsent(canonical, created)
+            channel = existing ?: created.also { ch ->
+                peerBulkWorkers[canonical] = scope.launch {
+                    for (frameData in ch) {
+                        try {
+                            handleIncomingData(canonical, frameData, isAlreadyDecrypted = false)
+                        } catch (ce: CancellationException) {
+                            throw ce
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Bulk inbound frame error from ${redactEndpoint(canonical)}: ${e.message}")
+                        }
+                    }
+                }
+            }
+        }
+        if (!channel.trySend(data).isSuccess) {
+            channel.send(data)
+        }
+    }
+
+    private suspend fun handleIncomingCallSignalFast(
+        senderOnion: String,
+        data: ByteArray,
+        isAlreadyDecrypted: Boolean,
+        allowOfflineTimestamp: Boolean
+    ): Boolean {
+        return try {
+            val frame = if (isAlreadyDecrypted) {
+                OnionMessageProtocol.OnionFrame.decode(data) ?: return false
+            } else {
+                decryptFrame(senderOnion, data)
+            }
+            if (!OnionMessageProtocol.isMessageFresh(frame, allowOfflineWindow = allowOfflineTimestamp)) {
+                Log.w(TAG, "Received stale CALL_SIGNAL from ${redactEndpoint(senderOnion)}")
+                return false
+            }
+            if (deduplicator.isDuplicate(frame.messageId)) {
+                return true
+            }
+            markPeerResponsive(senderOnion)
+            Log.i(TAG, "📞 Received CALL_SIGNAL from ${redactEndpoint(senderOnion)}")
+            com.seamless.android.call.SeamlessCallManager.getInstance(context)
+                .onIncomingTorCallSignal(senderOnion, frame.payload)
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed fast-path CALL_SIGNAL from ${redactEndpoint(senderOnion)}: ${e.message}")
+            false
+        }
+    }
+
     private suspend fun handleIncomingData(
         senderOnion: String,
         data: ByteArray,
         isAlreadyDecrypted: Boolean = false,
         allowOfflineTimestamp: Boolean = false
     ): Boolean {
-        if (data.size >= OnionMessageProtocol.HEADER_SIZE &&
-            data[33] == OnionMessageProtocol.FrameType.CALL_AUDIO.code
-        ) {
-            val fastFrame = OnionMessageProtocol.OnionFrame.decode(data)
-            if (fastFrame != null && fastFrame.frameType == OnionMessageProtocol.FrameType.CALL_AUDIO) {
-                markPeerResponsive(senderOnion)
-                val audioPayload = if (!isAlreadyDecrypted && isDirectSealedPayload(fastFrame.payload)) {
-                    val decryptedBytes = runCatching { decryptData(senderOnion, data) }.getOrNull()
-                    decryptedBytes?.let { OnionMessageProtocol.OnionFrame.decode(it)?.payload } ?: return false
-                } else {
-                    fastFrame.payload
+        if (data.size >= OnionMessageProtocol.HEADER_SIZE) {
+            val fastCode = data[33]
+            if (fastCode == OnionMessageProtocol.FrameType.CALL_AUDIO.code ||
+                fastCode == OnionMessageProtocol.FrameType.CALL_VIDEO.code
+            ) {
+                val fastFrame = OnionMessageProtocol.OnionFrame.decode(data)
+                if (fastFrame != null &&
+                    (fastFrame.frameType == OnionMessageProtocol.FrameType.CALL_AUDIO ||
+                        fastFrame.frameType == OnionMessageProtocol.FrameType.CALL_VIDEO)
+                ) {
+                    markPeerResponsive(senderOnion)
+                    val mediaPayload = if (!isAlreadyDecrypted && isDirectSealedPayload(fastFrame.payload)) {
+                        runCatching { decryptFrame(senderOnion, data).payload }.getOrNull() ?: return false
+                    } else {
+                        fastFrame.payload
+                    }
+                    val cm = com.seamless.android.call.SeamlessCallManager.getInstance(context)
+                    if (fastFrame.frameType == OnionMessageProtocol.FrameType.CALL_VIDEO) {
+                        cm.onIncomingTorCallVideo(senderOnion, fastFrame.sequence, fastFrame.timestamp, mediaPayload)
+                    } else {
+                        cm.onIncomingTorCallAudio(senderOnion, fastFrame.sequence, fastFrame.timestamp, mediaPayload)
+                    }
+                    return true
                 }
-                com.seamless.android.call.SeamlessCallManager.getInstance(context)
-                    .onIncomingTorCallAudio(senderOnion, fastFrame.sequence, fastFrame.timestamp, audioPayload)
-                return true
+            }
+            if (fastCode == OnionMessageProtocol.FrameType.CALL_SIGNAL.code) {
+                return handleIncomingCallSignalFast(senderOnion, data, isAlreadyDecrypted, allowOfflineTimestamp)
             }
         }
-        val lockKey = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(senderOnion)
-            .ifBlank { senderOnion.lowercase() }
+        val lockKey = canonicalPeerKey(senderOnion)
         val peerLock = peerInboundLocks.getOrPut(lockKey) { Mutex() }
         return peerLock.withLock {
             handleIncomingDataLocked(senderOnion, data, isAlreadyDecrypted, allowOfflineTimestamp)
@@ -1837,13 +2706,6 @@ class TorMessagingService private constructor(private val context: Context) {
                     Log.w(TAG, "Received stale contact exchange from ${redactEndpoint(senderOnion)}")
                     return false
                 }
-                
-                // Fast-path real-time voice frames before message deduplicator
-            if (frame.frameType == OnionMessageProtocol.FrameType.CALL_AUDIO) {
-                com.seamless.android.call.SeamlessCallManager.getInstance(context)
-                    .onIncomingTorCallAudio(senderOnion, frame.sequence, frame.timestamp, frame.payload)
-                return true
-            }
 
                 // Check for duplicates
                 if (deduplicator.isDuplicate(frame.messageId)) {
@@ -1864,9 +2726,12 @@ class TorMessagingService private constructor(private val context: Context) {
                 return true
             }
             
-            // Otherwise, try to decrypt and decode
-            val decryptedData = if (isAlreadyDecrypted) data else decryptData(senderOnion, data)
-            frame = OnionMessageProtocol.OnionFrame.decode(decryptedData) ?: return false
+            // Otherwise, decrypt directly into decoded frame (no redundant encode/decode roundtrip)
+            frame = if (isAlreadyDecrypted) {
+                OnionMessageProtocol.OnionFrame.decode(data) ?: return false
+            } else {
+                decryptFrame(senderOnion, data)
+            }
             // A frame that decrypted with our session keys proves the peer is alive,
             // even if it later turns out to be a duplicate retransmission.
             markPeerResponsive(senderOnion)
@@ -1877,10 +2742,15 @@ class TorMessagingService private constructor(private val context: Context) {
                 return false
             }
             
-            // Fast-path real-time voice frames before message deduplicator
+            // Fast-path real-time voice/video frames before message deduplicator
             if (frame.frameType == OnionMessageProtocol.FrameType.CALL_AUDIO) {
                 com.seamless.android.call.SeamlessCallManager.getInstance(context)
                     .onIncomingTorCallAudio(senderOnion, frame.sequence, frame.timestamp, frame.payload)
+                return true
+            }
+            if (frame.frameType == OnionMessageProtocol.FrameType.CALL_VIDEO) {
+                com.seamless.android.call.SeamlessCallManager.getInstance(context)
+                    .onIncomingTorCallVideo(senderOnion, frame.sequence, frame.timestamp, frame.payload)
                 return true
             }
 
@@ -1888,8 +2758,10 @@ class TorMessagingService private constructor(private val context: Context) {
             if (deduplicator.isDuplicate(frame.messageId)) {
                 Log.d(TAG, "Ignoring duplicate message ${frame.messageId}")
                 if (frame.frameType == OnionMessageProtocol.FrameType.MESSAGE ||
+                    frame.frameType == OnionMessageProtocol.FrameType.READ_RECEIPT ||
                     frame.frameType == OnionMessageProtocol.FrameType.FILE_META ||
                     frame.frameType == OnionMessageProtocol.FrameType.FILE_CHUNK ||
+                    frame.frameType == OnionMessageProtocol.FrameType.FILE_PARITY ||
                     frame.frameType == OnionMessageProtocol.FrameType.MAILBOX_EXCHANGE ||
                     frame.frameType == OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
                 ) {
@@ -1902,6 +2774,8 @@ class TorMessagingService private constructor(private val context: Context) {
                             ?.let { contactManager.getContactByPublicKey(it)?.onionAddress }
                         OnionMessageProtocol.FrameType.FILE_CHUNK -> attachmentTransfer.senderPublicKeyForChunk(frame.payload)
                             ?.let { contactManager.getContactByPublicKey(it)?.onionAddress }
+                        OnionMessageProtocol.FrameType.FILE_PARITY -> attachmentTransfer.senderPublicKeyForParity(frame.payload)
+                            ?.let { contactManager.getContactByPublicKey(it)?.onionAddress }
                         else -> null
                     } ?: senderOnion
                     sendMessageAck(ackRecipient, frame.messageId)
@@ -1913,6 +2787,7 @@ class TorMessagingService private constructor(private val context: Context) {
             
             return when (frame.frameType) {
                 OnionMessageProtocol.FrameType.MESSAGE -> handleMessage(senderOnion, frame)
+                OnionMessageProtocol.FrameType.READ_RECEIPT -> handleReadReceipt(senderOnion, frame)
                 OnionMessageProtocol.FrameType.FILE_META -> {
                     val canonicalSender = attachmentTransfer.decodeMeta(frame.payload)
                         ?.senderPublicKey
@@ -1939,11 +2814,24 @@ class TorMessagingService private constructor(private val context: Context) {
                     }
                     handleFileChunk(canonicalSender, frame)
                 }
+                OnionMessageProtocol.FrameType.FILE_PARITY -> {
+                    val canonicalSender = attachmentTransfer.senderPublicKeyForParity(frame.payload)
+                        ?.let { contactManager.getContactByPublicKey(it)?.onionAddress }
+                        ?: senderOnion
+                    val transportContact = contactManager.getContactByOnion(senderOnion)
+                    if (transportContact != null && !transportContact.onionAddress.equals(canonicalSender, ignoreCase = true)) {
+                        Log.w(TAG, "Rejected FILE_PARITY with mismatched sender from ${redactEndpoint(senderOnion)}")
+                        deduplicator.forget(frame.messageId)
+                        return false
+                    }
+                    handleFileParity(canonicalSender, frame)
+                }
                 OnionMessageProtocol.FrameType.ACK -> { handleAck(frame); true }
                 OnionMessageProtocol.FrameType.NACK -> { handleNack(frame); true }
                 OnionMessageProtocol.FrameType.PING -> { handlePing(senderOnion, frame); true }
                 OnionMessageProtocol.FrameType.PONG -> { handlePong(senderOnion, frame); true }
                 OnionMessageProtocol.FrameType.TYPING -> { handleTyping(senderOnion, frame); true }
+                OnionMessageProtocol.FrameType.BULK_HELLO -> true
                 OnionMessageProtocol.FrameType.CONTACT_EXCHANGE -> { handleContactExchange(senderOnion, frame); true }
 
                 // ━━━ Bramble Sync Protocol (BSP) frames ━━━
@@ -1993,6 +2881,11 @@ class TorMessagingService private constructor(private val context: Context) {
                         .onIncomingTorCallAudio(senderOnion, frame.sequence, frame.timestamp, frame.payload)
                     true
                 }
+                OnionMessageProtocol.FrameType.CALL_VIDEO -> {
+                    com.seamless.android.call.SeamlessCallManager.getInstance(context)
+                        .onIncomingTorCallVideo(senderOnion, frame.sequence, frame.timestamp, frame.payload)
+                    true
+                }
                 OnionMessageProtocol.FrameType.MAILBOX_STORE -> {
                     Log.d(TAG, "📬 Received MAILBOX_STORE from ${redactEndpoint(senderOnion)}")
                     handleMailboxStore(senderOnion, frame)
@@ -2036,6 +2929,13 @@ class TorMessagingService private constructor(private val context: Context) {
         
         val existingByOnion = contactManager.getContactByOnion(canonicalExchangeOnion)
         val existingByKey = contactManager.getContactByPublicKey(exchange.publicKey)
+        if (existingByKey != null && !existingByKey.requiresRendezvous()) {
+            val pinnedOnion = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(existingByKey.onionAddress)
+            if (!pinnedOnion.equals(canonicalExchangeOnion, ignoreCase = true)) {
+                Log.w(TAG, "Rejected unauthenticated CONTACT_EXCHANGE onion overwrite for ${existingByKey.nickname}")
+                return
+            }
+        }
         val keyChangedForOnion = existingByOnion != null &&
             !existingByOnion.publicKey.equals(exchange.publicKey, ignoreCase = true)
         val now = System.currentTimeMillis()
@@ -2165,12 +3065,25 @@ class TorMessagingService private constructor(private val context: Context) {
                         sendMessageAck(effectiveSenderOnion, messageId)
                         return true
                     }
+                    TorGroupMessaging.InboundResult.DEFERRED -> {
+                        Log.d(TAG, "Deferred encrypted group event pending invite from ${redactEndpoint(effectiveSenderOnion)}")
+                        deduplicator.forget(frame.messageId)
+                        return false
+                    }
                     TorGroupMessaging.InboundResult.REJECTED -> {
                         Log.w(TAG, "Rejected invalid encrypted group event from ${redactEndpoint(effectiveSenderOnion)}")
                         deduplicator.forget(frame.messageId)
                         return false
                     }
                     TorGroupMessaging.InboundResult.NOT_GROUP -> Unit
+                }
+                val ctrl = TorRichChatCodec.parseDirectControl(chatMessage.text)
+                if (ctrl != null) {
+                    handleDirectControlEvent(contact, ctrl)
+                    updateChainHead(effectiveSenderOnion, envelope.chainHash())
+                    syncEngine.markAsReceived(messageId.toString())
+                    sendMessageAck(effectiveSenderOnion, messageId)
+                    return true
                 }
                 messageRepository.saveReceivedMessage(
                     messageId = messageId.toString(),
@@ -2179,10 +3092,14 @@ class TorMessagingService private constructor(private val context: Context) {
                     timestamp = timestamp
                 )
                 updateChainHead(effectiveSenderOnion, envelope.chainHash())
+                syncEngine.markAsReceived(messageId.toString())
                 sendMessageAck(effectiveSenderOnion, messageId)
                 Log.i(TAG, "Message $messageId persisted to database")
                 if (!visibleChatContacts.contains(contact.id)) {
-                    messageNotifier.showIncoming(contact, chatMessage.text)
+                    val previewText = TorRichChatCodec.friendlyPreviewText(chatMessage.text)
+                    messageNotifier.showIncoming(contact, previewText)
+                } else {
+                    messageNotifier.playForegroundChime()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Failed to persist message: ${e.message}")
@@ -2209,6 +3126,83 @@ class TorMessagingService private constructor(private val context: Context) {
         }
     }
     
+    private suspend fun handleDirectControlEvent(
+        contact: OnionContactManager.OnionContact,
+        ctrl: TorRichChatCodec.DirectControlEvent
+    ) {
+        val actorKey = canonicalPeerKey(contact.onionAddress)
+        when (ctrl.action) {
+            "react" -> {
+                val cleanEmoji = ctrl.emoji.trim().take(8)
+                val action = if (ctrl.reactionAction == "remove" || cleanEmoji.isEmpty()) "remove" else "add"
+                updateDirectReactionState(ctrl.targetMessageId, actorKey, cleanEmoji, action)
+            }
+            "edit" -> {
+                val cleanText = ctrl.text.trim()
+                if (cleanText.isEmpty() || cleanText.toByteArray(Charsets.UTF_8).size > MAX_DIRECT_TEXT_BYTES) return
+                val target = messageRepository.getMessage(ctrl.targetMessageId) ?: return
+                if (target.isFromMe || target.contactId != contact.id || target.attachmentPath != null) return
+                val currentBody = TorRichChatCodec.parseReply(target.text).body
+                if (target.id in _directDeletedIdsFlow.value ||
+                    target.id in _directBurnedIdsFlow.value ||
+                    currentBody == TorRichChatCodec.DELETED_DIRECT_MESSAGE_TEXT ||
+                    currentBody == TorRichChatCodec.BURNED_CAPSULE_TEXT ||
+                    TorRichChatCodec.isUnburnedSecretText(target.text)
+                ) return
+                val parsed = TorRichChatCodec.parseReply(target.text)
+                val updated = TorRichChatCodec.formatWithReply(
+                    cleanText,
+                    parsed.replyToId,
+                    parsed.replyToSender,
+                    parsed.replyToPreview
+                )
+                messageRepository.updateMessageText(target.id, updated)
+                synchronized(directRichLock) {
+                    directRichPrefs.edit().putBoolean("edited:${target.id}", true).apply()
+                }
+                _directEditedIdsFlow.update { it + target.id }
+            }
+            "delete" -> {
+                val target = messageRepository.getMessage(ctrl.targetMessageId) ?: return
+                if (target.isFromMe || target.contactId != contact.id) return
+                TorRichChatCodec.AegisShredder.shredPath(target.attachmentPath)
+                messageRepository.clearAttachmentAndUpdateText(target.id, TorRichChatCodec.DELETED_DIRECT_MESSAGE_TEXT)
+                synchronized(directRichLock) {
+                    directRichPrefs.edit().putBoolean("deleted:${target.id}", true).apply()
+                }
+                _directDeletedIdsFlow.update { it + target.id }
+            }
+            "shred_receipt" -> {
+                val target = messageRepository.getMessage(ctrl.targetMessageId) ?: return
+                if (!target.isFromMe || target.contactId != contact.id) return
+                synchronized(directRichLock) {
+                    directRichPrefs.edit().putBoolean("shred:${target.id}", true).apply()
+                }
+                _directShredReceiptsFlow.update { it + target.id }
+                messageRepository.markOutgoingReadForContact(contact, listOf(target.id))
+                messageQueue.markRead(target.id)
+                messageListener?.onDeliveryStatusChanged(target.id, OnionMessageProtocol.DeliveryState.READ)
+            }
+        }
+    }
+
+    private suspend fun handleReadReceipt(senderOnion: String, frame: OnionMessageProtocol.OnionFrame): Boolean {
+        val contact = contactManager.getContactByOnion(senderOnion) ?: run {
+            deduplicator.forget(frame.messageId)
+            return false
+        }
+        val ids = OnionMessageProtocol.parseBatchReadReceipt(frame.payload).map { it.toString() }
+        if (ids.isNotEmpty()) {
+            messageRepository.markOutgoingReadForContact(contact, ids)
+            ids.forEach { msgId ->
+                messageQueue.markRead(msgId)
+                messageListener?.onDeliveryStatusChanged(msgId, OnionMessageProtocol.DeliveryState.READ)
+            }
+        }
+        sendMessageAck(contact.onionAddress.ifBlank { senderOnion }, frame.messageId)
+        return true
+    }
+
     private suspend fun sendMessageAck(senderOnion: String, messageId: UUID) {
         try {
             val ackFrame = OnionMessageProtocol.createAckFrame(
@@ -2256,6 +3250,54 @@ class TorMessagingService private constructor(private val context: Context) {
     }
 
     /**
+     * Called when connectivity changes or Doze exits while the service is running.
+     * Refreshes hidden-service descriptors, wakes the retry dispatcher, reconnects
+     * known contacts, and pulls any queued mailbox messages right away.
+     */
+    fun onNetworkRestored() {
+        if (_serviceState.value != ServiceState.RUNNING) return
+        scope.launch {
+            try {
+                prefetchKnownContactDescriptors()
+            } catch (e: Exception) {
+                Log.w(TAG, "Descriptor prefetch on network restore failed: ${e.message}")
+            }
+            wakeQueueDispatcher()
+            reconnectKnownContacts()
+            if (mailboxClient.isInitialized()) {
+                try {
+                    mailboxClient.pollAllMailboxes()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Mailbox poll on network restore failed: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private suspend fun prefetchKnownContactDescriptors() {
+        val app = context.applicationContext as? Application ?: return
+        val endpoints = LinkedHashSet<String>()
+        contactManager.getAllContacts()
+            .asSequence()
+            .filter {
+                it.trustState != TorContactTrustState.BLOCKED &&
+                    it.trustState != TorContactTrustState.KEY_CHANGED
+            }
+            .forEach { contact ->
+                if (!contact.requiresRendezvous() && contact.onionAddress.isNotBlank()) {
+                    endpoints.add(contact.onionAddress)
+                }
+                contact.mailboxOnion?.takeIf { it.isNotBlank() }?.let { endpoints.add(it) }
+            }
+        if (mailboxClient.isInitialized()) {
+            endpoints.addAll(mailboxClient.getMailboxes())
+        }
+        if (endpoints.isNotEmpty()) {
+            TorDaemonManager.getInstance(app).prefetchOnionDescriptors(endpoints)
+        }
+    }
+
+    /**
      * Rebuild direct sessions after an app restart or a mobile-network change.
      * Attempts are rate-limited and bounded so Tor is not flooded by a large
      * contact list, while recently used contacts recover without requiring a
@@ -2292,6 +3334,47 @@ class TorMessagingService private constructor(private val context: Context) {
             deduplicator.forget(frame.messageId)
             return false
         }
+        val previewBytes = meta.previewBytes
+        if (!meta.viewOnce && previewBytes != null && previewBytes.isNotEmpty()) {
+            val contact = meta.senderPublicKey
+                .takeIf { it.isNotBlank() }
+                ?.let { contactManager.getContactByPublicKey(it) }
+                ?: contactManager.getContactByOnion(senderOnion)
+            val previewPath = attachmentTransfer.savePreview(meta.transferId, previewBytes)
+            if (contact != null && previewPath != null) {
+                if (meta.groupId != null && meta.groupMessageId != null) {
+                    if (groupMessaging.handleIncomingImagePreview(
+                            sender = contact,
+                            groupId = meta.groupId,
+                            messageId = meta.groupMessageId,
+                            timestamp = frame.timestamp,
+                            previewPath = previewPath
+                        )
+                    ) {
+                        previewShownTransfers.add(meta.transferId.toString())
+                    } else {
+                        attachmentTransfer.deletePreview(meta.transferId)
+                    }
+                } else {
+                    runCatching {
+                        messageRepository.saveReceivedMessage(
+                            messageId = frame.messageId.toString(),
+                            contact = contact,
+                            text = "Photo",
+                            timestamp = frame.timestamp,
+                            attachmentPath = previewPath,
+                            attachmentMimeType = "image/webp"
+                        )
+                        previewShownTransfers.add(meta.transferId.toString())
+                        if (!visibleChatContacts.contains(contact.id)) {
+                            messageNotifier.showIncoming(contact, "📷 Photo", isPhoto = true)
+                        } else {
+                            messageNotifier.playForegroundChime()
+                        }
+                    }
+                }
+            }
+        }
         sendMessageAck(senderOnion, frame.messageId)
         return true
     }
@@ -2309,10 +3392,43 @@ class TorMessagingService private constructor(private val context: Context) {
         }
         val completed = (result as TorAttachmentTransfer.ChunkResult.Accepted).completed
         if (completed == null) {
+            val transferId = attachmentTransfer.peekTransferId(frame.payload)
+            if (transferId != null && attachmentTransfer.isFinalChunkPayload(frame.payload)) {
+                // Hold the final chunk ACK until earlier out-of-order chunks finish arriving;
+                // otherwise sender's markAttachmentDelivered() would delete still-missing chunks.
+                deferredFinalChunkIds[transferId.toString()] = frame.messageId
+                return true
+            }
             sendMessageAck(senderOnion, frame.messageId)
             return true
         }
+        return finalizeCompletedAttachment(senderOnion, frame, completed)
+    }
 
+    private suspend fun handleFileParity(senderOnion: String, frame: OnionMessageProtocol.OnionFrame): Boolean {
+        val result = attachmentTransfer.acceptParityDroplet(senderOnion, frame.payload)
+        if (result is TorAttachmentTransfer.ChunkResult.Rejected) {
+            Log.w(TAG, "Rejected parity droplet from ${redactEndpoint(senderOnion)}")
+            deduplicator.forget(frame.messageId)
+            return false
+        }
+        if (result is TorAttachmentTransfer.ChunkResult.AlreadyCompleted) {
+            sendMessageAck(senderOnion, frame.messageId)
+            return true
+        }
+        val completed = (result as TorAttachmentTransfer.ChunkResult.Accepted).completed
+        if (completed == null) {
+            sendMessageAck(senderOnion, frame.messageId)
+            return true
+        }
+        return finalizeCompletedAttachment(senderOnion, frame, completed)
+    }
+
+    private suspend fun finalizeCompletedAttachment(
+        senderOnion: String,
+        frame: OnionMessageProtocol.OnionFrame,
+        completed: TorAttachmentTransfer.CompletedAttachment
+    ): Boolean {
         val contact = completed.senderPublicKey
             .takeIf { it.isNotBlank() }
             ?.let { contactManager.getContactByPublicKey(it) }
@@ -2322,43 +3438,95 @@ class TorMessagingService private constructor(private val context: Context) {
             return false
         }
         if (completed.groupId != null && completed.groupMessageId != null) {
-            val accepted = groupMessaging.handleIncomingImage(
+            val accepted = groupMessaging.handleIncomingAttachment(
                 sender = contact,
                 groupId = completed.groupId,
                 messageId = completed.groupMessageId,
                 timestamp = completed.timestamp,
                 path = completed.path,
-                mimeType = completed.mimeType
+                mimeType = completed.mimeType,
+                fileName = completed.fileName,
+                durationMs = completed.durationMs,
+                viewOnce = completed.viewOnce
             )
             if (!accepted) { deduplicator.forget(frame.messageId); return false }
+            previewShownTransfers.remove(completed.transferId.toString())
+            attachmentTransfer.deletePreview(completed.transferId)
             attachmentTransfer.completeIncoming(senderOnion, completed.transferId)
             sendMessageAck(senderOnion, frame.messageId)
+            deferredFinalChunkIds.remove(completed.transferId.toString())
+                ?.takeIf { it != frame.messageId }
+                ?.let { sendMessageAck(senderOnion, it) }
             return true
         }
-        try {
-            messageRepository.saveReceivedMessage(
-                messageId = completed.messageId.toString(),
-                contact = contact,
-                text = "Photo",
-                timestamp = completed.timestamp,
-                attachmentPath = completed.path,
-                attachmentMimeType = completed.mimeType
+        val hadPreview = previewShownTransfers.remove(completed.transferId.toString())
+        val kind = when {
+            completed.mimeType.startsWith("audio/") -> "voice"
+            completed.mimeType.startsWith("image/") -> "photo"
+            else -> "file"
+        }
+        val sizeBytes = runCatching { java.io.File(completed.path).length().toInt() }.getOrDefault(0)
+        val rowText = if (kind == "photo" && !completed.viewOnce && completed.fileName.isBlank()) {
+            "Photo"
+        } else {
+            TorRichChatCodec.encodeAttachmentDescriptor(
+                TorRichChatCodec.AttachmentDescriptor(
+                    kind = kind,
+                    fileName = completed.fileName,
+                    totalBytes = sizeBytes,
+                    durationMs = completed.durationMs,
+                    viewOnce = completed.viewOnce
+                )
             )
+        }
+        try {
+            if (hadPreview) {
+                messageRepository.updateAttachment(
+                    messageId = completed.messageId.toString(),
+                    path = completed.path,
+                    mimeType = completed.mimeType
+                )
+                if (rowText != "Photo") {
+                    messageRepository.updateMessageText(completed.messageId.toString(), rowText)
+                }
+            } else {
+                messageRepository.saveReceivedMessage(
+                    messageId = completed.messageId.toString(),
+                    contact = contact,
+                    text = rowText,
+                    timestamp = completed.timestamp,
+                    attachmentPath = completed.path,
+                    attachmentMimeType = completed.mimeType
+                )
+            }
+            attachmentTransfer.deletePreview(completed.transferId)
             attachmentTransfer.completeIncoming(senderOnion, completed.transferId)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to persist received photo: ${e.message}")
+            Log.e(TAG, "Failed to persist received attachment: ${e.message}")
             deduplicator.forget(frame.messageId)
             return false
         }
         sendMessageAck(senderOnion, frame.messageId)
-        if (!visibleChatContacts.contains(contact.id)) {
-            messageNotifier.showIncoming(contact, "Photo", isPhoto = true)
+        deferredFinalChunkIds.remove(completed.transferId.toString())
+            ?.takeIf { it != frame.messageId }
+            ?.let { sendMessageAck(senderOnion, it) }
+        val previewLabel = TorRichChatCodec.friendlyPreviewText(rowText, completed.mimeType)
+        if (!hadPreview) {
+            if (!visibleChatContacts.contains(contact.id)) {
+                messageNotifier.showIncoming(
+                    contact,
+                    previewLabel,
+                    isPhoto = !completed.viewOnce && kind == "photo" && completed.fileName.isBlank()
+                )
+            } else {
+                messageNotifier.playForegroundChime()
+            }
         }
         messageListener?.onMessageReceived(
             contact,
             OnionMessage(
                 id = completed.messageId.toString(),
-                text = "Photo",
+                text = rowText,
                 senderOnion = senderOnion,
                 timestamp = completed.timestamp,
                 isOutgoing = false,
@@ -2382,6 +3550,7 @@ class TorMessagingService private constructor(private val context: Context) {
         // mark the photo delivered; only its final chunk is allowed to do that.
         val queuedMessage = messageQueue.getQueuedMessage(ackedId.toString())
         messageQueue.markDelivered(ackedId.toString())
+        syncEngine.markMessageDelivered(ackedId.toString())
         wakeQueueDispatcher()
 
         if (queuedMessage != null) {
@@ -2450,7 +3619,7 @@ class TorMessagingService private constructor(private val context: Context) {
         markPeerResponsive(senderOnion)
         
         val pongFrame = OnionMessageProtocol.createPongFrame(frame.messageId)
-        circuitManager.sendData(senderOnion, encryptFrame(senderOnion, pongFrame).encode())
+        circuitManager.sendDataIfConnected(senderOnion, encryptFrame(senderOnion, pongFrame).encode())
     }
     
     private fun handlePong(senderOnion: String, frame: OnionMessageProtocol.OnionFrame) {
@@ -2468,12 +3637,18 @@ class TorMessagingService private constructor(private val context: Context) {
 
     private fun markPeerResponsive(peerOnion: String) {
         if (peerOnion.isBlank() || peerOnion.startsWith("unknown-")) return
-        val wasOnline = _connectedPeers.value.contains(peerOnion)
-        lastVerifiedPeerActivity[peerOnion] = System.currentTimeMillis()
+        val canonical = canonicalPeerKey(peerOnion)
+        val wasOnline = _connectedPeers.value.contains(canonical)
+        val now = System.currentTimeMillis()
+        lastVerifiedPeerActivity[canonical] = now
+        refreshLanPeersState()
         if (!wasOnline) {
-            _connectedPeers.update { it + peerOnion }
-            contactManager.getContactByOnion(peerOnion)?.let { contact ->
+            _connectedPeers.update { it + canonical }
+            contactManager.getContactByOnion(canonical)?.let { contact ->
                 messageListener?.onPeerOnline(contact)
+            }
+            scope.launch {
+                runCatching { groupMessaging.onPeerOnline(canonical) }
             }
         }
     }
@@ -2489,12 +3664,79 @@ class TorMessagingService private constructor(private val context: Context) {
      * cannot consume bytes between socket registration and this read loop.
      */
     private fun ensureReadLoop(peerOnion: String) {
-        val connectionId = circuitManager.getActiveConnectionId(peerOnion) ?: return
-        if (readLoopConnections.putIfAbsent(peerOnion, connectionId) == connectionId) return
-        readLoopConnections[peerOnion] = connectionId
-        peersWithReadLoop.add(peerOnion)
+        val canonical = canonicalPeerKey(peerOnion)
+        val connectionId = circuitManager.getActiveConnectionId(canonical) ?: return
+        refreshLanPeersState()
+        synchronized(readLoopConnections) {
+            if (readLoopConnections[canonical] == connectionId) return
+            readLoopConnections[canonical] = connectionId
+            peersWithReadLoop.add(canonical)
+        }
         scope.launch {
-            continuousReadLoop(peerOnion, connectionId)
+            continuousReadLoop(canonical, connectionId)
+        }
+    }
+
+    private fun createEncryptedBulkHelloFrame(peerOnion: String): ByteArray? {
+        val canonical = canonicalPeerKey(peerOnion)
+        val contact = contactManager.getContactByOnion(canonical) ?: return null
+        if (contact.publicKey.isBlank()) return null
+        val myOnion = getMyOnionAddress()
+        if (myOnion.isBlank()) return null
+        val frame = OnionMessageProtocol.OnionFrame(
+            messageId = UUID.randomUUID(),
+            sequence = getSequenceManager(canonical).nextOutbound(),
+            timestamp = System.currentTimeMillis(),
+            frameType = OnionMessageProtocol.FrameType.BULK_HELLO,
+            payload = myOnion.toByteArray(Charsets.UTF_8)
+        )
+        return runCatching { encryptFrame(canonical, frame).encode() }.getOrNull()
+    }
+
+    private fun ensureBulkReadLoop(peerOnion: String) {
+        val canonical = canonicalPeerKey(peerOnion)
+        val connectionId = circuitManager.getActiveBulkConnectionId(canonical) ?: return
+        synchronized(bulkReadLoopConnections) {
+            if (bulkReadLoopConnections[canonical] == connectionId) return
+            bulkReadLoopConnections[canonical] = connectionId
+        }
+        scope.launch {
+            continuousBulkReadLoop(canonical, connectionId)
+        }
+    }
+
+    private suspend fun continuousBulkReadLoop(peerOnion: String, connectionId: String) {
+        Log.d(TAG, "⚡ Starting Warp-Lane BULK read loop for ${redactEndpoint(peerOnion)}")
+        try {
+            while (circuitManager.getActiveBulkConnectionId(peerOnion) == connectionId) {
+                try {
+                    val data = circuitManager.receiveBulkData(peerOnion, connectionId)
+                    if (data != null) {
+                        if (data.size >= OnionMessageProtocol.HEADER_SIZE &&
+                            (data[33] == OnionMessageProtocol.FrameType.FILE_CHUNK.code ||
+                                data[33] == OnionMessageProtocol.FrameType.FILE_PARITY.code ||
+                                data[33] == OnionMessageProtocol.FrameType.SYNC_BATCH.code)
+                        ) {
+                            enqueueBulkInboundFrame(peerOnion, data)
+                        } else {
+                            handleIncomingData(peerOnion, data, isAlreadyDecrypted = false)
+                        }
+                    } else if (circuitManager.getActiveBulkConnectionId(peerOnion) != connectionId ||
+                        !circuitManager.hasActiveBulkConnection(peerOnion)
+                    ) {
+                        break
+                    } else {
+                        delay(10)
+                    }
+                } catch (e: java.io.EOFException) {
+                    break
+                } catch (e: Exception) {
+                    Log.w(TAG, "Warp-Lane BULK read loop error for ${redactEndpoint(peerOnion)}: ${e.message}")
+                    break
+                }
+            }
+        } finally {
+            bulkReadLoopConnections.remove(peerOnion, connectionId)
         }
     }
 
@@ -2583,7 +3825,9 @@ class TorMessagingService private constructor(private val context: Context) {
         for (i in DIRECT_SEALED_MAGIC.indices) {
             if (payload[i] != DIRECT_SEALED_MAGIC[i]) return false
         }
-        return payload[DIRECT_SEALED_MAGIC.size] == DIRECT_SEALED_VERSION
+        val ver = payload[DIRECT_SEALED_MAGIC.size]
+        return ver == DIRECT_SEALED_VERSION ||
+            ver == com.seamless.android.crypto.AegisTorCrypto.DIRECT_V2_VERSION
     }
 
     private fun createSealedMailboxPayload(
@@ -2594,26 +3838,17 @@ class TorMessagingService private constructor(private val context: Context) {
 
         return try {
             val recipientPublicKey = hexStringToByteArray(contact.publicKey)
-            val ephemeral = X25519KeyPair.generate()
-            val sharedSecret = X25519.computeSharedSecret(ephemeral.privateKey, recipientPublicKey)
-            val nonce = ByteArray(MAILBOX_NONCE_SIZE).also { SecureRandom().nextBytes(it) }
-            val plaintext = frame.encode()
-            val aad = MAILBOX_SEALED_MAGIC + byteArrayOf(MAILBOX_SEALED_VERSION) + ephemeral.publicKey
-            val ciphertext = aesGcmEncrypt(
-                plaintext = plaintext,
-                key = deriveMailboxKey(sharedSecret, ephemeral.publicKey, recipientPublicKey),
-                nonce = nonce,
-                aad = aad
+            val localKeyPair = cachedLocalStaticKeyPair
+                ?: SecureIdentityStateManager(context).loadStaticKey()?.also { cachedLocalStaticKeyPair = it }
+                ?: return null
+            com.seamless.android.crypto.AegisTorCrypto.sealMailboxV2(
+                plaintext = frame.encode(),
+                senderStaticPriv = localKeyPair.first,
+                senderStaticPub = localKeyPair.second,
+                recipientStaticPub = recipientPublicKey
             )
-
-            ByteBuffer.allocate(aad.size + nonce.size + 4 + ciphertext.size)
-                .put(aad)
-                .put(nonce)
-                .putInt(ciphertext.size)
-                .put(ciphertext)
-                .array()
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to create mailbox sealed payload: ${e.message}")
+            Log.w(TAG, "Failed to create STMB v2 mailbox sealed payload: ${e.message}")
             null
         }
     }
@@ -2624,20 +3859,37 @@ class TorMessagingService private constructor(private val context: Context) {
      * messages, so a transient decode/decryption failure cannot silently lose mail.
      */
     private suspend fun handleMailboxPayload(payload: ByteArray, mailboxOnion: String): Boolean {
-        val unsealed = decryptSealedMailboxPayload(payload)
-        if (unsealed == null) {
-            Log.w(TAG, "Rejected unsealed mailbox payload from ${redactEndpoint(mailboxOnion)}")
-            return false
-        }
+        val (unsealed, authenticatedSenderKey) = decryptSealedMailboxPayloadWithSender(payload)
+            ?: run {
+                Log.w(TAG, "Rejected unsealed mailbox payload from ${redactEndpoint(mailboxOnion)}")
+                return false
+            }
 
         val frame = OnionMessageProtocol.OnionFrame.decode(unsealed) ?: return false
-        val senderKey = when (frame.frameType) {
+        val innerSenderKey = when (frame.frameType) {
             OnionMessageProtocol.FrameType.MESSAGE -> TorMessageEnvelope.decode(frame.payload)?.senderKey
             OnionMessageProtocol.FrameType.FILE_META -> attachmentTransfer.decodeMeta(frame.payload)?.senderPublicKey
             OnionMessageProtocol.FrameType.FILE_CHUNK -> attachmentTransfer.senderPublicKeyForChunk(frame.payload)
+            OnionMessageProtocol.FrameType.FILE_PARITY -> attachmentTransfer.senderPublicKeyForParity(frame.payload)
             else -> null
         }
-        val contact = senderKey
+
+        if (authenticatedSenderKey != null) {
+            if (!innerSenderKey.isNullOrBlank() && !innerSenderKey.equals(authenticatedSenderKey, ignoreCase = true)) {
+                Log.w(TAG, "Rejected STMB v2 mailbox payload: inner senderKey mismatch")
+                return false
+            }
+        } else if (frame.frameType == OnionMessageProtocol.FrameType.MESSAGE) {
+            val chatText = TorMessageEnvelope.decode(frame.payload)
+                ?.let { OnionMessageProtocol.ChatMessage.fromBytes(it.ciphertext)?.text }
+            if (chatText?.startsWith("SGRP1:") == true || chatText?.startsWith("SGRP2:") == true) {
+                Log.w(TAG, "Rejected unauthenticated legacy v1 mailbox group payload")
+                return false
+            }
+        }
+
+        val effectiveSenderKey = authenticatedSenderKey ?: innerSenderKey
+        val contact = effectiveSenderKey
             ?.takeIf { it.isNotEmpty() }
             ?.let { contactManager.getContactByPublicKey(it) }
 
@@ -2662,17 +3914,36 @@ class TorMessagingService private constructor(private val context: Context) {
         )
     }
 
-    private fun decryptSealedMailboxPayload(payload: ByteArray): ByteArray? {
+    private fun decryptSealedMailboxPayloadWithSender(payload: ByteArray): Pair<ByteArray, String?>? {
         return try {
-            if (payload.size < MAILBOX_SEALED_MAGIC.size + 1 + 32 + MAILBOX_NONCE_SIZE + 4) return null
-
-            val buffer = ByteBuffer.wrap(payload)
-            val magic = ByteArray(MAILBOX_SEALED_MAGIC.size)
-            buffer.get(magic)
+            if (payload.size < MAILBOX_SEALED_MAGIC.size + 1) return null
+            val magic = payload.copyOfRange(0, MAILBOX_SEALED_MAGIC.size)
             if (!magic.contentEquals(MAILBOX_SEALED_MAGIC)) return null
 
-            val version = buffer.get()
-            if (version != MAILBOX_SEALED_VERSION) return null
+            val version = payload[MAILBOX_SEALED_MAGIC.size]
+            val localKeyPair = cachedLocalStaticKeyPair
+                ?: SecureIdentityStateManager(context).loadStaticKey()?.also { cachedLocalStaticKeyPair = it }
+                ?: return null
+            val identityKey = localKeyPair.first
+            val myPublicKey = localKeyPair.second
+
+            if (version == com.seamless.android.crypto.AegisTorCrypto.MAILBOX_V2_VERSION) {
+                val opened = com.seamless.android.crypto.AegisTorCrypto.openMailboxV2(
+                    payload = payload,
+                    recipientStaticPriv = identityKey,
+                    recipientStaticPub = myPublicKey
+                ) ?: return null
+                return opened.plaintext to opened.senderPublicKeyHex
+            }
+
+            if (version != MAILBOX_SEALED_VERSION ||
+                payload.size < MAILBOX_SEALED_MAGIC.size + 1 + 32 + MAILBOX_NONCE_SIZE + 4
+            ) {
+                return null
+            }
+
+            val buffer = ByteBuffer.wrap(payload)
+            buffer.position(MAILBOX_SEALED_MAGIC.size + 1)
 
             val ephemeralPublicKey = ByteArray(32)
             buffer.get(ephemeralPublicKey)
@@ -2686,17 +3957,16 @@ class TorMessagingService private constructor(private val context: Context) {
             val ciphertext = ByteArray(ciphertextSize)
             buffer.get(ciphertext)
 
-            val identityKey = SecureIdentityStateManager(context).loadStaticKey()?.first ?: return null
-            val myPublicKey = encryptionService.getStaticPublicKey() ?: return null
             val sharedSecret = X25519.computeSharedSecret(identityKey, ephemeralPublicKey)
             val aad = MAILBOX_SEALED_MAGIC + byteArrayOf(version) + ephemeralPublicKey
 
-            aesGcmDecrypt(
+            val plain = aesGcmDecrypt(
                 ciphertext = ciphertext,
                 key = deriveMailboxKey(sharedSecret, ephemeralPublicKey, myPublicKey),
                 nonce = nonce,
                 aad = aad
-            )
+            ) ?: return null
+            plain to null
         } catch (e: Exception) {
             Log.w(TAG, "Failed to decrypt mailbox payload: ${e.message}")
             null
@@ -2742,20 +4012,32 @@ class TorMessagingService private constructor(private val context: Context) {
 
     private fun createDirectSealedPayload(
         frame: OnionMessageProtocol.OnionFrame,
-        peerPublicKey: ByteArray
+        peerPublicKey: ByteArray,
+        peerPublicKeyHex: String? = null
     ): ByteArray {
+        val localKeyPair = cachedLocalStaticKeyPair
+            ?: SecureIdentityStateManager(context).loadStaticKey()?.also { cachedLocalStaticKeyPair = it }
+        if (localKeyPair != null && peerPublicKey.size == 32) {
+            val peerKey = peerPublicKeyHex?.lowercase() ?: fastHexEncode(peerPublicKey)
+            val counter = directSendCounters
+                .getOrPut(peerKey) { java.util.concurrent.atomic.AtomicLong(0L) }
+                .getAndIncrement()
+            return com.seamless.android.crypto.AegisTorCrypto.sealDirectV2(
+                plaintext = frame.payload,
+                frameAad = directFrameAad(frame),
+                senderStaticPriv = localKeyPair.first,
+                senderStaticPub = localKeyPair.second,
+                recipientStaticPub = peerPublicKey,
+                counter = counter
+            )
+        }
 
-
-        // Key is derived once and cached via getOrDeriveDirectTransportKey(peerPublicKey)
-
-
-        // Cached transport key eliminates per-frame Keystore and X25519 overhead
-        val nonce = ByteArray(DIRECT_NONCE_SIZE).also { SecureRandom().nextBytes(it) }
+        val nonce = ByteArray(DIRECT_NONCE_SIZE).also { secureRandom.nextBytes(it) }
         val aad = directFrameAad(frame)
         val sealedHeader = DIRECT_SEALED_MAGIC + byteArrayOf(DIRECT_SEALED_VERSION)
         val ciphertext = aesGcmEncrypt(
             plaintext = frame.payload,
-            key = getOrDeriveDirectTransportKey(peerPublicKey),
+            key = getOrDeriveDirectTransportKey(peerPublicKey, peerPublicKeyHex),
             nonce = nonce,
             aad = aad + sealedHeader
         )
@@ -2770,19 +4052,47 @@ class TorMessagingService private constructor(private val context: Context) {
 
     private fun openDirectSealedPayload(
         frame: OnionMessageProtocol.OnionFrame,
-        peerPublicKey: ByteArray
+        peerPublicKey: ByteArray,
+        peerPublicKeyHex: String? = null
     ): ByteArray? {
         return try {
             val payload = frame.payload
-            if (payload.size < DIRECT_SEALED_MAGIC.size + 1 + DIRECT_NONCE_SIZE + 4) return null
+            if (payload.size < DIRECT_SEALED_MAGIC.size + 1) return null
 
-            val buffer = ByteBuffer.wrap(payload)
-            val magic = ByteArray(DIRECT_SEALED_MAGIC.size)
-            buffer.get(magic)
+            val magic = payload.copyOfRange(0, DIRECT_SEALED_MAGIC.size)
             if (!magic.contentEquals(DIRECT_SEALED_MAGIC)) return null
 
-            val version = buffer.get()
-            if (version != DIRECT_SEALED_VERSION) return null
+            val version = payload[DIRECT_SEALED_MAGIC.size]
+            if (version == com.seamless.android.crypto.AegisTorCrypto.DIRECT_V2_VERSION) {
+                val localKeyPair = cachedLocalStaticKeyPair
+                    ?: SecureIdentityStateManager(context).loadStaticKey()?.also { cachedLocalStaticKeyPair = it }
+                    ?: return null
+                val opened = com.seamless.android.crypto.AegisTorCrypto.openDirectV2(
+                    payload = payload,
+                    frameAad = directFrameAad(frame),
+                    recipientStaticPriv = localKeyPair.first,
+                    recipientStaticPub = localKeyPair.second,
+                    senderStaticPub = peerPublicKey
+                ) ?: return null
+                val peerKey = peerPublicKeyHex?.lowercase() ?: fastHexEncode(peerPublicKey)
+                val replayWindow = directReplayWindows.getOrPut(peerKey) {
+                    com.seamless.android.crypto.AegisTorCrypto.ReplayWindow512()
+                }
+                if (!replayWindow.checkAndMark(opened.counter)) {
+                    Log.w(TAG, "Rejected replayed STDP v2 frame ${frame.messageId} (counter=${opened.counter})")
+                    return null
+                }
+                return opened.plaintext
+            }
+
+            if (version != DIRECT_SEALED_VERSION ||
+                payload.size < DIRECT_SEALED_MAGIC.size + 1 + DIRECT_NONCE_SIZE + 4
+            ) {
+                return null
+            }
+
+            val buffer = ByteBuffer.wrap(payload)
+            buffer.position(DIRECT_SEALED_MAGIC.size + 1)
 
             val nonce = ByteArray(DIRECT_NONCE_SIZE)
             buffer.get(nonce)
@@ -2793,15 +4103,11 @@ class TorMessagingService private constructor(private val context: Context) {
             val ciphertext = ByteArray(ciphertextSize)
             buffer.get(ciphertext)
 
-    
-
-            // Key is derived once and cached via getOrDeriveDirectTransportKey(peerPublicKey)
-            // Key derived & cached in getOrDeriveDirectTransportKey
             val sealedHeader = DIRECT_SEALED_MAGIC + byteArrayOf(version)
 
             aesGcmDecrypt(
                 ciphertext = ciphertext,
-                key = getOrDeriveDirectTransportKey(peerPublicKey),
+                key = getOrDeriveDirectTransportKey(peerPublicKey, peerPublicKeyHex),
                 nonce = nonce,
                 aad = directFrameAad(frame) + sealedHeader
             )
@@ -2811,8 +4117,11 @@ class TorMessagingService private constructor(private val context: Context) {
         }
     }
 
-    private fun getOrDeriveDirectTransportKey(peerPublicKey: ByteArray): ByteArray {
-        val cacheKey = peerPublicKey.joinToString("") { "%02x".format(it) }
+    private fun getOrDeriveDirectTransportKey(
+        peerPublicKey: ByteArray,
+        peerPublicKeyHex: String? = null
+    ): ByteArray {
+        val cacheKey = peerPublicKeyHex?.lowercase() ?: fastHexEncode(peerPublicKey)
         directTransportKeyCache[cacheKey]?.let { return it }
         val localKeyPair = cachedLocalStaticKeyPair
             ?: SecureIdentityStateManager(context).loadStaticKey()?.also { cachedLocalStaticKeyPair = it }
@@ -2882,7 +4191,7 @@ class TorMessagingService private constructor(private val context: Context) {
         if (publicKeyHex != null && publicKeyHex.isNotEmpty()) {
             try {
                 val publicKeyBytes = hexStringToByteArray(publicKeyHex)
-                val encrypted = createDirectSealedPayload(frame, publicKeyBytes)
+                val encrypted = createDirectSealedPayload(frame, publicKeyBytes, publicKeyHex)
                 
                 // Verify encrypted payload fits within frame size limit
                 if (encrypted.size > OnionMessageProtocol.MAX_PAYLOAD_SIZE) {
@@ -2923,19 +4232,19 @@ class TorMessagingService private constructor(private val context: Context) {
         throw IllegalStateException("No encrypted Tor session for ${redactEndpoint(recipientOnion)}")
     }
     
-    private fun decryptData(senderOnion: String, data: ByteArray): ByteArray {
+    private fun decryptFrame(senderOnion: String, data: ByteArray): OnionMessageProtocol.OnionFrame {
         val frame = OnionMessageProtocol.OnionFrame.decode(data)
             ?: throw IllegalArgumentException("Invalid Tor frame")
-        
+
         // Get the sender's public key for decryption
         val contact = contactManager.getContactByOnion(senderOnion)
         val publicKeyHex = contact?.publicKey
-        
+
         // First try: direct decryption with the known sender's public key.
-        if (publicKeyHex != null && publicKeyHex.isNotEmpty()) {
+        if (!publicKeyHex.isNullOrEmpty()) {
             try {
                 val publicKeyBytes = hexStringToByteArray(publicKeyHex)
-                val decrypted = openDirectSealedPayload(frame, publicKeyBytes)
+                val decrypted = openDirectSealedPayload(frame, publicKeyBytes, publicKeyHex)
                 if (decrypted != null) {
                     return OnionMessageProtocol.OnionFrame(
                         messageId = frame.messageId,
@@ -2943,28 +4252,23 @@ class TorMessagingService private constructor(private val context: Context) {
                         timestamp = frame.timestamp,
                         frameType = frame.frameType,
                         payload = decrypted
-                    ).encode()
+                    )
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Direct Tor frame decryption failed for ${redactEndpoint(senderOnion)}: ${e.message}")
             }
         }
 
-        // ━━━ FALLBACK: Try ALL contacts' public keys ━━━
-        // If the onion lookup failed (empty address, format mismatch, contact not
-        // found), we still have the encrypted frame. AES-GCM tag verification
-        // guarantees only the correct sender's key will produce a valid decrypt.
-        // This handles ALL possible contact lookup failures.
+        // Fall back across all contacts when the inbound socket address did not map cleanly.
         if (isDirectSealedPayload(frame.payload)) {
             val allContacts = contactManager.getAllContacts()
             for (candidate in allContacts) {
                 val candidateKey = candidate.publicKey
                 if (candidateKey.isBlank()) continue
-                // Skip the contact we already tried above
                 if (candidateKey.equals(publicKeyHex, ignoreCase = true)) continue
                 try {
                     val candidateKeyBytes = hexStringToByteArray(candidateKey)
-                    val decrypted = openDirectSealedPayload(frame, candidateKeyBytes)
+                    val decrypted = openDirectSealedPayload(frame, candidateKeyBytes, candidateKey)
                     if (decrypted != null) {
                         Log.i(TAG, "🔓 Decrypted via contact fallback: ${candidate.nickname} (onion lookup for '$senderOnion' had failed)")
                         return OnionMessageProtocol.OnionFrame(
@@ -2973,15 +4277,14 @@ class TorMessagingService private constructor(private val context: Context) {
                             timestamp = frame.timestamp,
                             frameType = frame.frameType,
                             payload = decrypted
-                        ).encode()
+                        )
                     }
                 } catch (_: Exception) {
-                    // AES-GCM tag mismatch — not this contact, try next
                 }
             }
             Log.w(TAG, "❌ Direct sealed payload could not be decrypted by any known contact (tried ${allContacts.size} contacts)")
         }
-        
+
         // Fallback: use Noise decryption via EncryptionService
         try {
             if (encryptionService.hasEstablishedSession(senderOnion)) {
@@ -2992,12 +4295,12 @@ class TorMessagingService private constructor(private val context: Context) {
                     timestamp = frame.timestamp,
                     frameType = frame.frameType,
                     payload = decrypted
-                ).encode()
+                )
             }
         } catch (e: Exception) {
             Log.w(TAG, "Noise decryption failed for ${redactEndpoint(senderOnion)}: ${e.message}")
         }
-        
+
         throw SecurityException("Unable to decrypt Tor frame from ${redactEndpoint(senderOnion)}")
     }
     
@@ -3032,18 +4335,13 @@ class TorMessagingService private constructor(private val context: Context) {
      * Called during service startup.
      */
     private fun startRendezvousForPendingContacts() {
-        val brpContacts = contactManager.getRendezvousContacts()
-        if (brpContacts.isEmpty()) return
-
-        Log.i(TAG, "🔑 Starting BRP for ${brpContacts.size} pending contacts")
-
+        // Register BRP callback unconditionally BEFORE checking pending list so
+        // contacts added later in the session also deliver their resolved onion.
         rendezvous.setCallback(object : BrambleRendezvous.RendezvousCallback {
             override fun onRendezvousConnected(peerId: String, peerOnion: String) {
                 Log.i(TAG, "✅ BRP connected: $peerId → $peerOnion")
-                // Update the contact with the resolved onion address
                 contactManager.resolveRendezvousAddress(peerId, peerOnion)
 
-                // Send contact exchange to finalize the connection
                 scope.launch {
                     sendContactExchange(peerOnion)
                 }
@@ -3053,6 +4351,11 @@ class TorMessagingService private constructor(private val context: Context) {
                 Log.w(TAG, "❌ BRP failed for $peerId: $reason")
             }
         })
+
+        val brpContacts = contactManager.getRendezvousContacts()
+        if (brpContacts.isEmpty()) return
+
+        Log.i(TAG, "🔑 Starting BRP for ${brpContacts.size} pending contacts")
 
         for (contact in brpContacts) {
             scope.launch {
@@ -3223,7 +4526,11 @@ class TorMessagingService private constructor(private val context: Context) {
             val stored = if (isContactExchange) storedRemotely else (storedRemotely || localOutboxPublished)
             if (stored) {
                 deliveryRoutes[message.uiMessageId] = TorDeliveryRoute.MAILBOX
-                messageQueue.markMailboxStored(message.id)
+                // Only freeze mailbox retries when a remote Tier 2 mailbox accepted the blob;
+                // local Tier 1 deposit alone must still allow Tier 2 uploads on retry cycles.
+                if (storedRemotely) {
+                    messageQueue.markMailboxStored(message.id)
+                }
                 if (message.completesUiMessage) {
                     messageRepository.updateDelivery(
                         message.uiMessageId,
@@ -3263,7 +4570,35 @@ class TorMessagingService private constructor(private val context: Context) {
         }
         val myFolderId = encryptionService.getIdentityFingerprint().lowercase()
         if (myFolderId.isBlank()) return
-        val outboxToken = mailboxService.deriveContactOutboxToken(myFolderId)
+        val peerPubBytes = runCatching { hexStringToByteArray(contact.publicKey) }
+            .getOrNull()
+            ?.takeIf { it.size == 32 }
+        val localKeyPair = cachedLocalStaticKeyPair
+            ?: SecureIdentityStateManager(context).loadStaticKey()?.also { cachedLocalStaticKeyPair = it }
+
+        if (peerPubBytes != null && localKeyPair != null) {
+            val peerFolderId = fingerprintForPublicKeyHex(contact.publicKey)
+            runCatching {
+                val peerOutboxToken = com.seamless.android.crypto.AegisTorCrypto.derivePairwiseOutboxToken(
+                    localStaticPriv = localKeyPair.first,
+                    peerStaticPub = peerPubBytes,
+                    recipientFolderId = peerFolderId
+                )
+                mailboxService.registerContactOutboxToken(peerFolderId, peerOutboxToken)
+            }
+        }
+
+        val outboxToken = if (peerPubBytes != null && localKeyPair != null) {
+            runCatching {
+                com.seamless.android.crypto.AegisTorCrypto.derivePairwiseOutboxToken(
+                    localStaticPriv = localKeyPair.first,
+                    peerStaticPub = peerPubBytes,
+                    recipientFolderId = myFolderId
+                )
+            }.getOrElse { mailboxService.deriveContactOutboxToken(myFolderId) }
+        } else {
+            mailboxService.deriveContactOutboxToken(myFolderId)
+        }
 
         // Register explicit contact.mailboxOnion if present
         val explicitMailbox = contact.mailboxOnion
@@ -3494,7 +4829,7 @@ class TorMessagingService private constructor(private val context: Context) {
         val secureState = SecureIdentityStateManager(context)
         secureState.getSecureValue(storageKey)?.takeIf { it.isNotBlank() }?.let { return it }
 
-        val bytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        val bytes = ByteArray(32).also { secureRandom.nextBytes(it) }
         return android.util.Base64.encodeToString(
             bytes,
             android.util.Base64.NO_WRAP or android.util.Base64.URL_SAFE

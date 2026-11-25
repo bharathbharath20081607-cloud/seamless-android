@@ -1895,19 +1895,6 @@ class BluetoothMeshService(private val context: Context) {
                         val signedPacket = signPacketBeforeBroadcast(packet)
                         connectionManager.broadcastPacket(RoutedPacket(signedPacket))
                         Log.d(TAG, "📤 Sent encrypted PM to $recipientPeerID")
-                        
-                        // Also send through local chat UI
-                        val sentMessage = BitchatMessage(
-                            id = finalMessageID,
-                            sender = delegate?.getNickname() ?: "Me",
-                            content = content,
-                            timestamp = Date(),
-                            isPrivate = true,
-                            recipientNickname = recipientNickname,
-                            senderPeerID = myPeerID,
-                            vectorClock = currentClock
-                        )
-                        delegate?.didReceiveMessage(sentMessage)
                     } else {
                         Log.e(TAG, "Failed to encrypt private message for $recipientPeerID - encryptedPayload is null")
                     }

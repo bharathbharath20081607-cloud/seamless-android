@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.sp
 import com.seamless.android.data.AppDatabase
 import com.seamless.android.data.PrivateGroupEntity
 import com.seamless.android.net.OnionContactManager
+import com.seamless.android.net.TorContactTrustState
 import com.seamless.android.net.TorGroupMessaging
 import com.seamless.android.net.TorMessagingService
 import java.text.SimpleDateFormat
@@ -68,8 +69,8 @@ import java.util.Locale
 // ───────────────────────── Shared helpers ─────────────────────────
 
 private val SenderPalette = listOf(
-    Color(0xFF8FD3FF), Color(0xFFFFB86B), Color(0xFFB69CFF),
-    Color(0xFF7BE0B0), Color(0xFFFF8FA3), Color(0xFFE6D36B)
+    Color(0xFF0284C7), Color(0xFFD97706), Color(0xFF7C3AED),
+    Color(0xFF059669), Color(0xFFE11D48), Color(0xFF2563EB)
 )
 
 private val AvatarGradients = listOf(
@@ -180,10 +181,10 @@ internal fun ContactPickerList(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(14.dp))
-                    .background(if (isOn) Color.White.copy(alpha = 0.08f) else Color.Transparent)
+                    .background(if (isOn) OnionUi.TextPrimary.copy(alpha = 0.08f) else Color.Transparent)
                     .border(
                         width = 1.dp,
-                        color = if (isOn) Color.White.copy(alpha = 0.24f) else Color.Transparent,
+                        color = if (isOn) OnionUi.TextPrimary.copy(alpha = 0.24f) else Color.Transparent,
                         shape = RoundedCornerShape(14.dp)
                     )
                     .clickable { onToggle(contact.id) }
@@ -193,7 +194,7 @@ internal fun ContactPickerList(
                 GroupAvatar(contact.nickname, size = 40.dp)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(contact.nickname, color = Color.White, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(contact.nickname, color = OnionUi.TextPrimary, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(contact.onionAddress.take(18) + "…", color = OnionUi.TextMuted, fontSize = 12.sp)
                 }
                 Box(
@@ -213,13 +214,13 @@ internal fun ContactPickerList(
 
 @Composable
 internal fun onionFieldColors() = OutlinedTextFieldDefaults.colors(
-    focusedTextColor = Color.White,
-    unfocusedTextColor = Color.White,
-    focusedBorderColor = Color.White.copy(alpha = 0.6f),
+    focusedTextColor = OnionUi.TextPrimary,
+    unfocusedTextColor = OnionUi.TextPrimary,
+    focusedBorderColor = OnionUi.TextPrimary.copy(alpha = 0.6f),
     unfocusedBorderColor = OnionUi.Outline,
-    focusedLabelColor = Color.White.copy(alpha = 0.8f),
+    focusedLabelColor = OnionUi.TextPrimary.copy(alpha = 0.8f),
     unfocusedLabelColor = OnionUi.TextSecondary,
-    cursorColor = Color.White,
+    cursorColor = OnionUi.TextPrimary,
     focusedContainerColor = Color.Transparent,
     unfocusedContainerColor = Color.Transparent
 )
@@ -229,7 +230,7 @@ internal fun onionFieldColors() = OutlinedTextFieldDefaults.colors(
 @Composable
 internal fun PrivateGroupsTab(onGroupClick: (PrivateGroupEntity) -> Unit) {
     val context = LocalContext.current
-    val groups by remember { AppDatabase.getDatabase(context).groupDao().getAllGroups() }
+    val groups by remember { AppDatabase.getDatabase(context).groupDao().getGroupsOrderedByRecentActivity() }
         .collectAsState(initial = emptyList())
 
     if (groups.isEmpty()) {
@@ -237,10 +238,10 @@ internal fun PrivateGroupsTab(onGroupClick: (PrivateGroupEntity) -> Unit) {
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
                 GroupAvatar("", size = 84.dp)
                 Spacer(Modifier.height(20.dp))
-                Text("No private groups yet", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text("No private groups yet", color = OnionUi.TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Create a private group and invite your Tor contacts. Every message is encrypted separately for each member and travels over Tor — no server.",
+                    "Create a private group and invite your Tor contacts. Every message is synced via Chrono-DAG over Tor — no server.",
                     color = OnionUi.TextSecondary,
                     textAlign = TextAlign.Center,
                     fontSize = 14.sp
@@ -265,7 +266,8 @@ internal fun GroupRow(group: PrivateGroupEntity, onClick: () -> Unit) {
     val service = remember { TorGroupMessaging.getInstance(context) }
     val messagingService = remember { TorMessagingService.getInstance(context) }
     val connectedPeers by messagingService.connectedPeersFlow.collectAsState()
-    val lastRead = remember(group.groupId) { service.lastReadAt(group.groupId) }
+    val lastReadMap by service.lastReadAtFlow.collectAsState()
+    val lastRead = lastReadMap[group.groupId] ?: service.lastReadAt(group.groupId)
     val last by remember(group.groupId) { dao.getLastMessage(group.groupId) }.collectAsState(initial = null)
     val unread by remember(group.groupId, lastRead) { dao.getUnreadCount(group.groupId, lastRead) }
         .collectAsState(initial = 0)
@@ -328,7 +330,10 @@ internal fun GroupRow(group: PrivateGroupEntity, onClick: () -> Unit) {
                 val previewText = remember(last, members.size, onlineCount) {
                     val msg = last
                     if (msg != null) {
-                        val cleanBody = TorGroupMessaging.parseMessageContent(msg.text).body
+                        val cleanBody = com.seamless.android.net.TorRichChatCodec.friendlyPreviewText(
+                            msg.text,
+                            msg.attachmentMimeType
+                        )
                         if (msg.senderOnionAddress == TorGroupMessaging.SYSTEM_SENDER) {
                             cleanBody
                         } else {
@@ -337,7 +342,7 @@ internal fun GroupRow(group: PrivateGroupEntity, onClick: () -> Unit) {
                         }
                     } else {
                         val onlineSuffix = if (onlineCount > 0) " · $onlineCount online" else ""
-                        "${members.size} member${if (members.size == 1) "" else "s"}$onlineSuffix · E2EE over Tor"
+                        "${members.size} member${if (members.size == 1) "" else "s"}$onlineSuffix · Chrono-DAG Tor"
                     }
                 }
                 Text(
@@ -383,7 +388,13 @@ internal fun CreateGroupSheet(
     var name by remember { mutableStateOf("") }
     var searchQuery by remember { mutableStateOf("") }
     var selected by remember { mutableStateOf(emptySet<String>()) }
-    val eligible = remember(contacts) { contacts.filter { !it.requiresRendezvous() } }
+    val eligible = remember(contacts) {
+        contacts.filter {
+            !it.requiresRendezvous() &&
+                it.effectiveTrustState() != TorContactTrustState.BLOCKED &&
+                it.effectiveTrustState() != TorContactTrustState.KEY_CHANGED
+        }
+    }
     val filtered = remember(eligible, searchQuery) {
         if (searchQuery.isBlank()) eligible
         else eligible.filter {
@@ -396,7 +407,7 @@ internal fun CreateGroupSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = OnionUi.CanvasRaised,
-        contentColor = Color.White
+        contentColor = OnionUi.TextPrimary
     ) {
         Column(
             modifier = Modifier
@@ -408,12 +419,12 @@ internal fun CreateGroupSheet(
                 GroupAvatar(name.ifBlank { "G" }, size = 46.dp)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("New Private Group", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                    Text("New Private Group", color = OnionUi.TextPrimary, fontSize = 21.sp, fontWeight = FontWeight.Bold)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.Lock, null, tint = OnionUi.Online, modifier = Modifier.size(12.dp))
                         Spacer(Modifier.width(4.dp))
                         Text(
-                            "Serverless pairwise E2EE over Tor",
+                            "Chrono-DAG pairwise E2EE over Tor",
                             color = OnionUi.TextSecondary,
                             fontSize = 12.sp
                         )
@@ -434,19 +445,20 @@ internal fun CreateGroupSheet(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "Invite Tor contacts",
-                    color = Color.White,
+                    color = OnionUi.TextPrimary,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f)
                 )
                 if (eligible.isNotEmpty()) {
                     TextButton(
                         onClick = {
-                            selected = if (selected.size == eligible.size) emptySet()
-                            else eligible.take(31).map { it.id }.toSet()
+                            val maxSelect = eligible.take(31).map { it.id }.toSet()
+                            selected = if (selected.size == maxSelect.size) emptySet() else maxSelect
                         }
                     ) {
+                        val capCount = minOf(eligible.size, 31)
                         Text(
-                            if (selected.size == eligible.size) "Clear" else "Select all (${selected.size}/31)",
+                            if (selected.size == capCount) "Clear" else "Select all (${selected.size}/31)",
                             color = OnionUi.Online,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold
@@ -469,7 +481,7 @@ internal fun CreateGroupSheet(
             }
             if (eligible.isEmpty()) {
                 Text(
-                    "No contacts with published .onion addresses yet. You can create the group now and invite members anytime.",
+                    "No eligible Tor contacts with verified .onion addresses yet. You can create the group now and invite members anytime.",
                     color = OnionUi.TextSecondary,
                     fontSize = 13.sp,
                     modifier = Modifier.padding(vertical = 12.dp)
@@ -491,10 +503,10 @@ internal fun CreateGroupSheet(
                 enabled = name.isNotBlank(),
                 shape = RoundedCornerShape(999.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.White,
-                    contentColor = Color.Black,
-                    disabledContainerColor = Color.White.copy(alpha = 0.18f),
-                    disabledContentColor = Color.White.copy(alpha = 0.4f)
+                    containerColor = OnionUi.Accent,
+                    contentColor = OnionUi.Canvas,
+                    disabledContainerColor = OnionUi.TextPrimary.copy(alpha = 0.14f),
+                    disabledContentColor = OnionUi.TextPrimary.copy(alpha = 0.4f)
                 ),
                 modifier = Modifier.fillMaxWidth().height(52.dp)
             ) {

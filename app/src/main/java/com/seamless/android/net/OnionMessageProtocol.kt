@@ -57,12 +57,14 @@ object OnionMessageProtocol {
         CONTACT_REQUEST(0x0C),   // Contact request (requires accept/reject)
         CONTACT_RESPONSE(0x0D),  // Contact response (accepted/rejected)
         TYPING(0x0E),            // Ephemeral direct-only typing presence
+        BULK_HELLO(0x0F),        // Secondary bulk-media circuit authentication handshake
 
         // === Bramble Sync Protocol (BSP) frame types ===
         SYNC_OFFER(0x10),        // "I have these messages" — sends message IDs + GCS filter
         SYNC_REQUEST(0x11),      // "Send me these specific messages" — requests by ID
         SYNC_BATCH(0x12),        // Batch of requested messages
         SYNC_ACK(0x13),          // "I received these messages" — acknowledgment
+        FILE_PARITY(0x14),       // Fountain-Warp systematic block-XOR parity droplet for 0-RTT tail recovery
 
         // === Concealed / DPI-resistant frame types ===
         CONCEALED(0x20),         // Encrypted wrapper — looks like random noise on the wire
@@ -71,7 +73,8 @@ object OnionMessageProtocol {
         MAILBOX_EXCHANGE(0x30),  // Exchange mailbox .onion addresses with peer
         MAILBOX_STORE(0x31),     // Store-and-forward message via mailbox relay
         CALL_SIGNAL(0x40),       // Encrypted call signaling (OFFER, RINGING, ACCEPT, DECLINE, HANGUP, P2P_PROBE)
-        CALL_AUDIO(0x41);        // Compact real-time encrypted voice frame (fits inside 1 Tor cell)
+        CALL_AUDIO(0x41),        // Compact real-time encrypted voice frame (fits inside 1 Tor cell)
+        CALL_VIDEO(0x42);        // Unpadded real-time encrypted video fragment frame
         
         companion object {
             fun fromCode(code: Byte): FrameType? = values().find { it.code == code }
@@ -116,7 +119,9 @@ object OnionMessageProtocol {
         /**
          * Encode frame to fixed-size wire format
          */
-        fun encode(padToFixedSize: Boolean = frameType != FrameType.CALL_AUDIO): ByteArray {
+        fun encode(
+            padToFixedSize: Boolean = frameType != FrameType.CALL_AUDIO && frameType != FrameType.CALL_VIDEO && frameType != FrameType.CALL_SIGNAL
+        ): ByteArray {
             require(payload.size <= MAX_PAYLOAD_SIZE) {
                 "Payload too large: ${payload.size} > $MAX_PAYLOAD_SIZE"
             }
@@ -129,14 +134,20 @@ object OnionMessageProtocol {
                     frameType == FrameType.PING ||
                     frameType == FrameType.PONG ||
                     frameType == FrameType.TYPING ||
+                    frameType == FrameType.BULK_HELLO ||
                     frameType == FrameType.READ_RECEIPT ||
                     frameType == FrameType.CALL_SIGNAL ||
                     frameType == FrameType.CONTACT_EXCHANGE ||
-                    frameType == FrameType.MAILBOX_EXCHANGE)
+                    frameType == FrameType.MAILBOX_EXCHANGE ||
+                    frameType == FrameType.FILE_META)
 
             val totalSize = when {
                 !padToFixedSize -> HEADER_SIZE + payload.size
                 useCompactCell -> COMPACT_CELL_FRAME_SIZE
+                frameType == FrameType.FILE_CHUNK || frameType == FrameType.FILE_PARITY ->
+                    com.seamless.android.crypto.PadmeCellPadder
+                        .torCellAlignedLength(HEADER_SIZE + payload.size)
+                        .coerceIn(HEADER_SIZE + payload.size, FRAME_SIZE)
                 else -> FRAME_SIZE
             }
             val buffer = ByteBuffer.allocate(totalSize)
@@ -153,9 +164,9 @@ object OnionMessageProtocol {
             // Payload
             buffer.put(payload)
             
-            // Random padding to fixed size (prevents traffic analysis)
+            // Pad to fixed/cell size (FILE_CHUNK is already STDP-v2 AEAD ciphertext, avoiding redundant CSPRNG calls)
             val paddingSize = (totalSize - HEADER_SIZE - payload.size).coerceAtLeast(0)
-            if (paddingSize > 0) {
+            if (paddingSize > 0 && frameType != FrameType.FILE_CHUNK) {
                 val padding = ByteArray(paddingSize)
                 secureRandom.nextBytes(padding)
                 buffer.put(padding)
@@ -400,21 +411,24 @@ object OnionMessageProtocol {
      */
     class MessageDeduplicator(private val maxSize: Int = 5000) {
         private val seenMessages = LinkedHashMap<UUID, Long>(maxSize, 0.75f, true)
+        private var checkCounter = 0
+        private var lastPrunedAt = 0L
         
         @Synchronized
         fun isDuplicate(messageId: UUID): Boolean {
             val now = System.currentTimeMillis()
-            
-            // Keep replay protection active across the full 7-day offline freshness window
             val retentionMs = OFFLINE_MESSAGE_FRESHNESS_MS + MAX_FUTURE_SKEW_MS
-            seenMessages.entries.removeIf { now - it.value > retentionMs }
-            
-            // Check and add
-            return if (seenMessages.containsKey(messageId)) {
+            // Amortize full-map pruning across 128 checks or 30s windows instead of O(N) on every frame.
+            if ((++checkCounter and 127) == 0 || now - lastPrunedAt >= 30_000L) {
+                seenMessages.entries.removeIf { now - it.value > retentionMs }
+                lastPrunedAt = now
+            }
+
+            val existingTs = seenMessages[messageId]
+            return if (existingTs != null && now - existingTs <= retentionMs) {
                 true
             } else {
                 seenMessages[messageId] = now
-                // Limit size
                 while (seenMessages.size > maxSize) {
                     seenMessages.remove(seenMessages.keys.first())
                 }
@@ -620,6 +634,43 @@ object OnionMessageProtocol {
             payload = payload.array()
         )
         return frame.encode()
+    }
+
+    private const val BATCH_READ_MAGIC: Short = 0x5242
+
+    /** Create a compact batched READ_RECEIPT frame carrying up to 24 UUIDs inside a 480B cell. */
+    fun createBatchReadReceiptFrame(messageIds: List<UUID>, sequence: Long): OnionFrame {
+        val bounded = messageIds.distinct().take(24)
+        val buffer = ByteBuffer.allocate(4 + bounded.size * 16)
+        buffer.putShort(BATCH_READ_MAGIC)
+        buffer.putShort(bounded.size.toShort())
+        for (id in bounded) {
+            buffer.putLong(id.mostSignificantBits)
+            buffer.putLong(id.leastSignificantBits)
+        }
+        return OnionFrame(
+            messageId = UUID.randomUUID(),
+            sequence = sequence,
+            timestamp = System.currentTimeMillis(),
+            frameType = FrameType.READ_RECEIPT,
+            payload = buffer.array()
+        )
+    }
+
+    /** Parse batched READ_RECEIPT payload, falling back to legacy single-UUID receipt format. */
+    fun parseBatchReadReceipt(payload: ByteArray): List<UUID> {
+        if (payload.size >= 4) {
+            val buffer = ByteBuffer.wrap(payload)
+            val magic = buffer.short
+            if (magic == BATCH_READ_MAGIC) {
+                val count = buffer.short.toInt() and 0xFFFF
+                if (count in 1..64 && buffer.remaining() >= count * 16) {
+                    return List(count) { UUID(buffer.getLong(), buffer.getLong()) }
+                }
+                return emptyList()
+            }
+        }
+        return parseReadReceipt(payload)?.first?.let { listOf(it) } ?: emptyList()
     }
     
     /**

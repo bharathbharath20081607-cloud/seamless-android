@@ -142,6 +142,33 @@ class TorMessageRepository private constructor(context: Context) {
         dao.markAsReadIdentity(contact.id, addressAliases(contact.onionAddress))
         Log.d(TAG, "Marked messages as read for contact: ${contact.id}")
     }
+
+    suspend fun markAsReadReturningIds(contact: OnionContactManager.OnionContact): List<String> {
+        val aliases = addressAliases(contact.onionAddress)
+        val unreadIds = dao.getUnreadIncomingIdsIdentity(contact.id, aliases)
+        if (unreadIds.isNotEmpty()) {
+            dao.markAsReadIdentity(contact.id, aliases)
+        }
+        return unreadIds
+    }
+
+    suspend fun markOutgoingReadForContact(contact: OnionContactManager.OnionContact, messageIds: List<String>) {
+        if (messageIds.isEmpty()) return
+        val aliases = addressAliases(contact.onionAddress)
+        messageIds.chunked(50).forEach { chunk ->
+            dao.markOutgoingReadForContact(chunk, contact.id, aliases)
+        }
+    }
+
+    suspend fun getMessage(messageId: String): TorMessageEntity? = dao.getMessage(messageId)
+
+    suspend fun updateMessageText(messageId: String, text: String) {
+        dao.updateMessageText(messageId, text)
+    }
+
+    suspend fun clearAttachmentAndUpdateText(messageId: String, text: String) {
+        dao.clearAttachmentAndUpdateText(messageId, text)
+    }
     
     /**
      * Update delivery state
@@ -163,6 +190,10 @@ class TorMessageRepository private constructor(context: Context) {
     ) {
         dao.updateDelivery(messageId, state.name, route.name)
         Log.d(TAG, "Updated delivery for $messageId: $state via $route")
+    }
+
+    suspend fun updateAttachment(messageId: String, path: String, mimeType: String) {
+        dao.updateAttachment(messageId, path, mimeType)
     }
     
     /**

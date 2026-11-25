@@ -45,6 +45,7 @@ app/lint.xml
 
 # Other
 *.log
+*.hprof
 .cxx/
 *build/
 out/

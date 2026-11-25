@@ -594,7 +594,7 @@ class MeshForegroundService : Service() {
 
     private fun handleBackgroundNostrEvent(event: com.seamless.android.nostr.NostrEvent) {
         // Skip if app is in foreground - let UI handle it to avoid duplicate notifications
-        if (!isAppInBackground) {
+        if (!isAppInBackground || com.seamless.android.util.AppForegroundTracker.isAppInForeground(applicationContext)) {
             Log.v(TAG, "Skipping background Nostr event - app is in foreground")
             return
         }
@@ -906,6 +906,9 @@ class MeshForegroundService : Service() {
             }
 
             try {
+                if (!isAppInBackground || com.seamless.android.util.AppForegroundTracker.isAppInForeground(applicationContext)) {
+                    return
+                }
                 val nm = ensureUiNotificationManager()
                 nm.setAppBackgroundState(true)
                 val preview = com.seamless.android.ui.NotificationTextUtils.buildPrivateMessagePreview(message)

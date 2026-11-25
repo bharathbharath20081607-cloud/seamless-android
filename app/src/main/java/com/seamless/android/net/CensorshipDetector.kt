@@ -72,6 +72,7 @@ class CensorshipDetector private constructor(private val context: Context) {
     enum class TransportStrategy {
         VANILLA,        // Direct Tor connection
         OBFS4,          // obfs4 pluggable transport
+        WEBTUNNEL,      // HTTPS WebTunnel pluggable transport
         MEEK_LITE,      // meek_lite domain fronting
         SNOWFLAKE       // Snowflake WebRTC proxies
     }
@@ -90,12 +91,12 @@ class CensorshipDetector private constructor(private val context: Context) {
     // Countries known to block Tor (OONI-derived, updated periodically)
     // Source: https://ooni.org/data/
     private val COUNTRIES_BLOCKING_TOR = mapOf(
-        // Heavy Tor blocking — need obfs4 or stronger
-        "CN" to TransportStrategy.MEEK_LITE,     // China — deep DPI, need domain fronting
-        "IR" to TransportStrategy.SNOWFLAKE,      // Iran — aggressive blocking
-        "RU" to TransportStrategy.OBFS4,          // Russia — DPI-based blocking
-        "TM" to TransportStrategy.MEEK_LITE,      // Turkmenistan — near-total internet control
-        "BY" to TransportStrategy.OBFS4,          // Belarus — DPI blocking
+        // Heavy Tor blocking — use WebTunnel/Snowflake/obfs4 without probing directory authorities
+        "CN" to TransportStrategy.WEBTUNNEL,    // China — GFW deep DPI, HTTPS WebTunnel
+        "IR" to TransportStrategy.SNOWFLAKE,    // Iran — aggressive blocking
+        "RU" to TransportStrategy.OBFS4,        // Russia — DPI-based blocking
+        "TM" to TransportStrategy.WEBTUNNEL,    // Turkmenistan — near-total internet control
+        "BY" to TransportStrategy.OBFS4,        // Belarus — DPI blocking
 
         // Moderate Tor blocking — obfs4 usually works
         "EG" to TransportStrategy.OBFS4,          // Egypt — intermittent blocking
@@ -143,19 +144,15 @@ class CensorshipDetector private constructor(private val context: Context) {
         val country = countryCode ?: detectCountryCode()
         Log.i(TAG, "🔍 Detecting censorship for country: $country")
 
-        // Country-based heuristic
+        // Country-based heuristic — never leak clearnet probes to Tor directory authorities
+        // when operating in known-censoring jurisdictions.
         val countryStrategy = COUNTRIES_BLOCKING_TOR[country]
         if (countryStrategy != null) {
-            Log.i(TAG, "🌍 Country $country known to block Tor, using: $countryStrategy")
-
-            // Still probe vanilla in case blocking has changed
-            val vanillaWorks = probeVanillaTor()
-            val strategy = if (vanillaWorks) TransportStrategy.VANILLA else countryStrategy
-
+            Log.i(TAG, "🌍 Country $country known to censor vanilla Tor, selecting $countryStrategy directly")
             val result = DetectionResult(
-                strategy = strategy,
+                strategy = countryStrategy,
                 countryCode = country,
-                vanillaBlocked = !vanillaWorks,
+                vanillaBlocked = true,
                 probeLatencyMs = 0
             )
             cacheResult(result)
@@ -332,6 +329,7 @@ class CensorshipDetector private constructor(private val context: Context) {
         return when (strategy) {
             TransportStrategy.VANILLA -> "Direct Tor connection (fastest)"
             TransportStrategy.OBFS4 -> "obfs4 bridge (bypasses DPI blocking)"
+            TransportStrategy.WEBTUNNEL -> "WebTunnel HTTPS bridge (blends with standard web TLS)"
             TransportStrategy.MEEK_LITE -> "Domain fronting via CDN (bypasses IP blocking)"
             TransportStrategy.SNOWFLAKE -> "Snowflake WebRTC proxy (most resilient)"
         }

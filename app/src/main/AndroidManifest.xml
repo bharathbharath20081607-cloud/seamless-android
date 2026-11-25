@@ -21,13 +21,16 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     
-    <!-- Foreground service permission -->
+    <!-- Foreground service permissions -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
     
-    <!-- Microphone for voice notes -->
+    <!-- Microphone for voice notes & calls -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
@@ -46,7 +49,7 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
-    <!-- Camera permission for QR code scanning -->
+    <!-- Camera permission for QR code scanning & video calls -->
     <uses-permission android:name="android.permission.CAMERA" />
 
     <!-- Vibration for notifications -->
@@ -102,8 +105,8 @@
             android:label="@string/app_name"
             android:theme="@style/Theme.SeamlessAndroid"
             android:windowSoftInputMode="adjustResize"
-            android:showWhenLocked="true"
-            android:turnScreenOn="true"
+            android:supportsPictureInPicture="true"
+            android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation"
             android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -131,12 +134,14 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice|remoteMessaging" />
 
-        <!-- Tor Foreground Service — keeps Tor alive, handles Doze/network changes -->
+        <!-- Voice/Video Call Foreground Service (Android 14-16 CallStyle + FGS types) -->
         <service
             android:name=".service.CallForegroundService"
             android:exported="false"
             android:stopWithTask="false"
-            android:foregroundServiceType="microphone|connectedDevice|remoteMessaging" />
+            android:foregroundServiceType="phoneCall|microphone|camera|remoteMessaging" />
+
+        <!-- Tor Foreground Service — keeps Tor alive, handles Doze/network changes -->
         <service
             android:name=".service.TorForegroundService"
             android:exported="false"
@@ -151,6 +156,14 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <receiver
+            android:name=".receiver.TorNotificationActionReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".receiver.CallNotificationActionReceiver"
+            android:exported="false" />
             
         <!-- Deep link handler for seamless:// contact sharing -->
         <activity

@@ -147,7 +147,8 @@ class BrambleRendezvous private constructor(private val context: Context) {
     }
 
     // Active rendezvous sessions
-    private val sessions = mutableMapOf<String, RendezvousSession>()
+    private val sessions = java.util.concurrent.ConcurrentHashMap<String, RendezvousSession>()
+    private val sessionJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
     private val mutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -271,10 +272,13 @@ class BrambleRendezvous private constructor(private val context: Context) {
         sessions[peerId] = session
         updateStateFlow()
 
-        // Launch the rendezvous coroutine
-        scope.launch {
+        // Launch the rendezvous coroutine (cancel any orphaned prior job)
+        sessionJobs.remove(peerId)?.cancel()
+        sessionJobs[peerId] = scope.launch {
             try {
                 executeRendezvous(session, ourPrivateKey, ourPublicKey, peerPublicKey)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Rendezvous failed for $peerId: ${e.message}")
                 mutex.withLock {
@@ -282,6 +286,8 @@ class BrambleRendezvous private constructor(private val context: Context) {
                     updateStateFlow()
                 }
                 callback?.onRendezvousFailed(peerId, e.message ?: "Unknown error")
+            } finally {
+                sessionJobs.remove(peerId)
             }
         }
     }
@@ -290,6 +296,7 @@ class BrambleRendezvous private constructor(private val context: Context) {
      * Cancel a rendezvous attempt
      */
     suspend fun cancelRendezvous(peerId: String) = mutex.withLock {
+        sessionJobs.remove(peerId)?.cancel()
         sessions.remove(peerId)
         updateStateFlow()
         Log.i(TAG, "🛑 Rendezvous cancelled for $peerId")
@@ -326,9 +333,12 @@ class BrambleRendezvous private constructor(private val context: Context) {
         var connectedSocket: Socket? = null
 
         try {
-            // Bind ServerSocket to an ephemeral port
+            // Bind ServerSocket to loopback only (never expose BRP on LAN 0.0.0.0)
             serverSocket = withContext(Dispatchers.IO) {
-                ServerSocket(0)
+                ServerSocket().apply {
+                    reuseAddress = true
+                    bind(InetSocketAddress(java.net.InetAddress.getByName("127.0.0.1"), 0))
+                }
             }
             val localPort = serverSocket.localPort
             Log.i(TAG, "Bound ServerSocket for BRP on ephemeral port $localPort")
@@ -468,6 +478,15 @@ class BrambleRendezvous private constructor(private val context: Context) {
                 if (success && finalPeerOnion.isNotEmpty()) {
                     val canonicalPeerOnion = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(finalPeerOnion)
                         .ifBlank { finalPeerOnion }
+                    if (!OnionContactManager.OnionContact.isValidOnionEndpoint(canonicalPeerOnion)) {
+                        runCatching { socket.close() }
+                        mutex.withLock {
+                            session.state = RendezvousState.FAILED
+                            updateStateFlow()
+                        }
+                        callback?.onRendezvousFailed(session.peerId, "Invalid peer onion endpoint")
+                        return
+                    }
                     if (!socket.isClosed) {
                         try {
                             TorCircuitManager.getInstance(context).addIncomingConnection(
@@ -583,6 +602,7 @@ class BrambleRendezvous private constructor(private val context: Context) {
 
         val sharedSecret = ByteArray(agreement.agreementSize)
         agreement.calculateAgreement(pubParams, sharedSecret, 0)
+        com.seamless.android.crypto.AegisTorCrypto.requireNonZeroSharedSecret(sharedSecret)
 
         return sharedSecret
     }

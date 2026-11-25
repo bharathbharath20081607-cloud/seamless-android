@@ -1,8 +1,11 @@
 @file:Suppress("DEPRECATION")
 package com.seamless.android.call
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioFormat
@@ -14,32 +17,39 @@ import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.os.Process
+import android.os.SystemClock
 import android.util.Log
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.PriorityBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.sqrt
 
+enum class AudioRoute {
+    EARPIECE,
+    SPEAKER,
+    BLUETOOTH,
+    WIRED_HEADSET
+}
+
 /**
  * Full-duplex low-latency 16 kHz Wideband HD Voice engine engineered for:
  * 1. Direct P2P UDP sockets (20 ms frames, ultra-low latency)
  * 2. Tor v3 .onion TCP circuits & Active-Active Multipath (40 ms self-contained IMA-ADPCM frames
- *    that fit inside a single 514-byte Tor cell, paired with Smart VAD/DTX silence suppression,
- *    128-slot sliding-window multipath deduplication, Waveform Packet Loss Concealment (PLC),
- *    and a WebRTC NetEq-inspired Adaptive Catch-Up Jitter Buffer).
+ *    paired with explicit DTX SID comfort packets, decoupled non-blocking outbound dispatch,
+ *    128-slot sliding-window multipath deduplication, pitch-matched Autocorrelation PLC,
+ *    pitch-preserving WSOLA time-scale jitter catch-up, and 3-way Bluetooth/Headset/Speaker routing).
  */
 class CallAudioEngine(
     private val context: Context,
@@ -48,9 +58,6 @@ class CallAudioEngine(
     companion object {
         private const val TAG = "CallAudioEngine"
 
-        // 16,000 Hz High-Res Wideband HD Voice:
-        // - 40 ms frame = 640 samples = 324 bytes ADPCM (fits inside 1 Tor cell & 1 UDP packet)
-        // - 20 ms frame = 320 samples = 164 bytes ADPCM (pure Direct P2P ultra-low latency)
         const val SAMPLE_RATE_HZ = 16_000
         const val TOR_FRAME_DURATION_MS = 40
         const val P2P_FRAME_DURATION_MS = 20
@@ -58,15 +65,199 @@ class CallAudioEngine(
         const val TOR_SAMPLES_PER_FRAME = (SAMPLE_RATE_HZ * TOR_FRAME_DURATION_MS) / 1000 // 640 samples
         const val P2P_SAMPLES_PER_FRAME = (SAMPLE_RATE_HZ * P2P_FRAME_DURATION_MS) / 1000 // 320 samples
 
+        // Explicit 6-byte DTX Comfort-Noise (SID) marker (stepIndex=0xFE is impossible in valid 0..88 ADPCM)
+        internal val DTX_SID_MARKER_BYTE: Byte = 0xFE.toByte()
         private const val DEDUP_WINDOW_SIZE = 128
         private const val DEDUP_WINDOW_MASK = DEDUP_WINDOW_SIZE - 1
+        private const val UNDERRUN_DECAY_WINDOW_MS = 10_000L
+
+        internal class MicDspState {
+            var prevX: Float = 0f
+            var prevY: Float = 0f
+            var envelope: Float = 0f
+        }
+
+        internal fun encodeDtxSidFrame(): ByteArray = byteArrayOf(
+            0x00, 0x00, DTX_SID_MARKER_BYTE, 0x00, 0x00, 0x00
+        )
+
+        internal fun isDtxSidFrame(data: ByteArray): Boolean =
+            data.size == 6 && data[2] == DTX_SID_MARKER_BYTE
+
+        /**
+         * Applies a 1st-order ~82 Hz DC-blocking high-pass filter plus optional smooth Hermite
+         * speech gain (skipped to unity when hardware AutomaticGainControl is already active to avoid pumping).
+         */
+        internal fun applyDcBlockAndSmoothSpeechGain(
+            pcm: ShortArray,
+            length: Int,
+            state: MicDspState = MicDspState(),
+            hardwareAgcActive: Boolean = false
+        ) {
+            for (i in 0 until length) {
+                val x = pcm[i].toFloat()
+                val hp = x - state.prevX + 0.968f * state.prevY
+                state.prevX = x
+                state.prevY = hp
+
+                val gain = if (hardwareAgcActive) {
+                    1.0f
+                } else {
+                    val mag = abs(hp)
+                    state.envelope = 0.94f * state.envelope + 0.06f * mag
+                    val t = (state.envelope / 140f).coerceIn(0f, 1f)
+                    val smoothT = t * t * (3f - 2f * t)
+                    0.55f + (1.62f - 0.55f) * smoothT
+                }
+
+                val boosted = hp * gain
+                val absBoosted = abs(boosted)
+                val limited = if (absBoosted > 22_000f) {
+                    val over = absBoosted - 22_000f
+                    val comp = 22_000f + (over / (1f + over / 10_767f))
+                    if (boosted >= 0f) comp else -comp
+                } else {
+                    boosted
+                }
+                pcm[i] = limited.toInt().coerceIn(-32767, 32767).toShort()
+            }
+        }
+
+        /**
+         * Estimates the fundamental voice pitch period in samples [40..200] (80 Hz - 400 Hz at 16 kHz)
+         * using normalized autocorrelation over the trailing window.
+         */
+        internal fun estimatePitchPeriod(pcm: ShortArray, minLag: Int = 40, maxLag: Int = 200): Int {
+            val n = pcm.size
+            val clampedMax = min(maxLag, n / 2)
+            if (clampedMax <= minLag) return minLag.coerceAtMost(n / 2).coerceAtLeast(16)
+            val win = min(160, n - clampedMax)
+            if (win < 32) return 80
+            val startA = n - win
+
+            var energyA = 0.0
+            for (i in 0 until win) {
+                val v = pcm[startA + i].toDouble()
+                energyA += v * v
+            }
+            if (energyA < 1e-3) return 80
+
+            var bestLag = 80.coerceIn(minLag, clampedMax)
+            var bestCorr = -1.0
+            for (lag in minLag..clampedMax) {
+                val startB = startA - lag
+                var dot = 0.0
+                var energyB = 0.0
+                for (i in 0 until win) {
+                    val a = pcm[startA + i].toDouble()
+                    val b = pcm[startB + i].toDouble()
+                    dot += a * b
+                    energyB += b * b
+                }
+                if (energyB > 1e-3) {
+                    val corr = dot / sqrt(energyA * energyB)
+                    if (corr > bestCorr) {
+                        bestCorr = corr
+                        bestLag = lag
+                    }
+                }
+            }
+            return if (bestCorr > 0.30) bestLag else 80.coerceIn(minLag, clampedMax)
+        }
+
+        /**
+         * Pitch-preserving WSOLA (Waveform Similarity Overlap-Add) time-compression.
+         * Removes exactly one pitch period T using linear cross-fade so jitter backlog drains
+         * without chipmunk pitch-shift or click artifacts.
+         */
+        internal fun wsolaTimeCompressPcm(input: ShortArray): ShortArray {
+            val n = input.size
+            if (n < 160) return input
+            val period = estimatePitchPeriod(input, minLag = 40, maxLag = min(160, n / 3))
+            if (period <= 0 || period >= n / 2) return input
+
+            val outSize = n - period
+            val out = ShortArray(outSize)
+            val cutStart = (outSize / 2).coerceAtLeast(1)
+            val overlapLen = min(period, min(cutStart, outSize - cutStart)).coerceAtLeast(16)
+            val fadeStart = (cutStart - overlapLen / 2).coerceAtLeast(0)
+            val safeOverlap = min(overlapLen, outSize - fadeStart)
+
+            // Copy prefix before overlap
+            System.arraycopy(input, 0, out, 0, fadeStart)
+
+            // Cross-fade input[fadeStart + j] -> input[fadeStart + period + j]
+            for (j in 0 until safeOverlap) {
+                val w = j.toFloat() / safeOverlap.toFloat()
+                val s1 = input[fadeStart + j].toFloat()
+                val s2 = input[fadeStart + period + j].toFloat()
+                out[fadeStart + j] = (s1 * (1f - w) + s2 * w).toInt().coerceIn(-32767, 32767).toShort()
+            }
+
+            // Copy remaining tail shifted left by one pitch period
+            val dstTail = fadeStart + safeOverlap
+            val srcTail = dstTail + period
+            val tailLen = outSize - dstTail
+            if (tailLen > 0 && srcTail + tailLen <= n) {
+                System.arraycopy(input, srcTail, out, dstTail, tailLen)
+            }
+            return out
+        }
+
+        /**
+         * Autocorrelation pitch-matched Packet Loss Concealment (PLC).
+         * Repeats the final estimated pitch cycle with smooth boundary cross-fade, gradual
+         * exponential attenuation, and subtle -66 dBFS comfort noise floor.
+         */
+        internal fun synthesizePitchMatchedPlc(
+            previousPcm: ShortArray,
+            plcIndex: Int,
+            noiseSeed: Int
+        ): ShortArray {
+            val n = previousPcm.size
+            if (n == 0) return ShortArray(0)
+            val attenuation = when (plcIndex) {
+                1 -> 0.72f
+                2 -> 0.45f
+                else -> 0.24f
+            }
+            val period = estimatePitchPeriod(previousPcm, minLag = 40, maxLag = min(200, n / 2))
+                .coerceIn(1, n)
+            val cycleStart = n - period
+            val out = ShortArray(n)
+            var seed = noiseSeed
+            val blendLen = min(16, period)
+            val prevLast = previousPcm[n - 1].toFloat()
+
+            for (i in 0 until n) {
+                val srcSample = previousPcm[cycleStart + (i % period)].toFloat()
+                val blended = if (i < blendLen) {
+                    val alpha = (i + 1).toFloat() / (blendLen + 1).toFloat()
+                    prevLast * (1f - alpha) + srcSample * alpha
+                } else {
+                    srcSample
+                }
+                val env = attenuation * (1f - (i.toFloat() / n) * 0.28f)
+                seed = seed * 1664525 + 1013904223
+                val cng = ((seed ushr 26) and 0x1F) - 16
+                out[i] = ((blended * env).toInt() + cng).coerceIn(-32767, 32767).toShort()
+            }
+            return out
+        }
     }
+
+    private data class OutboundEncodedFrame(
+        val sequence: Long,
+        val timestampMs: Long,
+        val payload: ByteArray
+    )
 
     private data class QueuedAudioFrame(
         val sequence: Long,
         val timestampMs: Long,
         val pcm: ShortArray,
         val voiceLevel: Float,
+        val isDtxSid: Boolean = false,
         val receivedAtMs: Long = System.currentTimeMillis()
     ) : Comparable<QueuedAudioFrame> {
         override fun compareTo(other: QueuedAudioFrame): Int = this.sequence.compareTo(other.sequence)
@@ -74,24 +265,55 @@ class CallAudioEngine(
 
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     private val running = AtomicBoolean(false)
+    private val ioRunning = AtomicBoolean(false)
     private val muted = AtomicBoolean(false)
+    private val focusDucked = AtomicBoolean(false)
     private val speakerphone = AtomicBoolean(false)
     private val useDirectP2pFraming = AtomicBoolean(false)
+    private val deviceIoSuspended = AtomicBoolean(false)
 
-    private var captureJob: Job? = null
-    private var playbackJob: Job? = null
+    @Volatile private var captureThread: Thread? = null
+    @Volatile private var dispatchThread: Thread? = null
+    @Volatile private var playbackThread: Thread? = null
+    @Volatile private var hardwareAgcEnabled = false
+    private val outboundQueue = ArrayBlockingQueue<OutboundEncodedFrame>(8)
+
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
     private var echoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
     private var gainControl: AutomaticGainControl? = null
     private var audioFocusRequest: AudioFocusRequest? = null
+    private var audioDeviceCallback: AudioDeviceCallback? = null
     private var proximityWakeLock: PowerManager.WakeLock? = null
     private var previousAudioMode: Int = AudioManager.MODE_NORMAL
     private var previousSpeakerphone: Boolean = false
+    private var lastTransitMs: Long = Long.MIN_VALUE
+    @Volatile private var rfc3550JitterMs: Double = 0.0
+
+    private val _audioRoute = MutableStateFlow(AudioRoute.EARPIECE)
+    val audioRoute: StateFlow<AudioRoute> = _audioRoute.asStateFlow()
+
+    private val _availableRoutes = MutableStateFlow(setOf(AudioRoute.EARPIECE, AudioRoute.SPEAKER))
+    val availableRoutes: StateFlow<Set<AudioRoute>> = _availableRoutes.asStateFlow()
+
+    private val audioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                focusDucked.set(true)
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                focusDucked.set(false)
+                if (running.get()) {
+                    runCatching { audioManager.mode = AudioManager.MODE_IN_COMMUNICATION }
+                    setAudioRoute(_audioRoute.value)
+                }
+            }
+        }
+    }
 
     private val outboundSequence = AtomicLong(0L)
     private val jitterQueue = PriorityBlockingQueue<QueuedAudioFrame>(64)
@@ -110,84 +332,37 @@ class CallAudioEngine(
     private val _estimatedOneWayLatencyMs = MutableStateFlow(0)
     val estimatedOneWayLatencyMs: StateFlow<Int> = _estimatedOneWayLatencyMs.asStateFlow()
 
+    fun currentJitterMs(): Double = rfc3550JitterMs
+
     fun start(initialSpeakerphone: Boolean = false, isDirectP2p: Boolean = false): Boolean {
         if (!running.compareAndSet(false, true)) return true
 
         muted.set(false)
+        focusDucked.set(false)
         speakerphone.set(initialSpeakerphone)
         useDirectP2pFraming.set(isDirectP2p)
         outboundSequence.set(0L)
+        outboundQueue.clear()
         jitterQueue.clear()
         synchronized(dedupLock) {
             recentSequences.fill(-1L)
+            lastTransitMs = Long.MIN_VALUE
+            rfc3550JitterMs = 0.0
         }
 
         try {
+            refreshAvailableRoutes()
             configureAudioSession(initialSpeakerphone)
-            updateProximityLock(initialSpeakerphone)
+            updateProximityLock(_audioRoute.value)
 
-            val minRecordBuf = AudioRecord.getMinBufferSize(
-                SAMPLE_RATE_HZ,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            ).coerceAtLeast(TOR_SAMPLES_PER_FRAME * 4)
-
-            val record = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                SAMPLE_RATE_HZ,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                minRecordBuf * 2
-            )
-            if (record.state != AudioRecord.STATE_INITIALIZED) {
-                record.release()
+            if (!openDeviceIo(initialSpeakerphone)) {
                 running.set(false)
+                releaseProximityLock()
                 restoreAudioSession()
                 return false
             }
-            audioRecord = record
-            attachHardwareDsp(record.audioSessionId)
 
-            val minTrackBuf = AudioTrack.getMinBufferSize(
-                SAMPLE_RATE_HZ,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            ).coerceAtLeast(TOR_SAMPLES_PER_FRAME * 4)
-
-            val trackBuilder = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(SAMPLE_RATE_HZ)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                        .build()
-                )
-                .setBufferSizeInBytes(minTrackBuf * 2)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .setSessionId(record.audioSessionId)
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                trackBuilder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-            }
-
-            val track = trackBuilder.build()
-            audioTrack = track
-            record.startRecording()
-            track.play()
-
-            // Re-assert communication device routing after active streams are started (Android 12-15 HAL requirement)
-            setSpeakerphone(initialSpeakerphone)
-
-            captureJob = scope.launch(Dispatchers.IO) { runCaptureLoop(record) }
-            playbackJob = scope.launch(Dispatchers.IO) { runPlaybackLoop(track) }
-
-            Log.i(TAG, "🎙️ CallAudioEngine started (sampleRate=${SAMPLE_RATE_HZ}Hz, speaker=$initialSpeakerphone, directP2P=$isDirectP2p)")
+            Log.i(TAG, "🎙️ CallAudioEngine started (sampleRate=${SAMPLE_RATE_HZ}Hz, route=${_audioRoute.value}, directP2P=$isDirectP2p)")
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start CallAudioEngine: ${e.message}", e)
@@ -196,16 +371,126 @@ class CallAudioEngine(
         }
     }
 
-    fun stop() {
-        if (!running.compareAndSet(true, false)) return
-        captureJob?.cancel()
-        playbackJob?.cancel()
-        captureJob = null
-        playbackJob = null
+    fun suspendDeviceIo() {
+        if (!running.get() || deviceIoSuspended.getAndSet(true)) return
+        closeDeviceIo()
+        Log.i(TAG, "⏸️ CallAudioEngine device I/O suspended")
+    }
+
+    fun resumeDeviceIo(): Boolean {
+        if (!running.get() || !deviceIoSuspended.getAndSet(false)) return running.get()
         jitterQueue.clear()
-        synchronized(dedupLock) {
-            recentSequences.fill(-1L)
+        outboundQueue.clear()
+        synchronized(dedupLock) { recentSequences.fill(-1L) }
+        val ok = try {
+            openDeviceIo(speakerphone.get())
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to resume CallAudioEngine I/O: ${e.message}", e)
+            false
         }
+        Log.i(TAG, "▶️ CallAudioEngine device I/O resumed=$ok")
+        return ok
+    }
+
+    private fun openDeviceIo(initialSpeakerphone: Boolean): Boolean {
+        val minRecordBuf = AudioRecord.getMinBufferSize(
+            SAMPLE_RATE_HZ,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        ).coerceAtLeast(TOR_SAMPLES_PER_FRAME * 4)
+
+        val record = AudioRecord(
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            SAMPLE_RATE_HZ,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            minRecordBuf * 2
+        )
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            record.release()
+            return false
+        }
+        audioRecord = record
+        attachHardwareDsp(record.audioSessionId)
+
+        val minTrackBuf = AudioTrack.getMinBufferSize(
+            SAMPLE_RATE_HZ,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        ).coerceAtLeast(TOR_SAMPLES_PER_FRAME * 4)
+
+        val trackBuilder = AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(SAMPLE_RATE_HZ)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .build()
+            )
+            .setBufferSizeInBytes(minTrackBuf * 2)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            trackBuilder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+        }
+
+        val track = trackBuilder.build()
+        audioTrack = track
+        ioRunning.set(true)
+        record.startRecording()
+        track.play()
+
+        // Re-assert chosen communication device route after streams start (Android 12-15 HAL requirement)
+        setAudioRoute(_audioRoute.value.takeIf { it != AudioRoute.EARPIECE || !initialSpeakerphone } ?: defaultRoute(initialSpeakerphone))
+
+        dispatchThread = Thread({ runOutboundDispatchLoop() }, "SeamlessAudioDispatch").apply {
+            isDaemon = true
+            start()
+        }
+        captureThread = Thread({ runCaptureLoop(record) }, "SeamlessAudioCapture").apply {
+            isDaemon = true
+            start()
+        }
+        playbackThread = Thread({ runPlaybackLoop(track) }, "SeamlessAudioPlayback").apply {
+            isDaemon = true
+            start()
+        }
+        return true
+    }
+
+    private fun closeDeviceIo() {
+        ioRunning.set(false)
+        val cThread = captureThread
+        val dThread = dispatchThread
+        val pThread = playbackThread
+        captureThread = null
+        dispatchThread = null
+        playbackThread = null
+
+        try { audioRecord?.stop() } catch (_: Exception) {}
+        try { audioTrack?.stop() } catch (_: Exception) {}
+        outboundQueue.clear()
+        dThread?.interrupt()
+
+        val curThread = Thread.currentThread()
+        if (cThread != null && cThread !== curThread) {
+            try { cThread.join(350L) } catch (_: Exception) {}
+        }
+        if (dThread != null && dThread !== curThread) {
+            try { dThread.join(250L) } catch (_: Exception) {}
+        }
+        if (pThread != null && pThread !== curThread) {
+            try { pThread.join(350L) } catch (_: Exception) {}
+        }
+
+        jitterQueue.clear()
+        outboundQueue.clear()
         _localVoiceLevel.value = 0f
         _remoteVoiceLevel.value = 0f
         _jitterBufferMs.value = 0
@@ -216,22 +501,22 @@ class CallAudioEngine(
         echoCanceler = null
         noiseSuppressor = null
         gainControl = null
+        hardwareAgcEnabled = false
 
-        try {
-            audioRecord?.stop()
-        } catch (_: Exception) {}
-        try {
-            audioRecord?.release()
-        } catch (_: Exception) {}
+        try { audioRecord?.release() } catch (_: Exception) {}
         audioRecord = null
 
-        try {
-            audioTrack?.stop()
-        } catch (_: Exception) {}
-        try {
-            audioTrack?.release()
-        } catch (_: Exception) {}
+        try { audioTrack?.release() } catch (_: Exception) {}
         audioTrack = null
+    }
+
+    fun stop() {
+        if (!running.compareAndSet(true, false)) return
+        deviceIoSuspended.set(false)
+        closeDeviceIo()
+        synchronized(dedupLock) {
+            recentSequences.fill(-1L)
+        }
 
         releaseProximityLock()
         restoreAudioSession()
@@ -246,40 +531,128 @@ class CallAudioEngine(
     }
 
     fun setSpeakerphone(enabled: Boolean) {
-        speakerphone.set(enabled)
+        val target = if (enabled) {
+            AudioRoute.SPEAKER
+        } else {
+            val routes = refreshAvailableRoutes()
+            when {
+                AudioRoute.BLUETOOTH in routes -> AudioRoute.BLUETOOTH
+                AudioRoute.WIRED_HEADSET in routes -> AudioRoute.WIRED_HEADSET
+                else -> AudioRoute.EARPIECE
+            }
+        }
+        setAudioRoute(target)
+    }
+
+    fun cycleAudioRoute(): AudioRoute {
+        val routes = refreshAvailableRoutes()
+        val order = listOf(AudioRoute.EARPIECE, AudioRoute.SPEAKER, AudioRoute.BLUETOOTH, AudioRoute.WIRED_HEADSET)
+            .filter { it in routes }
+        if (order.isEmpty()) return _audioRoute.value
+        val curIdx = order.indexOf(_audioRoute.value)
+        val next = order[(curIdx + 1) % order.size]
+        setAudioRoute(next)
+        return next
+    }
+
+    fun setAudioRoute(route: AudioRoute) {
+        val routes = refreshAvailableRoutes()
+        val effective = if (route in routes) route else defaultRoute(route == AudioRoute.SPEAKER)
+        val isSpeaker = effective == AudioRoute.SPEAKER
+        speakerphone.set(isSpeaker)
+        _audioRoute.value = effective
+
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val devices = audioManager.availableCommunicationDevices
-                val targetDevice = if (enabled) {
-                    devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-                } else {
-                    val externalTypes = listOf(
-                        AudioDeviceInfo.TYPE_BLE_HEADSET,
-                        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
-                        AudioDeviceInfo.TYPE_USB_HEADSET,
-                        AudioDeviceInfo.TYPE_WIRED_HEADSET,
-                        AudioDeviceInfo.TYPE_WIRED_HEADPHONES
-                    )
-                    externalTypes.firstNotNullOfOrNull { extType ->
-                        devices.firstOrNull { it.type == extType }
-                    } ?: devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+                val targetDevice = when (effective) {
+                    AudioRoute.SPEAKER -> devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                    AudioRoute.BLUETOOTH -> if (hasBluetoothConnectPermission()) {
+                        devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
+                            ?: devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+                    } else null
+                    AudioRoute.WIRED_HEADSET -> devices.firstOrNull {
+                        it.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+                            it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                            it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+                    }
+                    AudioRoute.EARPIECE -> devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
                 }
                 if (targetDevice != null) {
                     val ok = audioManager.setCommunicationDevice(targetDevice)
                     if (!ok) {
-                        audioManager.isSpeakerphoneOn = enabled
+                        audioManager.clearCommunicationDevice()
+                        audioManager.isSpeakerphoneOn = isSpeaker
                     }
                 } else {
-                    audioManager.isSpeakerphoneOn = enabled
+                    audioManager.clearCommunicationDevice()
+                    audioManager.isSpeakerphoneOn = isSpeaker
                 }
             } else {
-                audioManager.isSpeakerphoneOn = enabled
+                when (effective) {
+                    AudioRoute.BLUETOOTH -> {
+                        audioManager.isSpeakerphoneOn = false
+                        audioManager.isBluetoothScoOn = true
+                        audioManager.startBluetoothSco()
+                    }
+                    else -> {
+                        runCatching {
+                            if (audioManager.isBluetoothScoOn) {
+                                audioManager.stopBluetoothSco()
+                                audioManager.isBluetoothScoOn = false
+                            }
+                        }
+                        audioManager.isSpeakerphoneOn = isSpeaker
+                    }
+                }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Speakerphone switch fallback: ${e.message}")
-            try { audioManager.isSpeakerphoneOn = enabled } catch (_: Exception) {}
+            Log.w(TAG, "Audio route switch fallback ($effective): ${e.message}")
+            runCatching { audioManager.isSpeakerphoneOn = isSpeaker }
         }
-        updateProximityLock(enabled)
+        updateProximityLock(effective)
+    }
+
+    private fun defaultRoute(preferSpeaker: Boolean): AudioRoute {
+        val routes = refreshAvailableRoutes()
+        return when {
+            preferSpeaker -> AudioRoute.SPEAKER
+            AudioRoute.BLUETOOTH in routes -> AudioRoute.BLUETOOTH
+            AudioRoute.WIRED_HEADSET in routes -> AudioRoute.WIRED_HEADSET
+            else -> AudioRoute.EARPIECE
+        }
+    }
+
+    private fun hasBluetoothConnectPermission(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+        return ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.BLUETOOTH_CONNECT
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun refreshAvailableRoutes(): Set<AudioRoute> {
+        val routes = linkedSetOf(AudioRoute.EARPIECE, AudioRoute.SPEAKER)
+        runCatching {
+            val devices = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                audioManager.availableCommunicationDevices
+            } else {
+                audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
+            }
+            devices.forEach { dev ->
+                when (dev.type) {
+                    AudioDeviceInfo.TYPE_BLE_HEADSET,
+                    AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> {
+                        if (hasBluetoothConnectPermission()) routes.add(AudioRoute.BLUETOOTH)
+                    }
+                    AudioDeviceInfo.TYPE_USB_HEADSET,
+                    AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                    AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> routes.add(AudioRoute.WIRED_HEADSET)
+                }
+            }
+        }
+        _availableRoutes.value = routes
+        return routes
     }
 
     fun setTransportMode(isDirectP2p: Boolean) {
@@ -287,42 +660,81 @@ class CallAudioEngine(
     }
 
     /**
-     * Feed an incoming encoded IMA-ADPCM voice frame from either Tor or Direct P2P.
-     * Uses a 128-slot sliding sequence deduplicator so Active-Active Multipath (UDP + Tor)
-     * plays whichever copy arrives first and silently drops the duplicate.
+     * Feed an incoming encoded IMA-ADPCM voice frame (or 6-byte DTX SID comfort frame)
+     * from either Tor or Direct P2P.
      */
     fun onRemoteAudioFrame(sequence: Long, timestampMs: Long, encodedData: ByteArray) {
         if (!running.get() || encodedData.size < 6) return
 
+        val arrivalElapsedMs = SystemClock.elapsedRealtime()
         synchronized(dedupLock) {
             val slot = (sequence.toInt() and DEDUP_WINDOW_MASK)
             if (recentSequences[slot] == sequence) {
-                return // Exact duplicate from multipath redundant stream
+                return
             }
             recentSequences[slot] = sequence
+
+            val transit = arrivalElapsedMs - timestampMs
+            if (lastTransitMs != Long.MIN_VALUE) {
+                val d = abs(transit - lastTransitMs).toDouble()
+                rfc3550JitterMs += (d - rfc3550JitterMs) / 16.0
+            }
+            lastTransitMs = transit
         }
 
-        val decoded = ImaAdpcmCodec.decode(encodedData) ?: return
         val now = System.currentTimeMillis()
-        val rawDelta = (now - timestampMs).toInt()
-        if (rawDelta in 5..5000) {
-            _estimatedOneWayLatencyMs.value = rawDelta
-        }
-
-        // Prevent unbounded queue growth during extreme network stalls
         while (jitterQueue.size >= 48) {
             jitterQueue.poll()
         }
 
+        if (isDtxSidFrame(encodedData)) {
+            jitterQueue.offer(
+                QueuedAudioFrame(
+                    sequence = sequence,
+                    timestampMs = timestampMs,
+                    pcm = ShortArray(0),
+                    voiceLevel = 0f,
+                    isDtxSid = true,
+                    receivedAtMs = now
+                )
+            )
+            return
+        }
+
+        val decoded = ImaAdpcmCodec.decode(encodedData) ?: return
         jitterQueue.offer(
             QueuedAudioFrame(
                 sequence = sequence,
                 timestampMs = timestampMs,
                 pcm = decoded.samples,
                 voiceLevel = decoded.voiceLevel,
+                isDtxSid = false,
                 receivedAtMs = now
             )
         )
+    }
+
+    private fun runOutboundDispatchLoop() {
+        while (ioRunning.get() && running.get()) {
+            val item = try {
+                outboundQueue.poll(100L, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                if (!ioRunning.get() || !running.get()) break else null
+            } ?: continue
+            try {
+                onEncodedFrameReady(item.sequence, item.timestampMs, item.payload)
+            } catch (e: Exception) {
+                Log.w(TAG, "Error dispatching encoded audio frame: ${e.message}")
+            }
+        }
+    }
+
+    private fun enqueueOutbound(sequence: Long, timestampMs: Long, payload: ByteArray) {
+        val frame = OutboundEncodedFrame(sequence, timestampMs, payload)
+        if (!outboundQueue.offer(frame)) {
+            outboundQueue.poll()
+            outboundQueue.offer(frame)
+        }
     }
 
     private fun runCaptureLoop(record: AudioRecord) {
@@ -331,11 +743,12 @@ class CallAudioEngine(
         } catch (_: Exception) {}
 
         val encoder = ImaAdpcmCodec.Encoder()
+        val dspState = MicDspState()
         val pcmBuffer = ShortArray(TOR_SAMPLES_PER_FRAME)
         var hangoverFrames = 8
         var silentSkippedCount = 0
 
-        while (running.get() && scope.isActive) {
+        while (ioRunning.get() && running.get()) {
             val directMode = useDirectP2pFraming.get()
             val targetSamples = if (directMode) {
                 P2P_SAMPLES_PER_FRAME
@@ -344,7 +757,7 @@ class CallAudioEngine(
             }
 
             var totalRead = 0
-            while (totalRead < targetSamples && running.get()) {
+            while (totalRead < targetSamples && ioRunning.get() && running.get()) {
                 val read = record.read(pcmBuffer, totalRead, targetSamples - totalRead)
                 if (read <= 0) {
                     try { Thread.sleep(10L) } catch (_: Exception) {}
@@ -352,45 +765,46 @@ class CallAudioEngine(
                 }
                 totalRead += read
             }
-            if (totalRead < targetSamples || !running.get()) continue
+            if (totalRead < targetSamples || !ioRunning.get() || !running.get()) continue
 
             val level: Float
-            if (muted.get()) {
+            if (muted.get() || focusDucked.get()) {
                 pcmBuffer.fill(0, 0, targetSamples)
                 level = 0f
                 _localVoiceLevel.value = 0f
             } else {
-                applySoftKneeSpeechGain(pcmBuffer, targetSamples)
+                applyDcBlockAndSmoothSpeechGain(
+                    pcm = pcmBuffer,
+                    length = targetSamples,
+                    state = dspState,
+                    hardwareAgcActive = hardwareAgcEnabled
+                )
                 level = computeVoiceLevel(pcmBuffer, targetSamples)
                 _localVoiceLevel.value = level
             }
 
-            // Smart VAD + Discontinuous Transmission (DTX) when on Tor circuit:
-            // Avoids flooding the 6-hop Tor TCP circuit with silent frames while listening,
-            // keeping the Tor pipe completely unbloated for immediate speech bursts.
-            if (level >= 0.014f) {
-                hangoverFrames = 7 // ~280ms post-speech hangover tail
+            // Smart VAD + Explicit DTX SID framing on Tor so silence pauses never trigger false PLC
+            var sendSid = false
+            if (level >= 0.005f) {
+                hangoverFrames = 25 // ~1000ms post-speech hangover tail
                 silentSkippedCount = 0
             } else if (!directMode) {
                 if (hangoverFrames > 0) {
                     hangoverFrames--
                 } else {
                     silentSkippedCount++
-                    // During silence on Tor, send 1 comfort-sync packet every 10 frames (~400ms)
-                    if (silentSkippedCount % 10 != 0) {
+                    if (silentSkippedCount == 1 || silentSkippedCount % 4 == 0) {
+                        sendSid = true
+                    } else {
                         continue
                     }
                 }
             }
 
-            val encoded = encoder.encode(pcmBuffer, targetSamples)
+            val encoded = if (sendSid) encodeDtxSidFrame() else encoder.encode(pcmBuffer, targetSamples)
             val seq = outboundSequence.incrementAndGet()
             val now = System.currentTimeMillis()
-            try {
-                onEncodedFrameReady(seq, now, encoded)
-            } catch (e: Exception) {
-                Log.w(TAG, "Error dispatching encoded audio frame: ${e.message}")
-            }
+            enqueueOutbound(seq, now, encoded)
         }
     }
 
@@ -403,46 +817,80 @@ class CallAudioEngine(
         var lastPlayedSequence = -1L
         var lastTailSample: Short = 0
         var lastVoicedPcm: ShortArray? = null
+        var inRemoteDtx = false
         var plcConsecutiveCount = 0
         var lastUnderrunCount = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) track.underrunCount else 0
+        var lastUnderrunAtMs = System.currentTimeMillis()
         var adaptiveExtraPrebuffer = 0
-        val comfortSilence = ShortArray(P2P_SAMPLES_PER_FRAME)
+        var cngSeed = 0x13579BDF
 
-        while (running.get() && scope.isActive) {
+        fun fillGentleComfortNoise(buf: ShortArray, fadeTail: Boolean) {
+            var tail = lastTailSample
+            for (i in buf.indices) {
+                cngSeed = cngSeed * 1664525 + 1013904223
+                val noise = ((cngSeed ushr 26) and 0x1F) - 16
+                tail = if (fadeTail) ((tail * 7) / 8).toShort() else 0
+                buf[i] = (tail + noise).coerceIn(-32767, 32767).toShort()
+            }
+            lastTailSample = tail
+        }
+
+        val comfortBuffer = ShortArray(P2P_SAMPLES_PER_FRAME)
+
+        while (ioRunning.get() && running.get()) {
+            // Pause remote audio playback when another app / cellular call holds AudioFocus
+            if (focusDucked.get()) {
+                while (jitterQueue.size > 2) jitterQueue.poll()
+                _remoteVoiceLevel.value = 0f
+                try { Thread.sleep(20L) } catch (_: Exception) {}
+                continue
+            }
+
             val directMode = useDirectP2pFraming.get()
             val frameMs = if (directMode) P2P_FRAME_DURATION_MS else TOR_FRAME_DURATION_MS
+            val nowMs = System.currentTimeMillis()
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 val underruns = track.underrunCount
                 if (underruns > lastUnderrunCount) {
                     lastUnderrunCount = underruns
-                    adaptiveExtraPrebuffer = (adaptiveExtraPrebuffer + 1).coerceAtMost(2)
+                    lastUnderrunAtMs = nowMs
+                    if (!inRemoteDtx) {
+                        adaptiveExtraPrebuffer = (adaptiveExtraPrebuffer + 1).coerceAtMost(2)
+                    }
+                } else if (adaptiveExtraPrebuffer > 0 && nowMs - lastUnderrunAtMs >= UNDERRUN_DECAY_WINDOW_MS) {
+                    adaptiveExtraPrebuffer--
+                    lastUnderrunAtMs = nowMs
                 }
             }
 
-            val minPrebufferFrames = (if (directMode) 2 else 3) + adaptiveExtraPrebuffer
-            val softMaxFrames = if (directMode) 7 else 9    // ~140ms on P2P, ~360ms on Tor
-            val hardMaxFrames = if (directMode) 14 else 16  // ~280ms on P2P, ~640ms on Tor
+            val jitterSnap = rfc3550JitterMs
+            val dynamicBase = if (directMode) {
+                (1 + (jitterSnap / 18.0).toInt()).coerceIn(1, 4)
+            } else {
+                (2 + (jitterSnap / 35.0).toInt()).coerceIn(2, 6)
+            }
+            val minPrebufferFrames = (dynamicBase + adaptiveExtraPrebuffer).coerceIn(1, 6)
+            val softMaxFrames = if (directMode) 4 else 7
+            val hardMaxFrames = if (directMode) 14 else 16
 
             val currentQueueSize = jitterQueue.size
             _jitterBufferMs.value = currentQueueSize * frameMs
 
             if (prebuffering) {
-                if (currentQueueSize < minPrebufferFrames) {
-                    for (i in comfortSilence.indices) {
-                        lastTailSample = ((lastTailSample * 7) / 8).toShort()
-                        comfortSilence[i] = lastTailSample
-                    }
+                val oldest = jitterQueue.peek()
+                val oldestWaitMs = if (oldest != null) (nowMs - oldest.receivedAtMs) else 0L
+                val maxWaitMs = if (directMode) 32L else 65L
+                val readyToPlay = currentQueueSize >= minPrebufferFrames || (oldest != null && oldestWaitMs >= maxWaitMs)
+                if (!readyToPlay) {
                     _remoteVoiceLevel.value = 0f
-                    track.write(comfortSilence, 0, comfortSilence.size)
+                    try { Thread.sleep(6L) } catch (_: Exception) {}
                     continue
                 }
                 prebuffering = false
                 plcConsecutiveCount = 0
             }
 
-            // Hard cap: if Tor circuit paused and delivered a large burst, drop stale backlog
-            // immediately to stay locked onto live conversation.
             while (jitterQueue.size > hardMaxFrames) {
                 val dropped = jitterQueue.poll()
                 if (dropped != null && dropped.sequence > lastPlayedSequence) {
@@ -450,44 +898,64 @@ class CallAudioEngine(
                 }
             }
 
+            val headBeforeWait = jitterQueue.peek()
+            if (headBeforeWait != null && lastPlayedSequence != -1L && headBeforeWait.sequence > lastPlayedSequence + 1L) {
+                val graceDeadline = System.currentTimeMillis() + (frameMs / 2).toLong().coerceIn(8L, 18L)
+                while (ioRunning.get() && running.get() && System.currentTimeMillis() < graceDeadline) {
+                    val curHead = jitterQueue.peek()
+                    if (curHead != null && curHead.sequence <= lastPlayedSequence + 1L) break
+                    try { Thread.sleep(4L) } catch (_: Exception) {}
+                }
+            }
+
             var frame = jitterQueue.poll()
-            // Strictly drop any frame at or behind lastPlayedSequence so late packets
-            // never cause time-reversal glitches.
             while (frame != null && lastPlayedSequence != -1L && frame.sequence <= lastPlayedSequence) {
                 frame = jitterQueue.poll()
             }
 
             if (frame == null) {
-                // Waveform Packet Loss Concealment (PLC): bridge 1-2 missing frame slots smoothly
-                // before re-entering prebuffering so Tor cell boundaries never click or chop.
+                if (inRemoteDtx) {
+                    fillGentleComfortNoise(comfortBuffer, fadeTail = false)
+                    _remoteVoiceLevel.value = 0f
+                    track.write(comfortBuffer, 0, comfortBuffer.size)
+                    continue
+                }
+
                 val prevPcm = lastVoicedPcm
-                if (plcConsecutiveCount < 2 && prevPcm != null && prevPcm.isNotEmpty()) {
+                if (plcConsecutiveCount < 3 && prevPcm != null && prevPcm.isNotEmpty()) {
                     plcConsecutiveCount++
-                    val plcFrame = synthesizePlcFrame(prevPcm, plcConsecutiveCount)
+                    val plcFrame = synthesizePitchMatchedPlc(prevPcm, plcConsecutiveCount, cngSeed)
+                    cngSeed = cngSeed * 1664525 + 1013904223
                     lastTailSample = plcFrame[plcFrame.lastIndex]
                     _remoteVoiceLevel.value *= 0.65f
                     track.write(plcFrame, 0, plcFrame.size)
                     continue
                 }
 
-                prebuffering = true
-                for (i in comfortSilence.indices) {
-                    lastTailSample = ((lastTailSample * 7) / 8).toShort()
-                    comfortSilence[i] = lastTailSample
-                }
+                fillGentleComfortNoise(comfortBuffer, fadeTail = true)
                 _remoteVoiceLevel.value = 0f
-                track.write(comfortSilence, 0, comfortSilence.size)
+                track.write(comfortBuffer, 0, comfortBuffer.size)
+                prebuffering = true
                 continue
             }
 
             plcConsecutiveCount = 0
 
-            // Soft catch-up: if queue exceeds softMaxFrames, drop silent frames or time-compress
-            // speech by 12.5% so latency never drifts upward over a long call.
+            if (frame.isDtxSid) {
+                inRemoteDtx = true
+                if (frame.sequence > lastPlayedSequence) lastPlayedSequence = frame.sequence
+                fillGentleComfortNoise(comfortBuffer, fadeTail = true)
+                _remoteVoiceLevel.value = 0f
+                track.write(comfortBuffer, 0, comfortBuffer.size)
+                continue
+            }
+
+            inRemoteDtx = false
+
             val backlog = jitterQueue.size
             if (backlog >= softMaxFrames && frame.voiceLevel < 0.03f) {
                 val nextFrame = jitterQueue.poll()
-                if (nextFrame != null) {
+                if (nextFrame != null && !nextFrame.isDtxSid) {
                     frame = nextFrame
                 }
             }
@@ -498,7 +966,7 @@ class CallAudioEngine(
             _remoteVoiceLevel.value = frame.voiceLevel
 
             val pcmToPlay = if (jitterQueue.size >= softMaxFrames) {
-                timeCompressPcm(frame.pcm)
+                wsolaTimeCompressPcm(frame.pcm)
             } else {
                 frame.pcm
             }
@@ -509,65 +977,6 @@ class CallAudioEngine(
                 track.write(pcmToPlay, 0, pcmToPlay.size)
             }
         }
-    }
-
-    /**
-     * Synthesizes a smooth attenuated continuation frame for Packet Loss Concealment (PLC).
-     */
-    private fun synthesizePlcFrame(previousPcm: ShortArray, plcIndex: Int): ShortArray {
-        val attenuation = if (plcIndex == 1) 0.72f else 0.45f
-        val out = ShortArray(previousPcm.size)
-        val n = previousPcm.size
-        for (i in 0 until n) {
-            // Crossfade tail-to-head so phase remains continuous without clicks
-            val srcIdx = (n / 2 + i) % n
-            val env = attenuation * (1f - (i.toFloat() / n) * 0.25f)
-            out[i] = (previousPcm[srcIdx] * env).toInt().coerceIn(-32768, 32767).toShort()
-        }
-        return out
-    }
-
-    /**
-     * Soft-knee microphone speech gain booster (~1.65x boost with smooth saturation limiter)
-     * so quiet speech is loud and intelligible on every Android OEM handset.
-     */
-    private fun applySoftKneeSpeechGain(pcm: ShortArray, length: Int) {
-        for (i in 0 until length) {
-            val s = pcm[i].toInt()
-            // Noise gate for tiny ADC hiss below ±90
-            if (s in -90..90) {
-                pcm[i] = (s / 2).toShort()
-                continue
-            }
-            val boosted = (s * 13) / 8 // 1.625x linear speech boost
-            val limited = when {
-                boosted > 24000 -> 24000 + ((boosted - 24000) / 4)
-                boosted < -24000 -> -24000 + ((boosted + 24000) / 4)
-                else -> boosted
-            }
-            pcm[i] = limited.coerceIn(-32767, 32767).toShort()
-        }
-    }
-
-    /**
-     * Smooth 8:7 overlap time-compression (12.5% faster playback) used to drain jitter backlog
-     * without pitch-clipping artifacts.
-     */
-    private fun timeCompressPcm(input: ShortArray): ShortArray {
-        if (input.size < 16) return input
-        val outSize = (input.size * 7) / 8
-        val out = ShortArray(outSize)
-        var inIdx = 0
-        var outIdx = 0
-        while (outIdx < outSize && inIdx < input.size) {
-            if ((inIdx and 7) == 6 && inIdx + 1 < input.size) {
-                out[outIdx++] = ((input[inIdx].toInt() + input[inIdx + 1].toInt()) / 2).toShort()
-                inIdx += 2
-            } else {
-                out[outIdx++] = input[inIdx++]
-            }
-        }
-        return out
     }
 
     private fun computeVoiceLevel(pcm: ShortArray, length: Int): Float {
@@ -599,9 +1008,11 @@ class CallAudioEngine(
         try {
             if (AutomaticGainControl.isAvailable()) {
                 gainControl = AutomaticGainControl.create(audioSessionId)?.apply { enabled = true }
+                hardwareAgcEnabled = gainControl?.enabled == true
             }
         } catch (e: Exception) {
             Log.w(TAG, "Hardware AGC unavailable: ${e.message}")
+            hardwareAgcEnabled = false
         }
     }
 
@@ -618,20 +1029,44 @@ class CallAudioEngine(
                             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                             .build()
                     )
+                    .setOnAudioFocusChangeListener(audioFocusListener)
                     .build()
                 audioFocusRequest = req
                 audioManager.requestAudioFocus(req)
             } else {
                 audioManager.requestAudioFocus(
-                    null,
+                    audioFocusListener,
                     AudioManager.STREAM_VOICE_CALL,
                     AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
                 )
             }
 
+            if (audioDeviceCallback == null) {
+                val cb = object : AudioDeviceCallback() {
+                    override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
+                        if (!running.get()) return
+                        val routes = refreshAvailableRoutes()
+                        if (AudioRoute.BLUETOOTH in routes || AudioRoute.WIRED_HEADSET in routes) {
+                            if (_audioRoute.value == AudioRoute.EARPIECE) {
+                                setAudioRoute(defaultRoute(false))
+                            }
+                        }
+                    }
+
+                    override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+                        if (!running.get()) return
+                        val routes = refreshAvailableRoutes()
+                        if (_audioRoute.value !in routes) {
+                            setAudioRoute(defaultRoute(speakerphone.get()))
+                        }
+                    }
+                }
+                audioDeviceCallback = cb
+                audioManager.registerAudioDeviceCallback(cb, Handler(Looper.getMainLooper()))
+            }
+
             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
 
-            // Ensure STREAM_VOICE_CALL is audible if user previously turned call volume all the way down
             try {
                 val curVol = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
                 val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
@@ -641,7 +1076,7 @@ class CallAudioEngine(
                 }
             } catch (_: Exception) {}
 
-            setSpeakerphone(enableSpeaker)
+            setAudioRoute(defaultRoute(enableSpeaker))
         } catch (e: Exception) {
             Log.w(TAG, "Could not configure audio mode: ${e.message}")
         }
@@ -649,15 +1084,24 @@ class CallAudioEngine(
 
     private fun restoreAudioSession() {
         try {
+            audioDeviceCallback?.let { cb ->
+                runCatching { audioManager.unregisterAudioDeviceCallback(cb) }
+            }
+            audioDeviceCallback = null
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 audioManager.clearCommunicationDevice()
+            } else if (audioManager.isBluetoothScoOn) {
+                runCatching {
+                    audioManager.stopBluetoothSco()
+                    audioManager.isBluetoothScoOn = false
+                }
             }
             audioManager.isSpeakerphoneOn = previousSpeakerphone
             audioManager.mode = previousAudioMode
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
             } else {
-                audioManager.abandonAudioFocus(null)
+                audioManager.abandonAudioFocus(audioFocusListener)
             }
             audioFocusRequest = null
         } catch (e: Exception) {
@@ -665,8 +1109,9 @@ class CallAudioEngine(
         }
     }
 
-    private fun updateProximityLock(isSpeakerphone: Boolean) {
-        if (isSpeakerphone) {
+    private fun updateProximityLock(route: AudioRoute) {
+        // Hold proximity screen-off lock ONLY when using the built-in earpiece (never Bluetooth A2DP/SCO, wired headset, or speaker)
+        if (route != AudioRoute.EARPIECE) {
             releaseProximityLock()
             return
         }
@@ -697,11 +1142,6 @@ class CallAudioEngine(
 
 /**
  * Self-contained 4-bit IMA-ADPCM Speech Codec.
- * Each frame carries a 4-byte header:
- * - [0..1]: Predictor state (16-bit signed BE) prior to sample 0
- * - [2]: Step index (0..88) prior to sample 0
- * - [3]: Quantized voice level (0..255) for UI waveform rendering
- * - [4..N]: 2 nibbles per byte (low nibble = even sample, high nibble = odd sample)
  */
 object ImaAdpcmCodec {
     private val INDEX_TABLE = intArrayOf(
@@ -734,7 +1174,6 @@ object ImaAdpcmCodec {
             val evenCount = sampleCount and 0x7FFFFFFE
             val out = ByteArray(4 + evenCount / 2)
 
-            // Snapshot state at start of frame so decoder can decode this frame independently
             out[0] = ((predictor shr 8) and 0xFF).toByte()
             out[1] = (predictor and 0xFF).toByte()
             out[2] = stepIndex.toByte()

@@ -44,6 +44,9 @@ zxing = "3.5.3"
 # Camera
 camerax = "1.3.1"
 
+# WebRTC (HD video call media engine: HW H.264/VP8, GCC, NACK/FEC, Opus)
+stream-webrtc = "1.3.10"
+
 
 # Google Play Services
 gms-location = "21.3.0"
@@ -114,6 +117,10 @@ camerax-core = { module = "androidx.camera:camera-core", version.ref = "camerax"
 camerax-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "camerax" }
 camerax-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "camerax" }
 camerax-view = { module = "androidx.camera:camera-view", version.ref = "camerax" }
+
+# WebRTC
+stream-webrtc-android = { module = "io.getstream:stream-webrtc-android", version.ref = "stream-webrtc" }
+stream-webrtc-android-ui = { module = "io.getstream:stream-webrtc-android-ui", version.ref = "stream-webrtc" }
 
 # Tor (embed) intentionally not pinned yet; add once repo is chosen
 

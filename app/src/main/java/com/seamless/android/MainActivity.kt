@@ -82,6 +82,11 @@ class MainActivity : OrientationAwareActivity() {
             
             // Update ChatViewModel with mesh service
             chatViewModel.updateMeshService(meshService)
+
+            val inBg = !com.seamless.android.util.AppForegroundTracker.isAppInForeground(this@MainActivity)
+            meshService?.connectionManager?.setAppBackgroundState(inBg)
+            meshServiceBinder?.setAppBackgroundState(inBg)
+            chatViewModel.setAppBackgroundState(inBg)
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -201,21 +206,23 @@ class MainActivity : OrientationAwareActivity() {
                 val hasCall = session != null &&
                     session.state != com.seamless.android.call.CallState.IDLE &&
                     session.state != com.seamless.android.call.CallState.ENDED
+                // Only expose the activity over lockscreen while call UI is FULL-SCREEN (never when minimized -> hides private chats!)
+                val showOverLockscreen = hasCall && !session!!.isMinimized
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                    setShowWhenLocked(hasCall)
-                    setTurnScreenOn(hasCall)
+                    setShowWhenLocked(showOverLockscreen)
+                    setTurnScreenOn(hasCall && session!!.state == com.seamless.android.call.CallState.INCOMING_RINGING)
                 } else {
                     @Suppress("DEPRECATION")
-                    if (hasCall) {
-                        window.addFlags(
-                            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                        )
+                    if (showOverLockscreen) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED)
                     } else {
-                        window.clearFlags(
-                            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                        )
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED)
+                    }
+                    @Suppress("DEPRECATION")
+                    if (hasCall && session!!.state == com.seamless.android.call.CallState.INCOMING_RINGING) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
                     }
                 }
                 if (hasCall) {
@@ -814,7 +821,16 @@ class MainActivity : OrientationAwareActivity() {
                 }
                 
                 Log.d("MainActivity", "Successfully bound to mesh service")
-                
+
+                runCatching {
+                    com.seamless.android.net.TorMessageNotifier(applicationContext).ensureChannelsCreated()
+                    if (com.seamless.android.net.TorPreferenceManager.get(applicationContext) == com.seamless.android.net.TorMode.ON &&
+                        !com.seamless.android.service.TorForegroundService.isRunning(applicationContext)
+                    ) {
+                        com.seamless.android.service.TorForegroundService.start(applicationContext)
+                    }
+                }
+
                 // Handle any notification intent
                 handleNotificationIntent(intent)
                 
@@ -849,18 +865,26 @@ class MainActivity : OrientationAwareActivity() {
         }
     }
     
+    override fun onStart() {
+        super.onStart()
+        meshService?.connectionManager?.setAppBackgroundState(false)
+        meshServiceBinder?.setAppBackgroundState(false)
+        chatViewModel.setAppBackgroundState(false)
+        runCatching { com.seamless.android.net.TorMessageNotifier(applicationContext).cancelAllMessageNotifications() }
+    }
+
     override fun onResume() {
         super.onResume()
         // Enable NFC foreground dispatch for tap-to-share
         nfcHandoverService.enableForegroundDispatch(this)
         // Refresh Incognito (FLAG_SECURE) on every resume
         applyIncognitoFlag()
+        // Always mark foreground even during onboarding
+        meshService?.connectionManager?.setAppBackgroundState(false)
+        meshServiceBinder?.setAppBackgroundState(false)
+        chatViewModel.setAppBackgroundState(false)
         // Check Bluetooth and Location status on resume and handle accordingly
         if (mainViewModel.onboardingState.value == OnboardingState.COMPLETE) {
-            // Set app foreground state if service is bound
-            meshService?.connectionManager?.setAppBackgroundState(false)
-            meshServiceBinder?.setAppBackgroundState(false)
-            chatViewModel.setAppBackgroundState(false)
 
             // Check if Bluetooth was disabled while app was backgrounded
             val currentBluetoothStatus = bluetoothStatusManager.checkBluetoothStatus()
@@ -891,16 +915,38 @@ class MainActivity : OrientationAwareActivity() {
         }
     }
     
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val session = com.seamless.android.call.SeamlessCallManager.getInstance(applicationContext).sessionFlow.value
+            val inActiveVideoCall = session != null &&
+                session.state == com.seamless.android.call.CallState.ACTIVE &&
+                !session.isMinimized &&
+                (session.isVideoCall || session.isLocalVideoEnabled || session.isRemoteVideoEnabled)
+            if (inActiveVideoCall) {
+                runCatching {
+                    val params = android.app.PictureInPictureParams.Builder()
+                        .setAspectRatio(android.util.Rational(9, 16))
+                        .build()
+                    enterPictureInPictureMode(params)
+                }
+            }
+        }
+    }
+
     override fun onPause() {
         super.onPause()
         runCatching {
             com.seamless.android.net.TorMessagingService.getInstance(applicationContext).clearAllVisibleChats()
+            com.seamless.android.net.TorGroupMessaging.getInstance(applicationContext).visibleGroupId = null
         }
         // Disable NFC foreground dispatch
         nfcHandoverService.disableForegroundDispatch(this)
-        // Only set background state if app is fully initialized
-        if (mainViewModel.onboardingState.value == OnboardingState.COMPLETE) {
-            // Set app background state if service is bound
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations && !com.seamless.android.util.AppForegroundTracker.isAppInForeground(this)) {
             meshService?.connectionManager?.setAppBackgroundState(true)
             meshServiceBinder?.setAppBackgroundState(true)
             chatViewModel.setAppBackgroundState(true)

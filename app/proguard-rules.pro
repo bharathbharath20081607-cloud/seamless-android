@@ -83,3 +83,7 @@
 -keepclassmembers,allowobfuscation interface * {
     @retrofit2.http.* <methods>;
 }
+
+# ===== WebRTC (keep native JNI callbacks & package-private hardware encoder factory) =====
+-keep class org.webrtc.** { *; }
+-dontwarn org.webrtc.**

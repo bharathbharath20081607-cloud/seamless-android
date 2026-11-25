@@ -114,6 +114,7 @@ object GCSFilter {
         val mask = (1L shl p) - 1L
         for (v in sorted) {
             val delta = v - prev
+            if (delta <= 0L) continue
             prev = v
             val x = delta
             val q = (x - 1) ushr p

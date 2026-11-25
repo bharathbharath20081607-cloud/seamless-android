@@ -432,11 +432,40 @@ class HybridTransport private constructor(private val context: Context) {
     ): MessageResult? {
         return try {
             Log.d(TAG, "🧅 Trying file via Onion P2P...")
-            
-            // TODO: Implement file sending over Onion when ready
-            Log.d(TAG, "⏭️ Onion file transfer not yet implemented")
-            null
-            
+            val mime = file.mimeType.lowercase()
+            if (mime !in setOf("image/jpeg", "image/png", "image/webp") ||
+                file.content.isEmpty() ||
+                file.content.size > TorAttachmentTransfer.MAX_IMAGE_BYTES
+            ) {
+                Log.d(TAG, "⏭️ Skipping Onion file transfer (unsupported mime or size=${file.content.size})")
+                return null
+            }
+
+            val contactManager = OnionContactManager.getInstance(context)
+            val contact = contactManager.getContact(recipientId)
+                ?: contactManager.getContactByOnion(recipientId)
+                ?: contactManager.getContactByPublicKey(recipientId)
+                ?: return null
+
+            val torService = TorMessagingService.getInstance(context)
+            val sent = withTimeoutOrNull(settings.onionTimeoutMs) {
+                torService.sendImage(
+                    contactId = contact.id,
+                    imageBytes = file.content,
+                    mimeType = mime
+                ).isSuccess
+            } ?: false
+
+            if (sent) {
+                Log.i(TAG, "✅ Queued file via Onion P2P (${file.content.size} bytes)")
+                MessageResult(
+                    messageId = file.transferId,
+                    status = DeliveryStatus.SENT_ONION,
+                    transport = TransportType.ONION
+                )
+            } else {
+                null
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Onion file failed: ${e.message}")
             null

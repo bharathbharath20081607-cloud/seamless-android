@@ -69,14 +69,38 @@ interface GroupDao {
     @Query("DELETE FROM group_messages WHERE groupId = :groupId")
     suspend fun deleteMessagesForGroup(groupId: String)
 
-    @Query("SELECT COUNT(*) FROM group_messages WHERE groupId = :groupId AND isFromMe = 0 AND timestamp > :since")
+    @Query("SELECT COUNT(*) FROM group_messages WHERE groupId = :groupId AND isFromMe = 0 AND senderOnionAddress != 'system' AND timestamp > :since")
     fun getUnreadCount(groupId: String, since: Long): Flow<Int>
 
     @Query("SELECT * FROM group_messages WHERE groupId = :groupId ORDER BY timestamp DESC LIMIT 1")
     fun getLastMessage(groupId: String): Flow<GroupMessageEntity?>
 
-    @Query("SELECT * FROM group_messages WHERE groupId = :groupId ORDER BY timestamp ASC")
+    @Query("SELECT * FROM group_messages WHERE groupId = :groupId ORDER BY timestamp ASC, id ASC")
     fun getGroupMessages(groupId: String): Flow<List<GroupMessageEntity>>
+
+    @Query("""
+        SELECT g.* FROM private_groups g
+        ORDER BY COALESCE(
+            (SELECT MAX(m.timestamp) FROM group_messages m WHERE m.groupId = g.groupId),
+            g.createdAt
+        ) DESC
+    """)
+    fun getGroupsOrderedByRecentActivity(): Flow<List<PrivateGroupEntity>>
+
+    @Query("UPDATE group_messages SET text = :text WHERE id = :id")
+    suspend fun updateGroupMessageText(id: String, text: String)
+
+    @Query("UPDATE group_messages SET attachmentPath = :path, attachmentMimeType = :mimeType WHERE id = :id")
+    suspend fun updateGroupMessageAttachment(id: String, path: String, mimeType: String)
+
+    @Query("UPDATE group_messages SET text = :text, attachmentPath = NULL, attachmentMimeType = NULL WHERE id = :id")
+    suspend fun markGroupMessageDeleted(id: String, text: String)
+
+    @Query("SELECT attachmentPath FROM group_messages WHERE groupId = :groupId AND senderOnionAddress != 'system' AND timestamp < :cutoffTimestamp AND attachmentPath IS NOT NULL")
+    suspend fun getExpiredGroupAttachmentPaths(groupId: String, cutoffTimestamp: Long): List<String>
+
+    @Query("DELETE FROM group_messages WHERE groupId = :groupId AND senderOnionAddress != 'system' AND timestamp < :cutoffTimestamp")
+    suspend fun deleteExpiredGroupMessages(groupId: String, cutoffTimestamp: Long): Int
 
     @Query("""
         SELECT * FROM group_messages 

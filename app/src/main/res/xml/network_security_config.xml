@@ -11,9 +11,10 @@
             <certificates src="system" />
         </trust-anchors>
     </base-config>
-    <!-- Allow cleartext to localhost only (Tor SOCKS proxy) -->
+    <!-- Allow cleartext to localhost (Tor SOCKS) and Tor .onion hidden services -->
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">127.0.0.1</domain>
         <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="true">onion</domain>
     </domain-config>
 </network-security-config>

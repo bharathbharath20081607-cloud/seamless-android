@@ -177,6 +177,10 @@ dependencies {
     implementation(libs.camerax.camera2)
     implementation(libs.camerax.lifecycle)
     implementation(libs.camerax.view)
+
+    // WebRTC media engine for HD Direct P2P video calls (signaling stays on Tor)
+    implementation(libs.stream.webrtc.android)
+    implementation(libs.stream.webrtc.android.ui)
     
     // Testing
     testImplementation(libs.bundles.testing)

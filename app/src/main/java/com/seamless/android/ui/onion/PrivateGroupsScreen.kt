@@ -17,6 +17,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,6 +31,7 @@ import androidx.compose.ui.text.font.FontWeight
 import com.seamless.android.data.PrivateGroupEntity
 import com.seamless.android.net.OnionContactManager
 import com.seamless.android.net.TorGroupMessaging
+import com.seamless.android.net.TorMessagingService
 import kotlinx.coroutines.launch
 
 /**
@@ -45,21 +47,29 @@ fun PrivateGroupsScreen(
     val context = LocalContext.current
     val contactManager = remember { OnionContactManager.getInstance(context) }
     val groupService = remember { TorGroupMessaging.getInstance(context) }
+    val messagingService = remember { TorMessagingService.getInstance(context) }
+    val serviceState by messagingService.serviceState.collectAsState()
     val contacts by contactManager.contactsFlow.collectAsState()
     val scope = rememberCoroutineScope()
 
     var showCreateSheet by remember { mutableStateOf(false) }
+
+    LaunchedEffect(serviceState) {
+        if (serviceState == TorMessagingService.ServiceState.RUNNING) {
+            messagingService.prewarmActiveContacts()
+        }
+    }
 
     OnionPage {
         Scaffold(
             topBar = {
                 TopAppBar(
                     title = {
-                        Text("Private Groups", color = Color.White, fontWeight = FontWeight.Bold)
+                        Text("Private Groups", color = OnionUi.TextPrimary, fontWeight = FontWeight.Bold)
                     },
                     navigationIcon = {
                         IconButton(onClick = onNavigateBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = OnionUi.TextPrimary)
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = OnionUi.CanvasRaised)
@@ -68,8 +78,8 @@ fun PrivateGroupsScreen(
             floatingActionButton = {
                 FloatingActionButton(
                     onClick = { showCreateSheet = true },
-                    containerColor = Color.White,
-                    contentColor = Color.Black
+                    containerColor = OnionUi.Accent,
+                    contentColor = OnionUi.Canvas
                 ) {
                     Icon(Icons.Default.Add, contentDescription = "Create Group")
                 }

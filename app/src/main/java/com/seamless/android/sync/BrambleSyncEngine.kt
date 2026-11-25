@@ -133,7 +133,11 @@ class BrambleSyncEngine private constructor(private val context: Context) {
     private val transports = mutableListOf<BspTransport>()
 
     fun registerTransport(transport: BspTransport) {
-        transports.add(transport)
+        synchronized(transports) {
+            if (!transports.contains(transport)) {
+                transports.add(transport)
+            }
+        }
     }
 
     // Listeners
@@ -164,6 +168,12 @@ class BrambleSyncEngine private constructor(private val context: Context) {
     fun addMessageForSync(messageId: String, encodedFrame: ByteArray, recipientPeerId: String? = null) {
         val compact = OnionFrame.decode(encodedFrame)?.let(::encodeCompactFrame) ?: encodedFrame
         if (compact.size <= MAX_SINGLE_BATCH_WIRE_BYTES - 8) {
+            if (messageStore.size >= 5_000) {
+                messageStore.keys.take(500).forEach { staleId ->
+                    messageStore.remove(staleId)
+                    messageTargets.remove(staleId)
+                }
+            }
             messageStore[messageId] = compact
             if (!recipientPeerId.isNullOrBlank()) {
                 messageTargets[messageId] = canonicalizePeer(recipientPeerId)
@@ -229,6 +239,17 @@ class BrambleSyncEngine private constructor(private val context: Context) {
      * Mark a message as received (for deduplication)
      */
     fun markAsReceived(messageId: String) {
+        if (receivedMessageIds.size >= 5_000) {
+            val toDrop = receivedMessageIds.take(500)
+            receivedMessageIds.removeAll(toDrop.toSet())
+        }
+        receivedMessageIds.add(messageId)
+    }
+
+    /** Evicts a directly delivered / ACKed outbound message so BSP does not re-offer it. */
+    fun markMessageDelivered(messageId: String) {
+        messageStore.remove(messageId)
+        messageTargets.remove(messageId)
         receivedMessageIds.add(messageId)
     }
 
@@ -295,8 +316,8 @@ class BrambleSyncEngine private constructor(private val context: Context) {
                         sendOffer(peerId, unsynced)
                     }
                 }
-                SyncState.OFFERING, SyncState.AWAITING_REQUEST -> {
-                    // Check for timeout
+                SyncState.OFFERING, SyncState.AWAITING_REQUEST, SyncState.RECEIVING_OFFER, SyncState.RECEIVING_BATCH, SyncState.SENDING_BATCH -> {
+                    // Check for timeout so inbound or outbound stalls never wedge permanently
                     if (System.currentTimeMillis() - state.lastStateChangeAt > SYNC_TIMEOUT_MS) {
                         Log.w(TAG, "⏰ Sync timeout for $peerId in state ${state.syncState}")
                         resetSyncState(peerId)
@@ -431,10 +452,17 @@ class BrambleSyncEngine private constructor(private val context: Context) {
         state.pendingRequest = request
         updateStateFlow()
 
-        // Gather the requested frames
+        // Gather ONLY messages intended for this peer (never leak another contact's frames)
+        val canonicalRequester = canonicalizePeer(peerId)
         val requestedFrames = request.requestedIds
+            .asSequence()
+            .filter { id ->
+                val target = messageTargets[id]
+                target == null || target == canonicalRequester
+            }
             .mapNotNull { messageStore[it] }
             .take(MAX_BATCH_SIZE)
+            .toList()
 
         if (requestedFrames.isEmpty()) {
             Log.w(TAG, "No requested messages found for $peerId")

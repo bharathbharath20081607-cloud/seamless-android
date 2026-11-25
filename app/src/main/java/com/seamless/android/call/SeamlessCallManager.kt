@@ -1,22 +1,37 @@
 @file:Suppress("DEPRECATION")
 package com.seamless.android.call
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.media.AudioManager
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.media.ToneGenerator
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
+import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
+import androidx.core.app.NotificationCompat
+import com.seamless.android.MainActivity
+import com.seamless.android.R
+import com.seamless.android.crypto.AegisCallCrypto
+import com.seamless.android.crypto.AegisTorCrypto
 import com.seamless.android.data.TorMessageRepository
 import com.seamless.android.net.OnionContactManager
 import com.seamless.android.net.OnionMessageProtocol
+import com.seamless.android.net.TorCircuitManager
+import com.seamless.android.net.TorContactTrustState
 import com.seamless.android.net.TorMessagingService
 import com.seamless.android.service.CallForegroundService
 import com.seamless.android.service.TorForegroundService
+import com.seamless.android.ui.privacy.PrivacyPreferenceManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -30,6 +45,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
@@ -45,8 +61,11 @@ import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.LockSupport
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -80,6 +99,13 @@ data class CallSessionInfo(
     val isMuted: Boolean = false,
     val isSpeakerphone: Boolean = false,
     val isMinimized: Boolean = false,
+    val isVideoCall: Boolean = false,
+    val isLocalVideoEnabled: Boolean = false,
+    val isRemoteVideoEnabled: Boolean = false,
+    val isFrontCamera: Boolean = true,
+    val isVideoSwapped: Boolean = false,
+    val negotiatedVideoCodec: String = CallVideoEngine.CODEC_AVC,
+    val remoteVideoAspectRatio: Float = 9f / 16f,
     val startedAtMs: Long = System.currentTimeMillis(),
     val connectedAtMs: Long? = null,
     val durationSeconds: Long = 0L,
@@ -102,15 +128,127 @@ class SeamlessCallManager private constructor(private val context: Context) {
     companion object {
         private const val TAG = "SeamlessCallManager"
         private const val RING_TIMEOUT_MS = 45_000L
-        private const val DIRECT_P2P_PURE_WINDOW_MS = 1_800L
+        private const val DIRECT_P2P_PROMOTE_WINDOW_MS = 1_500L
+        private const val DIRECT_P2P_DEMOTE_WINDOW_MS = 3_500L
+        private const val DIRECT_P2P_HOLD_MS = 350L
         private const val DIRECT_P2P_STALE_MS = 4_500L
-        private const val INITIAL_MULTIPATH_WARMUP_MS = 8_000L
+        private const val INITIAL_MULTIPATH_WARMUP_MS = 1_200L
         private const val DIRECT_UDP_NONCE_BYTES = 12
         private const val TOR_AUDIO_MAGIC_V2: Byte = 0x5A
+        private const val TOR_VIDEO_MAGIC_V1: Byte = 0x5B
+        private const val TOR_AUDIO_FEC_MAGIC: Byte = 0x5C
 
         private const val UDP_TYPE_PROBE: Byte = 0x01
         private const val UDP_TYPE_PROBE_ACK: Byte = 0x02
         private const val UDP_TYPE_AUDIO: Byte = 0x03
+        private const val UDP_TYPE_VIDEO: Byte = 0x04
+        private const val UDP_TYPE_VIDEO_CTRL: Byte = 0x05
+        private const val UDP_TYPE_AUDIO_FEC: Byte = 0x06
+
+        private const val MAX_PEER_UDP_CANDIDATES = 16
+        private const val MAX_SDP_DECOMPRESSED_BYTES = 64 * 1024
+        private const val MAX_SDP_SIGNAL_BYTES = 3_400
+        private const val MAX_SDP_PARTS = 8
+        private const val PROBE_ACK_MIN_INTERVAL_MS = 150L
+        private const val MISSED_CALL_CHANNEL_ID = "seamless_missed_calls_channel"
+        private const val MISSED_CALL_NOTIFICATION_BASE_ID = 8900
+
+        private const val VIDEO_CTRL_PLI: Byte = 0x01
+        private const val VIDEO_CTRL_STATE: Byte = 0x02
+        private const val VIDEO_CTRL_WEBRTC_SIG: Byte = 0x03
+
+        /**
+         * Strictly parses numeric IPv4 or bracketed IPv6 literal "ip:port" / "[ipv6]:port"
+         * WITHOUT ever invoking system DNS resolution (prevents zero-click ISP IP leaks).
+         */
+        internal fun parseStrictIpLiteralSocketAddress(entry: String): InetSocketAddress? {
+            val clean = entry.trim()
+            val lastColon = clean.lastIndexOf(':')
+            if (lastColon <= 0 || lastColon >= clean.length - 1) return null
+            val rawHost = clean.substring(0, lastColon).trim()
+            val port = clean.substring(lastColon + 1).trim().toIntOrNull() ?: return null
+            if (port !in 1..65535) return null
+
+            if (rawHost.startsWith("[") && rawHost.endsWith("]")) {
+                val ipv6Text = rawHost.substring(1, rawHost.length - 1).substringBefore('%').trim()
+                val bytes = parseNumericIpv6Bytes(ipv6Text) ?: return null
+                val addr = runCatching { InetAddress.getByAddress(bytes) }.getOrNull() ?: return null
+                if (addr.isAnyLocalAddress || addr.isMulticastAddress || addr.isLoopbackAddress) return null
+                return InetSocketAddress(addr, port)
+            }
+
+            val ipv4Bytes = parseNumericIpv4Bytes(rawHost) ?: return null
+            val addr = runCatching { InetAddress.getByAddress(ipv4Bytes) }.getOrNull() ?: return null
+            if (addr.isAnyLocalAddress || addr.isMulticastAddress || addr.isLoopbackAddress) return null
+            return InetSocketAddress(addr, port)
+        }
+
+        private fun parseNumericIpv4Bytes(host: String): ByteArray? {
+            val parts = host.split('.')
+            if (parts.size != 4) return null
+            val out = ByteArray(4)
+            for (i in 0 until 4) {
+                val p = parts[i]
+                if (p.isEmpty() || p.length > 3 || !p.all { it in '0'..'9' }) return null
+                val v = p.toIntOrNull() ?: return null
+                if (v !in 0..255) return null
+                out[i] = v.toByte()
+            }
+            return out
+        }
+
+        private fun parseNumericIpv6Bytes(host: String): ByteArray? {
+            if (host.isEmpty() || host.length > 45) return null
+            if (!host.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' || it == ':' }) return null
+            val doubleColonCount = host.split("::").size - 1
+            if (doubleColonCount > 1) return null
+
+            val groups = if (doubleColonCount == 1) {
+                val sides = host.split("::", limit = 2)
+                val left = if (sides[0].isEmpty()) emptyList() else sides[0].split(':')
+                val right = if (sides[1].isEmpty()) emptyList() else sides[1].split(':')
+                val missing = 8 - (left.size + right.size)
+                if (missing < 1) return null
+                left + List(missing) { "0" } + right
+            } else {
+                val all = host.split(':')
+                if (all.size != 8) return null
+                all
+            }
+            if (groups.size != 8) return null
+            val out = ByteArray(16)
+            for (i in 0 until 8) {
+                val g = groups[i]
+                if (g.isEmpty() || g.length > 4) return null
+                val v = g.toIntOrNull(16) ?: return null
+                out[i * 2] = ((v ushr 8) and 0xFF).toByte()
+                out[i * 2 + 1] = (v and 0xFF).toByte()
+            }
+            return out
+        }
+
+        internal fun decompressSdpGzipBase64Bounded(b64: String): String {
+            return try {
+                if (b64.length > 48 * 1024) return ""
+                val raw = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                if (raw.size > 32 * 1024) return ""
+                val baos = java.io.ByteArrayOutputStream()
+                java.util.zip.GZIPInputStream(java.io.ByteArrayInputStream(raw)).use { gz ->
+                    val buf = ByteArray(1024)
+                    var total = 0
+                    while (true) {
+                        val read = gz.read(buf)
+                        if (read <= 0) break
+                        total += read
+                        if (total > MAX_SDP_DECOMPRESSED_BYTES) return ""
+                        baos.write(buf, 0, read)
+                    }
+                }
+                baos.toByteArray().toString(Charsets.UTF_8)
+            } catch (_: Exception) {
+                ""
+            }
+        }
 
         // 64-symbol Short Authentication String alphabet (6 bits per symbol).
         // Both peers derive the same 4 symbols from the shared ephemeral call key,
@@ -140,7 +278,8 @@ class SeamlessCallManager private constructor(private val context: Context) {
         val recipientOnion: String,
         val sequence: Long,
         val timestampMs: Long,
-        val payload: ByteArray
+        val payload: ByteArray,
+        val isFecParity: Boolean = false
     )
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -149,6 +288,16 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
     private val _sessionFlow = MutableStateFlow<CallSessionInfo?>(null)
     val sessionFlow: StateFlow<CallSessionInfo?> = _sessionFlow.asStateFlow()
+
+    fun isCallActiveForPeer(peerIdOrOnion: String): Boolean {
+        val session = _sessionFlow.value ?: return false
+        if (session.state == CallState.IDLE || session.state == CallState.ENDED) return false
+        val needle = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(peerIdOrOnion)
+            .ifBlank { peerIdOrOnion.trim().lowercase() }
+        val activeOnion = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(session.peerOnion)
+            .ifBlank { session.peerOnion.trim().lowercase() }
+        return needle == activeOnion || peerIdOrOnion == session.contactId
+    }
 
     // Dedicated high-frequency flows for 60 FPS UI visualizers (prevents recomposing FullScreenCallView 50x/sec)
     private val _localVoiceLevelFlow = MutableStateFlow(0f)
@@ -170,31 +319,145 @@ class SeamlessCallManager private constructor(private val context: Context) {
     private val _securityCodeFlow = MutableStateFlow<List<String>>(emptyList())
     val securityCodeFlow: StateFlow<List<String>> = _securityCodeFlow.asStateFlow()
 
+    private val _audioRouteFlow = MutableStateFlow(AudioRoute.EARPIECE)
+    val audioRouteFlow: StateFlow<AudioRoute> = _audioRouteFlow.asStateFlow()
+
+    private val _availableAudioRoutesFlow = MutableStateFlow(setOf(AudioRoute.EARPIECE, AudioRoute.SPEAKER))
+    val availableAudioRoutesFlow: StateFlow<Set<AudioRoute>> = _availableAudioRoutesFlow.asStateFlow()
+
     private val txAudioFramesCounter = AtomicLong(0L)
     private val rxAudioFramesCounter = AtomicLong(0L)
 
-    // Conflating 3-frame FIFO ring buffer for outbound Tor audio (prevents coroutine reordering & TCP bufferbloat)
+    private data class OutboundTorVideoFrame(
+        val recipientOnion: String,
+        val frameSeq: Long,
+        val timestampMs: Long,
+        val encryptedFragments: List<ByteArray>
+    )
+
+    // Conflating 6-frame FIFO ring buffer for outbound Tor audio + 2D Burst-FEC parity (prevents coroutine reordering & TCP bufferbloat)
     private val torAudioOutChannel = Channel<OutboundTorAudioItem>(
-        capacity = 3,
+        capacity = 6,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    private val torVideoFrameChannel = Channel<OutboundTorVideoFrame>(
+        capacity = 1,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
 
     private var audioEngine: CallAudioEngine? = null
+    private val webrtcGeneration = AtomicInteger(0)
+    private val processedWebRtcSdps = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    val videoEngine: CallVideoEngine = CallVideoEngine(
+        context = context,
+        onOutboundFragment = { seq, ts, _, bytes ->
+            dispatchOutboundVideoFrame(seq, ts, listOf(bytes))
+        },
+        onRequestRemoteKeyframe = {
+            sendVideoPliRequest()
+        },
+        onOutboundFrame = { seq, ts, fragments ->
+            dispatchOutboundVideoFrame(seq, ts, fragments)
+        }
+    )
+    val webrtcVideoEngine: WebRtcVideoCallEngine = WebRtcVideoCallEngine(
+        context = context,
+        listener = object : WebRtcVideoCallEngine.Listener {
+            override fun onLocalSdp(generation: Int, type: String, sdp: String) {
+                sendWebRtcSdpSignal(generation, type, sdp)
+            }
+
+            override fun onLocalIceCandidates(generation: Int, candidates: List<org.webrtc.IceCandidate>) {
+                sendWebRtcIceSignal(generation, candidates)
+            }
+
+            override fun onTransportConnected(generation: Int) {
+                videoEngine.clearRemoteFrameBitmap()
+                _sessionFlow.update { s ->
+                    if (s != null && s.state == CallState.ACTIVE && !s.forceTorOnly) {
+                        s.copy(
+                            transportMode = CallTransportMode.DIRECT_P2P,
+                            statusMessage = "Encrypted • WebRTC 720p Direct P2P"
+                        )
+                    } else s
+                }
+            }
+
+            override fun onTransportLost(generation: Int) {
+                // Automatic fallback tap on WebRtcVideoCallEngine resumes feeding CallVideoEngine
+            }
+
+            override fun onFallbackVideoFrame(frame: org.webrtc.VideoFrame) {
+                videoEngine.onExternalWebRtcFrame(frame)
+            }
+        }
+    )
     private var timerJob: Job? = null
     private var heartbeatJob: Job? = null
     private var torSenderJob: Job? = null
+    private var torVideoSenderJob: Job? = null
+    private var outgoingOfferJob: Job? = null
     private var ringTimeoutJob: Job? = null
     private var ringbackJob: Job? = null
     private var p2pProbeJob: Job? = null
     private var p2pReceiveJob: Job? = null
     private var stunDiscoveryJob: Job? = null
+    @Volatile
+    private var wasLocalVideoPausedByBg: Boolean = false
+    private val p2pFastBurstCounter = AtomicInteger(0)
+    @Volatile
+    private var lastCandidateTrickleAtMs: Long = 0L
+    @Volatile
+    private var torVideoConserveUntilMs: Long = 0L
+    @Volatile
+    private var lastAutoProbeAckAtMs: Long = 0L
 
     private var ringtone: Ringtone? = null
     private var toneGenerator: ToneGenerator? = null
     private var udpSocket: DatagramSocket? = null
 
+    private data class PendingSdpParts(
+        val generation: Int,
+        val sdpType: String,
+        val isGzip: Boolean,
+        val totalParts: Int,
+        val parts: MutableMap<Int, String> = mutableMapOf(),
+        val createdAtMs: Long = System.currentTimeMillis()
+    )
+
+    private val pendingSdpParts = ConcurrentHashMap<String, PendingSdpParts>()
+    private val fecEncoder = CallFluxFec.Encoder()
+    private val fecDecoder = CallFluxFec.Decoder()
+
+    @Volatile
+    private var activeCallCrypto: AegisCallCrypto.CallKeySession? = null
+    @Volatile
+    private var localEphemeralPriv: ByteArray? = null
+    @Volatile
+    private var localEphemeralPubHex: String = ""
+    @Volatile
+    private var localIdentityPubHexForCall: String = ""
+    @Volatile
+    private var remoteIdentityPubHexForCall: String = ""
+    private val dtlsFingerprints = ConcurrentHashMap.newKeySet<String>()
     @Volatile
     private var currentSessionKey: ByteArray? = null
+    @Volatile
+    private var currentSessionKeySpec: SecretKeySpec? = null
+    @Volatile
+    private var currentCallUuid: UUID? = null
+    @Volatile
+    private var gcmNoncePrefix: Int = 0
+    private val gcmNonceCounter = AtomicLong(0L)
+    private val encryptCipherTl = ThreadLocal.withInitial { Cipher.getInstance("AES/GCM/NoPadding") }
+    private val decryptCipherTl = ThreadLocal.withInitial { Cipher.getInstance("AES/GCM/NoPadding") }
+    private val pendingStunTxIds = ConcurrentHashMap<String, Long>()
+    private var candidateTrickleJob: Job? = null
+    private var callNetworkCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile
+    private var lastCallNetworkHandle: Long = 0L
+    @Volatile
+    private var firstContinuousDirectOkAtMs: Long = 0L
     private val localUdpCandidates = CopyOnWriteArrayList<String>()
     private val peerUdpCandidates = CopyOnWriteArrayList<InetSocketAddress>()
 
@@ -207,6 +470,116 @@ class SeamlessCallManager private constructor(private val context: Context) {
     private var lastDirectP2pVerifiedAt: Long = 0L
     @Volatile
     private var lastPeerActivityAtMs: Long = 0L
+
+    private fun bindSessionCrypto(callId: String, sessionKey: ByteArray, isCaller: Boolean = true) {
+        activeCallCrypto?.zeroize()
+        val legacy = AegisCallCrypto.deriveLegacySession(callId, isCaller, sessionKey)
+        activeCallCrypto = legacy
+        currentSessionKey = legacy.sendKey
+        currentSessionKeySpec = legacy.sendKeySpec
+        currentCallUuid = runCatching { UUID.fromString(callId) }.getOrNull()
+        gcmNoncePrefix = secureRandom.nextInt()
+        gcmNonceCounter.set(0L)
+    }
+
+    private fun bindPfsSessionCrypto(session: AegisCallCrypto.CallKeySession) {
+        activeCallCrypto?.zeroize()
+        activeCallCrypto = session
+        currentSessionKey = session.sendKey
+        currentSessionKeySpec = session.sendKeySpec
+        currentCallUuid = runCatching { UUID.fromString(session.callId) }.getOrNull()
+        gcmNoncePrefix = secureRandom.nextInt()
+        gcmNonceCounter.set(0L)
+    }
+
+    private fun extractNonceCounter(nonce: ByteArray): Long {
+        if (nonce.size < DIRECT_UDP_NONCE_BYTES) return -1L
+        return ((nonce[4].toLong() and 0xFF) shl 56) or
+            ((nonce[5].toLong() and 0xFF) shl 48) or
+            ((nonce[6].toLong() and 0xFF) shl 40) or
+            ((nonce[7].toLong() and 0xFF) shl 32) or
+            ((nonce[8].toLong() and 0xFF) shl 24) or
+            ((nonce[9].toLong() and 0xFF) shl 16) or
+            ((nonce[10].toLong() and 0xFF) shl 8) or
+            (nonce[11].toLong() and 0xFF)
+    }
+
+    private fun nextMonotonicNonce(): ByteArray {
+        val seq = gcmNonceCounter.incrementAndGet()
+        val prefix = gcmNoncePrefix
+        return byteArrayOf(
+            (prefix ushr 24).toByte(),
+            (prefix ushr 16).toByte(),
+            (prefix ushr 8).toByte(),
+            prefix.toByte(),
+            (seq ushr 56).toByte(),
+            (seq ushr 48).toByte(),
+            (seq ushr 40).toByte(),
+            (seq ushr 32).toByte(),
+            (seq ushr 24).toByte(),
+            (seq ushr 16).toByte(),
+            (seq ushr 8).toByte(),
+            seq.toByte()
+        )
+    }
+
+    private fun bytesToHexLower(bytes: ByteArray): String {
+        val hex = "0123456789abcdef"
+        val out = CharArray(bytes.size * 2)
+        for (i in bytes.indices) {
+            val v = bytes[i].toInt() and 0xFF
+            out[i * 2] = hex[v ushr 4]
+            out[i * 2 + 1] = hex[v and 0x0F]
+        }
+        return String(out)
+    }
+
+    private suspend fun sendCallSignalWithRetry(
+        messaging: TorMessagingService,
+        peerOnion: String,
+        payload: ByteArray,
+        maxAttempts: Int = 2
+    ): Boolean {
+        repeat(maxAttempts) { attempt ->
+            if (messaging.sendCallSignalFrame(peerOnion, payload)) return true
+            if (attempt + 1 < maxAttempts) {
+                delay(600L * (attempt + 1))
+            }
+        }
+        return false
+    }
+
+    private fun registerCallNetworkCallback() {
+        if (callNetworkCallback != null) return
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        lastCallNetworkHandle = cm.activeNetwork?.networkHandle ?: 0L
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                val handle = network.networkHandle
+                val previous = lastCallNetworkHandle
+                lastCallNetworkHandle = handle
+                if (previous != 0L && previous != handle) {
+                    val active = _sessionFlow.value
+                    if (active != null && (active.state == CallState.ACTIVE || active.state == CallState.OUTGOING_DIALING || active.state == CallState.OUTGOING_RINGING)) {
+                        scope.launch {
+                            delay(400L)
+                            refreshCallRoute()
+                        }
+                    }
+                }
+            }
+        }
+        callNetworkCallback = callback
+        runCatching { cm.registerDefaultNetworkCallback(callback) }
+    }
+
+    private fun unregisterCallNetworkCallback() {
+        val cb = callNetworkCallback ?: return
+        callNetworkCallback = null
+        lastCallNetworkHandle = 0L
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        runCatching { cm.unregisterNetworkCallback(cb) }
+    }
 
     init {
         val engine = CallAudioEngine(context) { seq, ts, encodedAdpcm ->
@@ -230,6 +603,21 @@ class SeamlessCallManager private constructor(private val context: Context) {
             }
         }
         scope.launch {
+            engine.audioRoute.collect { route ->
+                _audioRouteFlow.value = route
+                _sessionFlow.update { cur ->
+                    if (cur != null && cur.isSpeakerphone != (route == AudioRoute.SPEAKER)) {
+                        cur.copy(isSpeakerphone = route == AudioRoute.SPEAKER)
+                    } else cur
+                }
+            }
+        }
+        scope.launch {
+            engine.availableRoutes.collect { routes ->
+                _availableAudioRoutesFlow.value = routes
+            }
+        }
+        scope.launch {
             engine.estimatedOneWayLatencyMs.collect { estMs ->
                 _sessionFlow.update { current ->
                     if (current != null && current.state == CallState.ACTIVE && current.rttMs == 0 && estMs > 0) {
@@ -238,21 +626,68 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 }
             }
         }
+        scope.launch {
+            videoEngine.remoteVideoAspectRatio.collect { ratio ->
+                if (!webrtcVideoEngine.mediaConnected.value) {
+                    _sessionFlow.update { current ->
+                        if (current != null && current.remoteVideoAspectRatio != ratio) {
+                            current.copy(remoteVideoAspectRatio = ratio)
+                        } else current
+                    }
+                }
+            }
+        }
+        scope.launch {
+            webrtcVideoEngine.remoteAspectRatio.collect { ratio ->
+                if (webrtcVideoEngine.mediaConnected.value) {
+                    _sessionFlow.update { current ->
+                        if (current != null && current.remoteVideoAspectRatio != ratio) {
+                            current.copy(remoteVideoAspectRatio = ratio)
+                        } else current
+                    }
+                }
+            }
+        }
+        scope.launch {
+            webrtcVideoEngine.stats.collect { st ->
+                if (webrtcVideoEngine.mediaConnected.value) {
+                    _sessionFlow.update { current ->
+                        if (current != null && current.state == CallState.ACTIVE) {
+                            current.copy(
+                                rttMs = if (st.rttMs > 0) st.rttMs else current.rttMs,
+                                negotiatedVideoCodec = if (st.codec.isNotBlank()) st.codec else current.negotiatedVideoCodec
+                            )
+                        } else current
+                    }
+                }
+            }
+        }
+        scope.launch {
+            webrtcVideoEngine.activeFrontCamera.collect { actualFront ->
+                _sessionFlow.update { current ->
+                    if (current != null && current.isFrontCamera != actualFront) {
+                        current.copy(isFrontCamera = actualFront)
+                    } else current
+                }
+            }
+        }
     }
 
     /**
-     * Initiate an outgoing voice call to a Tor P2P contact.
+     * Initiate an outgoing voice or HD video call to a Tor P2P contact.
      */
     fun startOutgoingCall(
         contact: OnionContactManager.OnionContact,
-        forceTorOnly: Boolean = false
+        forceTorOnly: Boolean = false,
+        isVideoCall: Boolean = false
     ) {
         startOutgoingCallByOnion(
             peerOnion = contact.onionAddress,
             peerNickname = contact.nickname,
             peerPublicKey = contact.publicKey,
             contactId = contact.id,
-            forceTorOnly = forceTorOnly
+            forceTorOnly = forceTorOnly,
+            isVideoCall = isVideoCall
         )
     }
 
@@ -261,7 +696,8 @@ class SeamlessCallManager private constructor(private val context: Context) {
         peerNickname: String,
         peerPublicKey: String = "",
         contactId: String? = null,
-        forceTorOnly: Boolean = false
+        forceTorOnly: Boolean = false,
+        isVideoCall: Boolean = false
     ) {
         val canonicalOnion = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(peerOnion)
             .ifBlank { peerOnion.trim() }
@@ -279,9 +715,19 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
                 cleanupCallResourcesLocked()
 
+                val effectiveForceTor = forceTorOnly || PrivacyPreferenceManager.alwaysRouteCallsOverTor.value
                 val callId = UUID.randomUUID().toString()
+                val eph = AegisCallCrypto.generateEphemeralKeyPair()
+                localEphemeralPriv = eph.privateKey
+                localEphemeralPubHex = AegisCallCrypto.toHex(eph.publicKey)
+                val myStaticPub = runCatching {
+                    TorMessagingService.getInstance(context).getMyContactInfo().publicKey
+                }.getOrDefault("")
+                localIdentityPubHexForCall = myStaticPub
+                remoteIdentityPubHexForCall = peerPublicKey
                 val sessionKey = ByteArray(32).also { secureRandom.nextBytes(it) }
-                currentSessionKey = sessionKey
+                bindSessionCrypto(callId, sessionKey, isCaller = true)
+                val defaultCodec = CallVideoEngine.CODEC_AVC
 
                 // Transition UI state IMMEDIATELY (< 2ms) so CallOverlayScreen opens without any delay
                 val newSession = CallSessionInfo(
@@ -293,30 +739,59 @@ class SeamlessCallManager private constructor(private val context: Context) {
                     isIncoming = false,
                     state = CallState.OUTGOING_DIALING,
                     transportMode = CallTransportMode.TOR_ONION,
-                    isMultipathActive = !forceTorOnly,
-                    forceTorOnly = forceTorOnly,
-                    statusMessage = "Connecting encrypted circuit..."
+                    isMultipathActive = !effectiveForceTor,
+                    forceTorOnly = effectiveForceTor,
+                    isSpeakerphone = isVideoCall,
+                    isVideoCall = isVideoCall,
+                    isLocalVideoEnabled = isVideoCall,
+                    negotiatedVideoCodec = defaultCodec,
+                    statusMessage = if (isVideoCall) "Connecting encrypted HD video..." else "Connecting encrypted circuit..."
                 )
                 _sessionFlow.value = newSession
+                if (isVideoCall) {
+                    webrtcVideoEngine.configureLocalCamera(enabled = true, frontCamera = true)
+                    videoEngine.configureSession(
+                        isCallActive = false,
+                        isLocalEnabled = true,
+                        isFrontCam = true,
+                        isDirectP2p = false,
+                        codec = defaultCodec
+                    )
+                }
                 CallForegroundService.start(context)
+                registerCallNetworkCallback()
                 startRingTimeout(callId)
                 startTorAudioSenderLoop(callId)
+                startTorVideoSenderLoop(callId)
 
-                val initialCandidates = if (!forceTorOnly) {
+                val initialCandidates = if (!effectiveForceTor) {
                     openDirectUdpSocketFast(callId, canonicalOnion)
                 } else {
                     emptyList()
                 }
 
-                // Ensure Tor service is running and send OFFER
-                launch {
+                // Ensure Tor service is running, recycle any silent stale circuit, and send OFFER
+                outgoingOfferJob?.cancel()
+                val offerEphHex = localEphemeralPubHex
+                outgoingOfferJob = launch {
                     val messaging = TorMessagingService.getInstance(context)
                     if (messaging.serviceState.value == TorMessagingService.ServiceState.STOPPED) {
                         TorForegroundService.start(context)
                         messaging.start()
                     }
+                    runCatching {
+                        val cm = TorCircuitManager.getInstance(context)
+                        cm.recycleIfSilent(canonicalOnion, 75_000L)
+                        cm.ensureBulkConnectionAsync(canonicalOnion)
+                    }
 
+                    val supportedCodecs = if (isVideoCall) {
+                        videoEngine.getSupportedHardwareCodecs()
+                    } else {
+                        listOf(CallVideoEngine.CODEC_AVC)
+                    }
                     val myInfo = messaging.getMyContactInfo()
+                    localIdentityPubHexForCall = myInfo.publicKey
                     val offerPayload = buildSignalJson(
                         type = "OFFER",
                         callId = callId,
@@ -324,26 +799,41 @@ class SeamlessCallManager private constructor(private val context: Context) {
                         senderNickname = myInfo.nickname,
                         senderPubKey = myInfo.publicKey,
                         sessionKey = sessionKey,
-                        candidates = initialCandidates
+                        ephemeralPubHex = offerEphHex,
+                        forceTorOnly = effectiveForceTor,
+                        candidates = initialCandidates,
+                        isVideo = isVideoCall,
+                        localVideoEnabled = isVideoCall,
+                        videoCodecs = supportedCodecs
                     )
+                    AegisTorCrypto.zeroize(sessionKey)
 
-                    val sent = messaging.sendCallSignalFrame(canonicalOnion, offerPayload)
-                    val current = _sessionFlow.value
-                    if (current?.callId == callId) {
-                        if (sent) {
-                            _sessionFlow.update { s ->
-                                if (s?.callId == callId && s.state == CallState.OUTGOING_DIALING) {
-                                    s.copy(statusMessage = "Calling ${s.peerNickname}...")
-                                } else s
+                    val sent = sendCallSignalWithRetry(messaging, canonicalOnion, offerPayload, maxAttempts = 3)
+                    callMutex.withLock {
+                        val current = _sessionFlow.value
+                        if (current?.callId == callId) {
+                            if (sent) {
+                                _sessionFlow.update { s ->
+                                    if (s?.callId == callId && s.state == CallState.OUTGOING_DIALING) {
+                                        s.copy(statusMessage = "Calling ${s.peerNickname}...")
+                                    } else s
+                                }
+                                startOutgoingRingbackTone()
+                                scope.launch {
+                                    delay(2_800L)
+                                    val stillDialing = _sessionFlow.value
+                                    if (stillDialing?.callId == callId && stillDialing.state == CallState.OUTGOING_DIALING) {
+                                        messaging.sendCallSignalFrame(canonicalOnion, offerPayload)
+                                    }
+                                }
+                            } else {
+                                endCallInternal(
+                                    callId = callId,
+                                    reason = "Peer unreachable over Tor",
+                                    notifyPeer = false,
+                                    logText = if (isVideoCall) "📹 Outgoing video call (Unreachable)" else "📞 Outgoing voice call (Unreachable)"
+                                )
                             }
-                            startOutgoingRingbackTone()
-                        } else {
-                            endCallInternal(
-                                callId = callId,
-                                reason = "Peer unreachable over Tor",
-                                notifyPeer = false,
-                                logText = "📞 Outgoing voice call (Unreachable)"
-                            )
                         }
                     }
                 }
@@ -352,9 +842,9 @@ class SeamlessCallManager private constructor(private val context: Context) {
     }
 
     /**
-     * Accept the currently ringing incoming call.
+     * Accept the currently ringing incoming call (with or without camera video).
      */
-    fun acceptIncomingCall() {
+    fun acceptIncomingCall(withVideo: Boolean? = null) {
         scope.launch {
             callMutex.withLock {
                 val session = _sessionFlow.value ?: return@withLock
@@ -372,6 +862,9 @@ class SeamlessCallManager private constructor(private val context: Context) {
                     emptyList()
                 }
 
+                val enableLocalVideo = withVideo ?: session.isVideoCall
+                val useVideoCall = session.isVideoCall || enableLocalVideo || session.isRemoteVideoEnabled
+                val useSpeaker = session.isSpeakerphone || useVideoCall
                 val now = System.currentTimeMillis()
                 lastPeerActivityAtMs = now
                 _sessionFlow.value = session.copy(
@@ -379,6 +872,9 @@ class SeamlessCallManager private constructor(private val context: Context) {
                     connectedAtMs = now,
                     durationSeconds = 0L,
                     isMultipathActive = !session.forceTorOnly,
+                    isSpeakerphone = useSpeaker,
+                    isVideoCall = useVideoCall,
+                    isLocalVideoEnabled = enableLocalVideo,
                     statusMessage = if (session.forceTorOnly) {
                         "Encrypted • Tor Onion Only"
                     } else {
@@ -387,10 +883,11 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 )
 
                 startTorAudioSenderLoop(session.callId)
+                startTorVideoSenderLoop(session.callId)
                 publishSecurityCode(session.callId)
 
                 val audioStarted = audioEngine?.start(
-                    initialSpeakerphone = session.isSpeakerphone,
+                    initialSpeakerphone = useSpeaker,
                     isDirectP2p = false
                 ) ?: false
 
@@ -399,18 +896,43 @@ class SeamlessCallManager private constructor(private val context: Context) {
                         callId = session.callId,
                         reason = "Microphone unavailable",
                         notifyPeer = true,
-                        logText = "📞 Incoming voice call (Mic error)"
+                        logText = if (useVideoCall) "📹 Incoming video call (Mic error)" else "📞 Incoming voice call (Mic error)"
                     )
                     return@withLock
                 }
 
+                videoEngine.configureSession(
+                    isCallActive = true,
+                    isLocalEnabled = enableLocalVideo,
+                    isFrontCam = session.isFrontCamera,
+                    isDirectP2p = false,
+                    codec = session.negotiatedVideoCodec
+                )
+                if (useVideoCall) {
+                    webrtcVideoEngine.configureLocalCamera(
+                        enabled = enableLocalVideo,
+                        frontCamera = session.isFrontCamera
+                    )
+                    if (!session.forceTorOnly) {
+                        webrtcVideoEngine.startPeerConnection(
+                            generation = webrtcGeneration.incrementAndGet(),
+                            isOfferer = true,
+                            frontCamera = session.isFrontCamera,
+                            videoEnabled = enableLocalVideo
+                        )
+                    }
+                }
+
                 startCallTimer(session.callId)
                 startCallHeartbeatLoop(session.callId, session.peerOnion)
+                runCatching { TorCircuitManager.getInstance(context).ensureBulkConnectionAsync(session.peerOnion) }
                 if (!session.forceTorOnly) {
                     startDirectP2pProbing(session.callId)
                 }
 
-                // Send ACCEPT signal back to caller immediately
+                // Send ACCEPT signal back to caller immediately (with callee ephemeral X25519 pubkey for PFS)
+                val acceptEphHex = localEphemeralPubHex
+                val acceptForceTor = session.forceTorOnly
                 launch {
                     val messaging = TorMessagingService.getInstance(context)
                     val myInfo = messaging.getMyContactInfo()
@@ -420,10 +942,20 @@ class SeamlessCallManager private constructor(private val context: Context) {
                         senderOnion = myInfo.onionAddress,
                         senderNickname = myInfo.nickname,
                         senderPubKey = myInfo.publicKey,
-                        sessionKey = currentSessionKey,
-                        candidates = initialCandidates
+                        sessionKey = if (activeCallCrypto?.isPfs == true) null else currentSessionKey,
+                        ephemeralPubHex = acceptEphHex.takeIf { it.isNotBlank() },
+                        forceTorOnly = acceptForceTor,
+                        candidates = initialCandidates,
+                        isVideo = useVideoCall,
+                        localVideoEnabled = enableLocalVideo,
+                        videoCodecs = videoEngine.getSupportedHardwareCodecs()
                     )
-                    messaging.sendCallSignalFrame(session.peerOnion, acceptPayload)
+                    messaging.sendCallSignalFrame(session.peerOnion, acceptPayload).let { ok ->
+                        if (!ok) sendCallSignalWithRetry(messaging, session.peerOnion, acceptPayload, maxAttempts = 2)
+                    }
+                    if (session.isRemoteVideoEnabled) {
+                        sendVideoPliRequest()
+                    }
                 }
             }
         }
@@ -433,25 +965,27 @@ class SeamlessCallManager private constructor(private val context: Context) {
      * Decline an incoming ringing call.
      */
     fun declineIncomingCall() {
-        val current = _sessionFlow.value ?: return
-        if (current.state != CallState.INCOMING_RINGING) return
         scope.launch {
-            val messaging = TorMessagingService.getInstance(context)
-            val myInfo = messaging.getMyContactInfo()
-            val payload = buildSignalJson(
-                type = "DECLINE",
-                callId = current.callId,
-                senderOnion = myInfo.onionAddress,
-                senderNickname = myInfo.nickname,
-                senderPubKey = myInfo.publicKey
-            )
-            launch { messaging.sendCallSignalFrame(current.peerOnion, payload) }
-            endCallInternal(
-                callId = current.callId,
-                reason = "Call declined",
-                notifyPeer = false,
-                logText = "📞 Declined voice call"
-            )
+            callMutex.withLock {
+                val current = _sessionFlow.value ?: return@withLock
+                if (current.state != CallState.INCOMING_RINGING) return@withLock
+                val messaging = TorMessagingService.getInstance(context)
+                val myInfo = messaging.getMyContactInfo()
+                val payload = buildSignalJson(
+                    type = "DECLINE",
+                    callId = current.callId,
+                    senderOnion = myInfo.onionAddress,
+                    senderNickname = myInfo.nickname,
+                    senderPubKey = myInfo.publicKey
+                )
+                launch { sendCallSignalWithRetry(messaging, current.peerOnion, payload, maxAttempts = 2) }
+                endCallInternal(
+                    callId = current.callId,
+                    reason = "Call declined",
+                    notifyPeer = false,
+                    logText = if (current.isVideoCall) "📹 Declined video call" else "📞 Declined voice call"
+                )
+            }
         }
     }
 
@@ -459,26 +993,30 @@ class SeamlessCallManager private constructor(private val context: Context) {
      * Hang up an active or dialing call.
      */
     fun endCall(reason: String = "Call ended", notifyPeer: Boolean = true) {
-        val current = _sessionFlow.value ?: return
         scope.launch {
-            val duration = current.durationSeconds
-            val logSummary = when {
-                current.state == CallState.ACTIVE -> {
-                    val mins = duration / 60
-                    val secs = duration % 60
-                    val durStr = if (mins > 0) "${mins}m ${secs}s" else "${secs}s"
-                    if (current.isIncoming) "📞 Incoming voice call ($durStr)"
-                    else "📞 Outgoing voice call ($durStr)"
+            callMutex.withLock {
+                val current = _sessionFlow.value ?: return@withLock
+                val icon = if (current.isVideoCall) "📹" else "📞"
+                val kind = if (current.isVideoCall) "video" else "voice"
+                val duration = current.durationSeconds
+                val logSummary = when {
+                    current.state == CallState.ACTIVE -> {
+                        val mins = duration / 60
+                        val secs = duration % 60
+                        val durStr = if (mins > 0) "${mins}m ${secs}s" else "${secs}s"
+                        if (current.isIncoming) "$icon Incoming $kind call ($durStr)"
+                        else "$icon Outgoing $kind call ($durStr)"
+                    }
+                    current.isIncoming -> "$icon Missed $kind call"
+                    else -> "$icon Cancelled $kind call"
                 }
-                current.isIncoming -> "📞 Missed voice call"
-                else -> "📞 Cancelled voice call"
+                endCallInternal(
+                    callId = current.callId,
+                    reason = reason,
+                    notifyPeer = notifyPeer,
+                    logText = logSummary
+                )
             }
-            endCallInternal(
-                callId = current.callId,
-                reason = reason,
-                notifyPeer = notifyPeer,
-                logText = logSummary
-            )
         }
     }
 
@@ -491,14 +1029,39 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
     fun toggleSpeakerphone() {
         val current = _sessionFlow.value ?: return
-        val nextSpeaker = !current.isSpeakerphone
-        audioEngine?.setSpeakerphone(nextSpeaker)
-        _sessionFlow.update { it?.copy(isSpeakerphone = nextSpeaker) }
+        val routes = _availableAudioRoutesFlow.value
+        if (routes.size > 2) {
+            val next = audioEngine?.cycleAudioRoute() ?: return
+            _sessionFlow.update { it?.copy(isSpeakerphone = next == AudioRoute.SPEAKER) }
+        } else {
+            val nextSpeaker = !current.isSpeakerphone
+            audioEngine?.setSpeakerphone(nextSpeaker)
+            _sessionFlow.update { it?.copy(isSpeakerphone = nextSpeaker) }
+        }
+    }
+
+    fun cycleAudioRoute(): AudioRoute? {
+        val next = audioEngine?.cycleAudioRoute() ?: return null
+        _sessionFlow.update { it?.copy(isSpeakerphone = next == AudioRoute.SPEAKER) }
+        return next
+    }
+
+    fun setAudioRoute(route: AudioRoute) {
+        audioEngine?.setAudioRoute(route)
+        _sessionFlow.update { it?.copy(isSpeakerphone = route == AudioRoute.SPEAKER) }
     }
 
     fun toggleForceTorOnly() {
         val current = _sessionFlow.value ?: return
         val nextForceTor = !current.forceTorOnly
+        applyForceTorOnlyInternal(current, nextForceTor, notifyPeer = true)
+    }
+
+    private fun applyForceTorOnlyInternal(
+        current: CallSessionInfo,
+        nextForceTor: Boolean,
+        notifyPeer: Boolean
+    ) {
         if (nextForceTor) {
             p2pProbeJob?.cancel()
             p2pProbeJob = null
@@ -514,6 +1077,8 @@ class SeamlessCallManager private constructor(private val context: Context) {
             verifiedDirectPeerEndpoint = null
             lastDirectP2pVerifiedAt = 0L
             audioEngine?.setTransportMode(false)
+            webrtcVideoEngine.stopPeerConnectionOnly()
+            videoEngine.updateNetworkProfile(isDirectP2p = false, rttMs = current.rttMs, lossDetected = false)
             _sessionFlow.update {
                 it?.copy(
                     forceTorOnly = true,
@@ -537,6 +1102,29 @@ class SeamlessCallManager private constructor(private val context: Context) {
                     udpSocket?.let { discoverStunAndTrickleCandidatesAsync(current.callId, current.peerOnion, it) }
                 }
                 startDirectP2pProbing(current.callId)
+                if (current.isVideoCall || current.isLocalVideoEnabled || current.isRemoteVideoEnabled) {
+                    webrtcVideoEngine.startPeerConnection(
+                        generation = webrtcGeneration.incrementAndGet(),
+                        isOfferer = true,
+                        frontCamera = current.isFrontCamera,
+                        videoEnabled = current.isLocalVideoEnabled
+                    )
+                }
+            }
+        }
+        if (notifyPeer && current.peerOnion.isNotBlank()) {
+            scope.launch {
+                val messaging = TorMessagingService.getInstance(context)
+                val myInfo = messaging.getMyContactInfo()
+                val modePayload = buildSignalJson(
+                    type = "TOR_MODE",
+                    callId = current.callId,
+                    senderOnion = myInfo.onionAddress,
+                    senderNickname = myInfo.nickname,
+                    senderPubKey = myInfo.publicKey,
+                    forceTorOnly = nextForceTor
+                )
+                messaging.sendCallSignalFrame(current.peerOnion, modePayload)
             }
         }
     }
@@ -557,13 +1145,30 @@ class SeamlessCallManager private constructor(private val context: Context) {
             val messaging = TorMessagingService.getInstance(context)
             val myInfo = messaging.getMyContactInfo()
             if (!current.forceTorOnly) {
-                val sock = udpSocket
-                if (sock != null && !sock.isClosed) {
-                    discoverStunAndTrickleCandidatesAsync(current.callId, current.peerOnion, sock)
-                } else {
-                    openDirectUdpSocketFast(current.callId, current.peerOnion)
+                verifiedDirectPeerEndpoint = null
+                candidateDirectPeerEndpoint = null
+                lastDirectP2pVerifiedAt = 0L
+                firstContinuousDirectOkAtMs = 0L
+                localUdpCandidates.clear()
+                synchronized(discoveredStunPortsByIp) {
+                    discoveredStunPortsByIp.clear()
                 }
+                runCatching { udpSocket?.close() }
+                udpSocket = null
+                openDirectUdpSocketFast(current.callId, current.peerOnion)
                 startDirectP2pProbing(current.callId)
+                if (current.isVideoCall || current.isLocalVideoEnabled || current.isRemoteVideoEnabled) {
+                    if (webrtcVideoEngine.sessionActive.value) {
+                        webrtcVideoEngine.requestIceRestart()
+                    } else {
+                        webrtcVideoEngine.startPeerConnection(
+                            generation = webrtcGeneration.incrementAndGet(),
+                            isOfferer = true,
+                            frontCamera = current.isFrontCamera,
+                            videoEnabled = current.isLocalVideoEnabled
+                        )
+                    }
+                }
             }
             val hb = buildSignalJson(
                 type = "HEARTBEAT",
@@ -581,6 +1186,96 @@ class SeamlessCallManager private constructor(private val context: Context) {
         _sessionFlow.update { it?.copy(isMinimized = minimized) }
     }
 
+    fun toggleLocalVideo(explicitEnabled: Boolean? = null) {
+        val current = _sessionFlow.value ?: return
+        if (current.state != CallState.ACTIVE &&
+            current.state != CallState.OUTGOING_DIALING &&
+            current.state != CallState.OUTGOING_RINGING
+        ) return
+        val nextEnabled = explicitEnabled ?: !current.isLocalVideoEnabled
+        setLocalVideoInternal(nextEnabled)
+    }
+
+    private fun setLocalVideoInternal(enabled: Boolean) {
+        val current = _sessionFlow.value ?: return
+        val nextSpeaker = if (enabled && !current.isSpeakerphone && current.state == CallState.ACTIVE) {
+            audioEngine?.setSpeakerphone(true)
+            true
+        } else {
+            current.isSpeakerphone
+        }
+        _sessionFlow.update { s ->
+            s?.copy(
+                isVideoCall = s.isVideoCall || enabled,
+                isLocalVideoEnabled = enabled,
+                isSpeakerphone = nextSpeaker,
+                isVideoSwapped = if (!enabled) false else s.isVideoSwapped
+            )
+        }
+        val isDirect = current.transportMode == CallTransportMode.DIRECT_P2P && !current.forceTorOnly
+        webrtcVideoEngine.configureLocalCamera(
+            enabled = enabled,
+            frontCamera = current.isFrontCamera
+        )
+        if (enabled && current.state == CallState.ACTIVE && !current.forceTorOnly && !webrtcVideoEngine.sessionActive.value) {
+            webrtcVideoEngine.startPeerConnection(
+                generation = webrtcGeneration.incrementAndGet(),
+                isOfferer = true,
+                frontCamera = current.isFrontCamera,
+                videoEnabled = true
+            )
+        }
+        videoEngine.configureSession(
+            isCallActive = current.state == CallState.ACTIVE,
+            isLocalEnabled = enabled,
+            isFrontCam = current.isFrontCamera,
+            isDirectP2p = isDirect,
+            codec = current.negotiatedVideoCodec
+        )
+        sendVideoStateNotification(current.callId, current.peerOnion, enabled)
+        if (!enabled && current.isRemoteVideoEnabled) {
+            sendVideoPliRequest()
+        }
+    }
+
+    fun switchCamera() {
+        val current = _sessionFlow.value ?: return
+        if (webrtcVideoEngine.isSwitchingCamera.value) return
+        val nextFront = !current.isFrontCamera
+        _sessionFlow.update { it?.copy(isFrontCamera = nextFront) }
+        webrtcVideoEngine.switchCamera(nextFront)
+        videoEngine.switchCamera(nextFront)
+        if (current.state == CallState.ACTIVE && current.isLocalVideoEnabled) {
+            scope.launch {
+                delay(350L)
+                videoEngine.requestImmediateKeyframe()
+            }
+        }
+    }
+
+    fun toggleSwapVideoViews() {
+        _sessionFlow.update { s ->
+            if (s != null && (s.isLocalVideoEnabled || s.isRemoteVideoEnabled)) {
+                s.copy(isVideoSwapped = !s.isVideoSwapped)
+            } else s
+        }
+    }
+
+    fun onAppForegroundStateChanged(inForeground: Boolean) {
+        val current = _sessionFlow.value ?: return
+        if (!inForeground) {
+            if (current.state == CallState.ACTIVE && current.isLocalVideoEnabled) {
+                wasLocalVideoPausedByBg = true
+                setLocalVideoInternal(false)
+            }
+        } else if (wasLocalVideoPausedByBg) {
+            wasLocalVideoPausedByBg = false
+            if (current.state == CallState.ACTIVE && !current.isLocalVideoEnabled) {
+                setLocalVideoInternal(true)
+            }
+        }
+    }
+
     /**
      * Called by TorMessagingService when an encrypted CALL_SIGNAL frame arrives.
      */
@@ -596,15 +1291,41 @@ class SeamlessCallManager private constructor(private val context: Context) {
         val callId = json.optString("callId")
         if (type.isBlank() || callId.isBlank()) return
 
-        val canonicalSender = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(
-            json.optString("senderOnion").ifBlank { senderOnion }
-        ).ifBlank { senderOnion }
+        // Always trust the authenticated transport senderOnion over unauthenticated JSON fields
+        val canonicalSender = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(senderOnion)
+            .ifBlank {
+                OnionContactManager.OnionContact.canonicalizeOnionEndpoint(json.optString("senderOnion"))
+            }
+            .ifBlank { senderOnion.trim().lowercase() }
+        if (canonicalSender.isBlank()) return
 
         scope.launch {
             callMutex.withLock {
                 val current = _sessionFlow.value
+                // Every non-OFFER signal MUST originate from the active call's authenticated peer
+                if (type != "OFFER") {
+                    if (current == null || current.callId != callId) return@withLock
+                    val activePeerCanonical = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(current.peerOnion)
+                        .ifBlank { current.peerOnion.trim().lowercase() }
+                    if (canonicalSender != activePeerCanonical) {
+                        Log.w(TAG, "Rejected spoofed CALL_SIGNAL($type) from mismatched peer")
+                        return@withLock
+                    }
+                }
                 when (type) {
                     "OFFER" -> {
+                        val contactManager = OnionContactManager.getInstance(context)
+                        val contact = contactManager.getContactByOnion(canonicalSender)
+                            ?: json.optString("senderPubKey").takeIf { it.isNotBlank() }
+                                ?.let { contactManager.getContactByPublicKey(it) }
+                        if (contact != null &&
+                            (contact.effectiveTrustState() == TorContactTrustState.BLOCKED ||
+                                contact.effectiveTrustState() == TorContactTrustState.KEY_CHANGED)
+                        ) {
+                            Log.w(TAG, "Blocked incoming call OFFER from untrusted/blocked contact")
+                            return@withLock
+                        }
+
                         if (current != null && current.state != CallState.IDLE && current.state != CallState.ENDED) {
                             if (current.callId == callId) return@withLock
                             val currentCanonicalPeer = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(current.peerOnion)
@@ -638,22 +1359,60 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
                         cleanupCallResourcesLocked()
 
-                        val contactManager = OnionContactManager.getInstance(context)
-                        val contact = contactManager.getContactByOnion(canonicalSender)
-                            ?: json.optString("senderPubKey").takeIf { it.isNotBlank() }
-                                ?.let { contactManager.getContactByPublicKey(it) }
-
                         val callerName = contact?.nickname
                             ?: json.optString("senderNickname").ifBlank { canonicalSender.take(12) }
                         val callerPubKey = contact?.publicKey
                             ?: json.optString("senderPubKey")
+                        val myStaticPub = runCatching {
+                            TorMessagingService.getInstance(context).getMyContactInfo().publicKey
+                        }.getOrDefault("")
+                        localIdentityPubHexForCall = myStaticPub
+                        remoteIdentityPubHexForCall = callerPubKey
 
-                        val sessionKeyHex = json.optString("sessionKeyHex")
-                        currentSessionKey = if (sessionKeyHex.length == 64) {
-                            hexToBytes(sessionKeyHex)
-                        } else null
+                        val peerEphHex = json.optString("ephemeralPubHex")
+                        val peerEphBytes = if (peerEphHex.length == 64) AegisCallCrypto.fromHex(peerEphHex) else null
+                        if (peerEphBytes != null && peerEphBytes.size == 32) {
+                            val myEph = AegisCallCrypto.generateEphemeralKeyPair()
+                            localEphemeralPubHex = AegisCallCrypto.toHex(myEph.publicKey)
+                            try {
+                                val pfsSession = AegisCallCrypto.derivePfsSession(
+                                    callId = callId,
+                                    isCaller = false,
+                                    localEphemeralPriv = myEph.privateKey,
+                                    localEphemeralPub = myEph.publicKey,
+                                    remoteEphemeralPub = peerEphBytes,
+                                    localIdentityPubHex = myStaticPub,
+                                    remoteIdentityPubHex = callerPubKey
+                                )
+                                bindPfsSessionCrypto(pfsSession)
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Rejected invalid ephemeral X25519 call OFFER: ${e.message}")
+                                return@withLock
+                            } finally {
+                                AegisTorCrypto.zeroize(myEph.privateKey)
+                            }
+                        } else {
+                            val sessionKeyHex = json.optString("sessionKeyHex")
+                            if (sessionKeyHex.length == 64) {
+                                val legacyKey = hexToBytes(sessionKeyHex)
+                                bindSessionCrypto(callId, legacyKey, isCaller = false)
+                                AegisTorCrypto.zeroize(legacyKey)
+                            } else {
+                                activeCallCrypto?.zeroize()
+                                activeCallCrypto = null
+                                currentSessionKey = null
+                                currentSessionKeySpec = null
+                                currentCallUuid = runCatching { UUID.fromString(callId) }.getOrNull()
+                            }
+                        }
 
-                        mergeCandidatesIntoList(json.optJSONArray("p2pCandidates"))
+                        val effectiveForceTor = json.optBoolean("forceTorOnly", false) ||
+                            PrivacyPreferenceManager.alwaysRouteCallsOverTor.value
+                        if (!effectiveForceTor) {
+                            mergeCandidatesIntoList(json.optJSONArray("p2pCandidates"))
+                        }
+                        val offerIsVideo = json.optBoolean("isVideo", false)
+                        val negotiatedCodec = negotiateVideoCodec(json.optJSONArray("videoCodecs"))
 
                         val incomingSession = CallSessionInfo(
                             callId = callId,
@@ -664,10 +1423,21 @@ class SeamlessCallManager private constructor(private val context: Context) {
                             isIncoming = true,
                             state = CallState.INCOMING_RINGING,
                             transportMode = CallTransportMode.TOR_ONION,
-                            statusMessage = "Incoming Encrypted Call..."
+                            isMultipathActive = !effectiveForceTor,
+                            forceTorOnly = effectiveForceTor,
+                            isSpeakerphone = offerIsVideo,
+                            isVideoCall = offerIsVideo,
+                            isRemoteVideoEnabled = offerIsVideo,
+                            negotiatedVideoCodec = negotiatedCodec,
+                            statusMessage = if (offerIsVideo) {
+                                "Incoming Encrypted HD Video Call..."
+                            } else {
+                                "Incoming Encrypted Call..."
+                            }
                         )
                         _sessionFlow.value = incomingSession
                         CallForegroundService.start(context)
+                        registerCallNetworkCallback()
                         startIncomingRingtoneAndVibration()
                         startRingTimeout(callId)
 
@@ -702,7 +1472,49 @@ class SeamlessCallManager private constructor(private val context: Context) {
                             ringTimeoutJob?.cancel()
                             stopRingingAndVibration()
                             delay(60L)
-                            mergeCandidatesIntoList(json.optJSONArray("p2pCandidates"))
+
+                            val peerForceTor = json.optBoolean("forceTorOnly", false)
+                            val effectiveForceTor = current.forceTorOnly || peerForceTor
+                            if (effectiveForceTor && !current.forceTorOnly) {
+                                applyForceTorOnlyInternal(current, true, notifyPeer = false)
+                            }
+                            if (!effectiveForceTor) {
+                                mergeCandidatesIntoList(json.optJSONArray("p2pCandidates"))
+                            }
+
+                            // Complete caller-side Ephemeral X25519 PFS key derivation if peer returned ephemeralPubHex
+                            val peerEphHex = json.optString("ephemeralPubHex")
+                            val peerEphBytes = if (peerEphHex.length == 64) AegisCallCrypto.fromHex(peerEphHex) else null
+                            val myPriv = localEphemeralPriv
+                            val myPub = AegisCallCrypto.fromHex(localEphemeralPubHex)
+                            if (peerEphBytes != null && peerEphBytes.size == 32 &&
+                                myPriv != null && myPriv.size == 32 &&
+                                myPub != null && myPub.size == 32
+                            ) {
+                                try {
+                                    val peerStaticPub = current.peerPublicKey.ifBlank { json.optString("senderPubKey") }
+                                    remoteIdentityPubHexForCall = peerStaticPub
+                                    val pfsSession = AegisCallCrypto.derivePfsSession(
+                                        callId = callId,
+                                        isCaller = true,
+                                        localEphemeralPriv = myPriv,
+                                        localEphemeralPub = myPub,
+                                        remoteEphemeralPub = peerEphBytes,
+                                        localIdentityPubHex = localIdentityPubHexForCall,
+                                        remoteIdentityPubHex = peerStaticPub
+                                    )
+                                    bindPfsSessionCrypto(pfsSession)
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "PFS ACCEPT key derivation failed: ${e.message}")
+                                } finally {
+                                    AegisTorCrypto.zeroize(myPriv)
+                                    localEphemeralPriv = null
+                                }
+                            }
+
+                            p2pFastBurstCounter.set(0)
+                            val peerVideoOn = json.optBoolean("localVideoEnabled", json.optBoolean("isVideo", false))
+                            val negotiatedCodec = negotiateVideoCodec(json.optJSONArray("videoCodecs"))
 
                             val now = System.currentTimeMillis()
                             lastPeerActivityAtMs = now
@@ -710,17 +1522,22 @@ class SeamlessCallManager private constructor(private val context: Context) {
                                 state = CallState.ACTIVE,
                                 connectedAtMs = now,
                                 durationSeconds = 0L,
-                                isMultipathActive = !current.forceTorOnly,
-                                statusMessage = if (current.forceTorOnly) {
+                                forceTorOnly = effectiveForceTor,
+                                isMultipathActive = !effectiveForceTor,
+                                isRemoteVideoEnabled = peerVideoOn,
+                                isVideoCall = current.isVideoCall || peerVideoOn,
+                                negotiatedVideoCodec = negotiatedCodec,
+                                statusMessage = if (effectiveForceTor) {
                                     "Encrypted • Tor Onion Only"
                                 } else {
                                     "Encrypted • Hybrid P2P + Tor"
                                 }
                             )
+                            startTorVideoSenderLoop(callId)
                             publishSecurityCode(callId)
 
                             val started = audioEngine?.start(
-                                initialSpeakerphone = current.isSpeakerphone,
+                                initialSpeakerphone = current.isSpeakerphone || current.isLocalVideoEnabled || peerVideoOn,
                                 isDirectP2p = false
                             ) ?: false
 
@@ -729,15 +1546,157 @@ class SeamlessCallManager private constructor(private val context: Context) {
                                     callId = callId,
                                     reason = "Microphone unavailable",
                                     notifyPeer = true,
-                                    logText = "📞 Outgoing voice call (Mic error)"
+                                    logText = if (current.isVideoCall) "📹 Outgoing video call (Mic error)" else "📞 Outgoing voice call (Mic error)"
                                 )
                                 return@withLock
                             }
 
+                            videoEngine.configureSession(
+                                isCallActive = true,
+                                isLocalEnabled = current.isLocalVideoEnabled,
+                                isFrontCam = current.isFrontCamera,
+                                isDirectP2p = false,
+                                codec = negotiatedCodec
+                            )
+                            if (current.isVideoCall || peerVideoOn) {
+                                webrtcVideoEngine.configureLocalCamera(
+                                    enabled = current.isLocalVideoEnabled,
+                                    frontCamera = current.isFrontCamera
+                                )
+                                if (!effectiveForceTor) {
+                                    // Callee sends WEBRTC_SDP offer immediately on ACCEPT; if none arrives within 1.8s, caller initiates offer.
+                                    launch {
+                                        delay(1_800L)
+                                        val s = _sessionFlow.value
+                                        if (s?.callId == callId &&
+                                            s.state == CallState.ACTIVE &&
+                                            !s.forceTorOnly &&
+                                            !webrtcVideoEngine.sessionActive.value
+                                        ) {
+                                            webrtcVideoEngine.startPeerConnection(
+                                                generation = webrtcGeneration.incrementAndGet(),
+                                                isOfferer = true,
+                                                frontCamera = s.isFrontCamera,
+                                                videoEnabled = s.isLocalVideoEnabled
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            if (current.isLocalVideoEnabled) {
+                                videoEngine.requestImmediateKeyframe()
+                            }
+
                             startCallTimer(callId)
                             startCallHeartbeatLoop(callId, current.peerOnion)
-                            if (!current.forceTorOnly) {
+                            if (!effectiveForceTor) {
                                 startDirectP2pProbing(callId)
+                            }
+                        }
+                    }
+
+                    "TOR_MODE" -> {
+                        if (current?.callId == callId) {
+                            val remoteWantsTorOnly = json.optBoolean("forceTorOnly", false)
+                            if (remoteWantsTorOnly && !current.forceTorOnly) {
+                                applyForceTorOnlyInternal(current, true, notifyPeer = false)
+                            }
+                        }
+                    }
+
+                    "VIDEO_STATE" -> {
+                        if (current?.callId == callId) {
+                            val remoteEnabled = json.optBoolean("localVideoEnabled", false)
+                            _sessionFlow.update { s ->
+                                if (s?.callId == callId) {
+                                    s.copy(
+                                        isVideoCall = s.isVideoCall || remoteEnabled,
+                                        isRemoteVideoEnabled = remoteEnabled,
+                                        isVideoSwapped = if (!remoteEnabled) false else s.isVideoSwapped
+                                    )
+                                } else s
+                            }
+                            if (remoteEnabled) {
+                                sendVideoPliRequest()
+                            }
+                        }
+                    }
+
+                    "VIDEO_PLI" -> {
+                        if (current?.callId == callId && current.state == CallState.ACTIVE && current.isLocalVideoEnabled) {
+                            videoEngine.requestImmediateKeyframe()
+                        }
+                    }
+
+                    "WEBRTC_SDP_PART" -> {
+                        if (current?.callId == callId && !current.forceTorOnly) {
+                            val partId = json.optString("partId")
+                            val partIdx = json.optInt("partIndex", -1)
+                            val totalParts = json.optInt("totalParts", 0)
+                            val gen = json.optInt("generation", 1)
+                            val sdpType = json.optString("sdpType")
+                            val isGzip = json.optBoolean("isGzip", true)
+                            val chunk = json.optString("chunk")
+                            if (partId.isNotBlank() && totalParts in 2..MAX_SDP_PARTS &&
+                                partIdx in 0 until totalParts && chunk.isNotEmpty()
+                            ) {
+                                val now = System.currentTimeMillis()
+                                pendingSdpParts.entries.removeIf { now - it.value.createdAtMs > 30_000L }
+                                val buf = pendingSdpParts.getOrPut("$callId:$partId") {
+                                    PendingSdpParts(gen, sdpType, isGzip, totalParts, createdAtMs = now)
+                                }
+                                if (buf.totalParts == totalParts && buf.generation == gen) {
+                                    buf.parts[partIdx] = chunk
+                                    if (buf.parts.size == totalParts) {
+                                        pendingSdpParts.remove("$callId:$partId")
+                                        val joined = (0 until totalParts).joinToString("") { buf.parts[it].orEmpty() }
+                                        val fullSdp = if (isGzip) decompressSdpGzipBase64Bounded(joined) else joined
+                                        if (fullSdp.isNotBlank()) {
+                                            handleCompleteRemoteWebRtcSdpLocked(current, canonicalSender, gen, sdpType, fullSdp)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    "WEBRTC_SDP" -> {
+                        if (current?.callId == callId && !current.forceTorOnly) {
+                            val gen = json.optInt("generation", 1)
+                            val sdpType = json.optString("sdpType")
+                            val sdpGz = json.optString("sdpGz")
+                            val sdp = if (sdpGz.isNotBlank()) {
+                                decompressSdpGzipBase64Bounded(sdpGz).ifBlank { json.optString("sdp") }
+                            } else {
+                                json.optString("sdp")
+                            }
+                            if (sdpType.isNotBlank() && sdp.isNotBlank()) {
+                                handleCompleteRemoteWebRtcSdpLocked(current, canonicalSender, gen, sdpType, sdp)
+                            }
+                        }
+                    }
+
+                    "WEBRTC_ICE" -> {
+                        if (current?.callId == callId && !current.forceTorOnly) {
+                            val gen = json.optInt("generation", 1)
+                            val arr = json.optJSONArray("candidates")
+                            if (arr != null && arr.length() > 0) {
+                                val list = ArrayList<org.webrtc.IceCandidate>(arr.length())
+                                for (i in 0 until arr.length()) {
+                                    val c = arr.optJSONObject(i) ?: continue
+                                    val sdp = c.optString("sdp")
+                                    if (sdp.isBlank()) continue
+                                    list.add(
+                                        org.webrtc.IceCandidate(
+                                            c.optString("sdpMid"),
+                                            c.optInt("sdpMLineIndex", 0),
+                                            sdp
+                                        )
+                                    )
+                                }
+                                if (list.isNotEmpty()) {
+                                    webrtcVideoEngine.onRemoteCandidates(gen, list)
+                                }
                             }
                         }
                     }
@@ -745,6 +1704,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
                     "CANDIDATES" -> {
                         if (current?.callId == callId) {
                             mergeCandidatesIntoList(json.optJSONArray("p2pCandidates"))
+                            p2pFastBurstCounter.set(0)
                             if (current.state == CallState.ACTIVE && !current.forceTorOnly) {
                                 startDirectP2pProbing(callId)
                             }
@@ -792,7 +1752,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
                                 callId = callId,
                                 reason = "Call declined",
                                 notifyPeer = false,
-                                logText = "📞 Outgoing voice call (Declined)"
+                                logText = if (current.isVideoCall) "📹 Outgoing video call (Declined)" else "📞 Outgoing voice call (Declined)"
                             )
                         }
                     }
@@ -803,28 +1763,34 @@ class SeamlessCallManager private constructor(private val context: Context) {
                                 callId = callId,
                                 reason = "User is on another call",
                                 notifyPeer = false,
-                                logText = "📞 Outgoing voice call (Busy)"
+                                logText = if (current.isVideoCall) "📹 Outgoing video call (Busy)" else "📞 Outgoing voice call (Busy)"
                             )
                         }
                     }
 
                     "HANGUP" -> {
                         if (current?.callId == callId && current.state != CallState.ENDED) {
+                            val wasMissedIncoming = current.isIncoming && current.state == CallState.INCOMING_RINGING
                             val dur = current.durationSeconds
+                            val icon = if (current.isVideoCall) "📹" else "📞"
+                            val kind = if (current.isVideoCall) "video" else "voice"
                             val logText = if (current.state == CallState.ACTIVE) {
                                 val mins = dur / 60
                                 val secs = dur % 60
                                 val durStr = if (mins > 0) "${mins}m ${secs}s" else "${secs}s"
-                                if (current.isIncoming) "📞 Incoming voice call ($durStr)"
-                                else "📞 Outgoing voice call ($durStr)"
+                                if (current.isIncoming) "$icon Incoming $kind call ($durStr)"
+                                else "$icon Outgoing $kind call ($durStr)"
                             } else if (current.isIncoming) {
-                                "📞 Missed voice call"
+                                "$icon Missed $kind call"
                             } else {
-                                "📞 Voice call ended"
+                                "$icon $kind call ended"
+                            }
+                            if (wasMissedIncoming) {
+                                showMissedCallNotification(current)
                             }
                             endCallInternal(
                                 callId = callId,
-                                reason = "Call ended",
+                                reason = if (wasMissedIncoming) "Missed call" else "Call ended",
                                 notifyPeer = false,
                                 logText = logText
                             )
@@ -835,9 +1801,44 @@ class SeamlessCallManager private constructor(private val context: Context) {
         }
     }
 
+    private fun handleCompleteRemoteWebRtcSdpLocked(
+        current: CallSessionInfo,
+        canonicalSender: String,
+        gen: Int,
+        sdpType: String,
+        sdp: String
+    ) {
+        val dedupKey = "${current.callId}:$gen:${sdpType.lowercase()}:${sdp.hashCode()}"
+        if (!processedWebRtcSdps.add(dedupKey)) return
+        if (gen > webrtcGeneration.get()) {
+            webrtcGeneration.set(gen)
+        }
+        val fps = AegisCallCrypto.extractDtlsFingerprintsFromSdp(sdp)
+        if (fps.isNotEmpty() && dtlsFingerprints.addAll(fps)) {
+            publishSecurityCode(current.callId)
+        }
+        val myCanonical = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(
+            TorMessagingService.getInstance(context).getMyContactInfo().onionAddress
+        )
+        val shouldYield = myCanonical.isBlank() || myCanonical < canonicalSender
+        _sessionFlow.update { s ->
+            if (s?.callId == current.callId && !s.isVideoCall) {
+                s.copy(isVideoCall = true)
+            } else s
+        }
+        webrtcVideoEngine.onRemoteSdp(
+            generation = gen,
+            type = sdpType,
+            sdp = sdp,
+            frontCamera = current.isFrontCamera,
+            videoEnabled = current.isLocalVideoEnabled,
+            shouldYieldOnGlare = shouldYield
+        )
+    }
+
     /**
-     * Called by TorMessagingService when a compact CALL_AUDIO frame arrives over the Tor circuit.
-     * Decrypts in RAM in ~0.01ms using [currentSessionKey] (AES-256-GCM).
+     * Called by TorMessagingService when a compact CALL_AUDIO (or Flux XOR-FEC) frame arrives over Tor.
+     * Decrypts with directional [AegisCallCrypto.CallKeySession.recvKey] and enforces ReplayWindow64.
      */
     fun onIncomingTorCallAudio(
         senderOnion: String,
@@ -853,31 +1854,127 @@ class SeamlessCallManager private constructor(private val context: Context) {
             .ifBlank { current.peerOnion.trim().lowercase() }
         if (canonicalSender != canonicalPeer) return
 
+        val magic = payload[0]
+        if (magic != TOR_AUDIO_MAGIC_V2 && magic != TOR_AUDIO_FEC_MAGIC) return
         val buf = ByteBuffer.wrap(payload)
-        if (payload[0] != TOR_AUDIO_MAGIC_V2) return
         buf.get() // magic
         val incomingCallUuid = UUID(buf.long, buf.long)
         if (incomingCallUuid.toString() != current.callId) return
-        val key = currentSessionKey ?: return
+        val crypto = activeCallCrypto ?: return
         val nonce = ByteArray(DIRECT_UDP_NONCE_BYTES)
         buf.get(nonce)
         val cipherBytes = ByteArray(buf.remaining())
         buf.get(cipherBytes)
         val aad = ByteBuffer.allocate(1 + 16 + 8 + 8)
-            .put(TOR_AUDIO_MAGIC_V2)
+            .put(magic)
             .putLong(incomingCallUuid.mostSignificantBits)
             .putLong(incomingCallUuid.leastSignificantBits)
             .putLong(sequence)
             .putLong(timestampMs)
             .array()
-        val encodedAudio = decryptUdpGcm(cipherBytes, key, nonce, aad) ?: return
+        val plaintext = decryptUdpGcm(cipherBytes, crypto.recvKey, nonce, aad, crypto.recvKeySpec) ?: return
+        val nonceSeq = extractNonceCounter(nonce)
+        if (nonceSeq >= 0L && !crypto.audioReplayWindow.checkAndMark(nonceSeq)) return
 
         lastPeerActivityAtMs = System.currentTimeMillis()
         val rxCount = rxAudioFramesCounter.incrementAndGet()
         if ((rxCount and 3L) == 0L) {
             _rxPacketPulseFlow.value = System.currentTimeMillis()
         }
-        audioEngine?.onRemoteAudioFrame(sequence, timestampMs, encodedAudio)
+        if (magic == TOR_AUDIO_FEC_MAGIC) {
+            for ((recSeq, recPayload) in fecDecoder.onFecPacketMulti(plaintext)) {
+                audioEngine?.onRemoteAudioFrame(recSeq, timestampMs, recPayload)
+            }
+        } else {
+            audioEngine?.onRemoteAudioFrame(sequence, timestampMs, plaintext)
+            if (!CallAudioEngine.isDtxSidFrame(plaintext)) {
+                for ((recSeq, recPayload) in fecDecoder.onVoiceFrameMulti(sequence, plaintext)) {
+                    audioEngine?.onRemoteAudioFrame(recSeq, timestampMs, recPayload)
+                }
+            }
+        }
+    }
+
+    /**
+     * Called by TorMessagingService when a real-time encrypted CALL_VIDEO fragment arrives over Tor.
+     * Enforces canonical peer verification, directional decryption, and ReplayWindow64 before reassembly.
+     */
+    fun onIncomingTorCallVideo(
+        senderOnion: String,
+        sequence: Long,
+        timestampMs: Long,
+        payload: ByteArray
+    ) {
+        val current = _sessionFlow.value ?: return
+        if (current.state != CallState.ACTIVE || payload.size < 1 + 16 + DIRECT_UDP_NONCE_BYTES + 16) return
+        val canonicalSender = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(senderOnion)
+            .ifBlank { senderOnion.trim().lowercase() }
+        val canonicalPeer = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(current.peerOnion)
+            .ifBlank { current.peerOnion.trim().lowercase() }
+        if (canonicalSender != canonicalPeer) return
+
+        val buf = ByteBuffer.wrap(payload)
+        if (payload[0] != TOR_VIDEO_MAGIC_V1) return
+        buf.get()
+        val incomingCallUuid = UUID(buf.long, buf.long)
+        if (incomingCallUuid.toString() != current.callId) return
+        val crypto = activeCallCrypto ?: return
+        val nonce = ByteArray(DIRECT_UDP_NONCE_BYTES)
+        buf.get(nonce)
+        val cipherBytes = ByteArray(buf.remaining())
+        buf.get(cipherBytes)
+        val aad = ByteBuffer.allocate(1 + 16 + 8 + 8)
+            .put(TOR_VIDEO_MAGIC_V1)
+            .putLong(incomingCallUuid.mostSignificantBits)
+            .putLong(incomingCallUuid.leastSignificantBits)
+            .putLong(sequence)
+            .putLong(timestampMs)
+            .array()
+        val plainFragment = decryptUdpGcm(cipherBytes, crypto.recvKey, nonce, aad, crypto.recvKeySpec) ?: return
+        val nonceSeq = extractNonceCounter(nonce)
+        if (nonceSeq >= 0L && !crypto.videoReplayWindow.checkAndMark(nonceSeq)) return
+
+        lastPeerActivityAtMs = System.currentTimeMillis()
+        if (!current.isRemoteVideoEnabled) {
+            _sessionFlow.update { s ->
+                if (s?.callId == current.callId && !s.isRemoteVideoEnabled) {
+                    s.copy(isVideoCall = true, isRemoteVideoEnabled = true)
+                } else s
+            }
+        }
+        videoEngine.onRemoteVideoFragment(plainFragment)
+    }
+
+    private fun getActiveUdpTargets(): List<InetSocketAddress> {
+        val now = System.currentTimeMillis()
+        val verified = verifiedDirectPeerEndpoint
+        if (verified != null && (now - lastDirectP2pVerifiedAt) <= DIRECT_P2P_STALE_MS) {
+            return listOf(verified)
+        }
+        val out = ArrayList<InetSocketAddress>(2)
+        val candidate = candidateDirectPeerEndpoint
+        if (candidate != null) {
+            out.add(candidate)
+        }
+        var firstPublic: InetSocketAddress? = null
+        var firstPrivate: InetSocketAddress? = null
+        for (addr in peerUdpCandidates) {
+            val inet = addr.address
+            val isPublic = inet != null && !inet.isSiteLocalAddress && !inet.isLoopbackAddress && !inet.isLinkLocalAddress
+            if (isPublic && firstPublic == null) {
+                firstPublic = addr
+            } else if (!isPublic && firstPrivate == null) {
+                firstPrivate = addr
+            }
+            if (firstPublic != null && firstPrivate != null) break
+        }
+        if (firstPublic != null && !out.contains(firstPublic) && out.size < 2) {
+            out.add(firstPublic)
+        }
+        if (firstPrivate != null && !out.contains(firstPrivate) && out.size < 2) {
+            out.add(firstPrivate)
+        }
+        return out
     }
 
     /**
@@ -897,34 +1994,71 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
         val now = System.currentTimeMillis()
         val verifiedEndpoint = verifiedDirectPeerEndpoint
-        val candidateEndpoint = candidateDirectPeerEndpoint
         val verifiedAgeMs = if (verifiedEndpoint != null) (now - lastDirectP2pVerifiedAt) else Long.MAX_VALUE
         val callAgeMs = session.connectedAtMs?.let { now - it } ?: 0L
+        val webrtcConnected = webrtcVideoEngine.mediaConnected.value
 
         var sentViaDirectUdp = false
+        val jitterMs = audioEngine?.currentJitterMs() ?: 0.0
+        val fecNeeded = !session.isMultipathActive || jitterMs >= 45.0 || session.transportMode == CallTransportMode.TOR_ONION
+        val burst2D = session.transportMode == CallTransportMode.TOR_ONION || jitterMs >= 75.0
+        val fecParities = if (!CallAudioEngine.isDtxSidFrame(encodedAdpcm)) {
+            fecEncoder.onVoiceFrame2D(
+                sequence = sequence,
+                encodedPayload = encodedAdpcm,
+                fecEnabled = fecNeeded,
+                burstMode2D = burst2D
+            )
+        } else {
+            emptyList()
+        }
+
         if (!session.forceTorOnly) {
-            val primaryUdpTarget = verifiedEndpoint ?: candidateEndpoint ?: peerUdpCandidates.firstOrNull()
-            if (primaryUdpTarget != null) {
-                sentViaDirectUdp = sendDirectUdpAudioPacket(
-                    session.callId,
-                    primaryUdpTarget,
-                    sequence,
-                    timestampMs,
-                    encodedAdpcm
-                )
+            val targets = getActiveUdpTargets()
+            for (udpTarget in targets) {
+                if (sendDirectUdpAudioPacket(
+                        session.callId,
+                        udpTarget,
+                        sequence,
+                        timestampMs,
+                        encodedAdpcm
+                    )
+                ) {
+                    sentViaDirectUdp = true
+                }
+                for (fecParity in fecParities) {
+                    sendDirectUdpPacketWithType(
+                        packetType = UDP_TYPE_AUDIO_FEC,
+                        callId = session.callId,
+                        target = udpTarget,
+                        sequence = sequence,
+                        timestampMs = timestampMs,
+                        plaintext = fecParity
+                    )
+                }
             }
         }
 
-        // Pure Direct P2P mode only when 2-way UDP was verified within the last 1.8s AND past warmup
+        if (verifiedAgeMs <= DIRECT_P2P_PROMOTE_WINDOW_MS) {
+            if (firstContinuousDirectOkAtMs == 0L) {
+                firstContinuousDirectOkAtMs = now
+            }
+        } else if (verifiedAgeMs > DIRECT_P2P_DEMOTE_WINDOW_MS) {
+            firstContinuousDirectOkAtMs = 0L
+        }
+
         val pureDirectP2pReady = !session.forceTorOnly &&
             verifiedEndpoint != null &&
-            verifiedAgeMs <= DIRECT_P2P_PURE_WINDOW_MS &&
+            verifiedAgeMs <= DIRECT_P2P_PROMOTE_WINDOW_MS &&
             callAgeMs >= INITIAL_MULTIPATH_WARMUP_MS &&
-            sentViaDirectUdp
+            sentViaDirectUdp &&
+            firstContinuousDirectOkAtMs > 0L &&
+            (now - firstContinuousDirectOkAtMs) >= DIRECT_P2P_HOLD_MS
 
         if (pureDirectP2pReady) {
-            if (session.transportMode != CallTransportMode.DIRECT_P2P || session.isMultipathActive) {
-                audioEngine?.setTransportMode(true)
+            audioEngine?.setTransportMode(true)
+            videoEngine.updateNetworkProfile(isDirectP2p = true, rttMs = session.rttMs, lossDetected = false)
+            if (!webrtcConnected && (session.transportMode != CallTransportMode.DIRECT_P2P || session.isMultipathActive)) {
                 _sessionFlow.update {
                     it?.copy(
                         transportMode = CallTransportMode.DIRECT_P2P,
@@ -936,11 +2070,11 @@ class SeamlessCallManager private constructor(private val context: Context) {
             return
         }
 
-        // If 2-way UDP is within 4.5s but in warmup or multipath window, keep UI badge as Direct P2P (Multipath)
-        // while still sending the redundant copy over Tor .onion below!
-        if (!session.forceTorOnly && verifiedEndpoint != null && verifiedAgeMs <= DIRECT_P2P_STALE_MS) {
+        // Hysteresis zone: stay on multipath while UDP age <= 3.5s, and only demote to pure Tor above 3.5s.
+        if (!session.forceTorOnly && verifiedEndpoint != null && verifiedAgeMs <= DIRECT_P2P_DEMOTE_WINDOW_MS) {
             audioEngine?.setTransportMode(false) // Use 40ms frames so both Tor & UDP share the exact frame
-            if (session.transportMode != CallTransportMode.DIRECT_P2P || !session.isMultipathActive) {
+            videoEngine.updateNetworkProfile(isDirectP2p = true, rttMs = session.rttMs, lossDetected = false)
+            if (!webrtcConnected && (session.transportMode != CallTransportMode.DIRECT_P2P || !session.isMultipathActive)) {
                 _sessionFlow.update {
                     it?.copy(
                         transportMode = CallTransportMode.DIRECT_P2P,
@@ -949,8 +2083,9 @@ class SeamlessCallManager private constructor(private val context: Context) {
                     )
                 }
             }
-        } else if (session.transportMode == CallTransportMode.DIRECT_P2P) {
+        } else if (session.transportMode == CallTransportMode.DIRECT_P2P && !webrtcConnected) {
             audioEngine?.setTransportMode(false)
+            videoEngine.updateNetworkProfile(isDirectP2p = false, rttMs = session.rttMs, lossDetected = false)
             _sessionFlow.update {
                 it?.copy(
                     transportMode = CallTransportMode.TOR_ONION,
@@ -960,9 +2095,9 @@ class SeamlessCallManager private constructor(private val context: Context) {
             }
         }
 
-        // Encrypt in RAM with currentSessionKey (0.01ms) and enqueue into the non-blocking FIFO channel
-        val callUuid = runCatching { UUID.fromString(session.callId) }.getOrNull() ?: return
-        val key = currentSessionKey ?: return
+        // Encrypt in RAM with directional sendKey & counter nonce and enqueue into the non-blocking FIFO channel
+        val callUuid = currentCallUuid ?: runCatching { UUID.fromString(session.callId) }.getOrNull() ?: return
+        val crypto = activeCallCrypto ?: return
         val aad = ByteBuffer.allocate(1 + 16 + 8 + 8)
             .put(TOR_AUDIO_MAGIC_V2)
             .putLong(callUuid.mostSignificantBits)
@@ -970,8 +2105,8 @@ class SeamlessCallManager private constructor(private val context: Context) {
             .putLong(sequence)
             .putLong(timestampMs)
             .array()
-        val nonce = ByteArray(DIRECT_UDP_NONCE_BYTES).also { secureRandom.nextBytes(it) }
-        val cipherBytes = encryptUdpGcm(encodedAdpcm, key, nonce, aad) ?: return
+        val nonce = nextMonotonicNonce()
+        val cipherBytes = encryptUdpGcm(encodedAdpcm, crypto.sendKey, nonce, aad, crypto.sendKeySpec) ?: return
 
         val torPayload = ByteBuffer.allocate(1 + 16 + DIRECT_UDP_NONCE_BYTES + cipherBytes.size)
             .put(TOR_AUDIO_MAGIC_V2)
@@ -989,21 +2124,57 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 payload = torPayload
             )
         )
+
+        for (fecParity in fecParities) {
+            val fecAad = ByteBuffer.allocate(1 + 16 + 8 + 8)
+                .put(TOR_AUDIO_FEC_MAGIC)
+                .putLong(callUuid.mostSignificantBits)
+                .putLong(callUuid.leastSignificantBits)
+                .putLong(sequence)
+                .putLong(timestampMs)
+                .array()
+            val fecNonce = nextMonotonicNonce()
+            val fecCipher = encryptUdpGcm(fecParity, crypto.sendKey, fecNonce, fecAad, crypto.sendKeySpec)
+            if (fecCipher != null) {
+                val fecTorPayload = ByteBuffer.allocate(1 + 16 + DIRECT_UDP_NONCE_BYTES + fecCipher.size)
+                    .put(TOR_AUDIO_FEC_MAGIC)
+                    .putLong(callUuid.mostSignificantBits)
+                    .putLong(callUuid.leastSignificantBits)
+                    .put(fecNonce)
+                    .put(fecCipher)
+                    .array()
+                torAudioOutChannel.trySend(
+                    OutboundTorAudioItem(
+                        recipientOnion = session.peerOnion,
+                        sequence = sequence,
+                        timestampMs = timestampMs,
+                        payload = fecTorPayload,
+                        isFecParity = true
+                    )
+                )
+            }
+        }
     }
 
     private fun startTorAudioSenderLoop(callId: String) {
         torSenderJob?.cancel()
-        // Drain any stale frames from previous call
         while (torAudioOutChannel.tryReceive().isSuccess) {}
+        while (torVideoFrameChannel.tryReceive().isSuccess) {}
+        torVideoConserveUntilMs = 0L
 
         torSenderJob = scope.launch(Dispatchers.IO) {
             val messaging = TorMessagingService.getInstance(context)
-            for (item in torAudioOutChannel) {
-                val s = _sessionFlow.value
-                if (s == null || s.callId != callId || s.state == CallState.ENDED || s.state == CallState.IDLE) {
-                    break
-                }
-                if (s.state == CallState.ACTIVE) {
+
+            suspend fun transmitTorAudioItem(item: OutboundTorAudioItem, cur: CallSessionInfo) {
+                if (item.isFecParity) {
+                    messaging.sendCallAudioFecFrame(
+                        recipientOnion = item.recipientOnion,
+                        sequence = item.sequence,
+                        timestampMs = item.timestampMs,
+                        payload = item.payload,
+                        preferBulkLane = !cur.isLocalVideoEnabled
+                    )
+                } else {
                     messaging.sendCallAudioFrame(
                         recipientOnion = item.recipientOnion,
                         sequence = item.sequence,
@@ -1012,6 +2183,333 @@ class SeamlessCallManager private constructor(private val context: Context) {
                     )
                 }
             }
+
+            suspend fun drainPendingAudio(): Boolean {
+                while (true) {
+                    val s = _sessionFlow.value
+                    if (s == null || s.callId != callId || s.state == CallState.ENDED || s.state == CallState.IDLE) {
+                        return false
+                    }
+                    val item = torAudioOutChannel.tryReceive().getOrNull() ?: return true
+                    if (s.state == CallState.ACTIVE) {
+                        transmitTorAudioItem(item, s)
+                    }
+                }
+            }
+
+            suspend fun sendVideoFrameWithAudioPriority(video: OutboundTorVideoFrame) {
+                if (System.currentTimeMillis() < torVideoConserveUntilMs) {
+                    // Drain audio instead when Tor circuit is temporarily backpressured
+                    return
+                }
+                var slowWrite = false
+                for (batch in video.encryptedFragments.chunked(4)) {
+                    if (!drainPendingAudio()) return
+                    val s = _sessionFlow.value
+                    if (s == null || s.callId != callId || s.state != CallState.ACTIVE || !s.isLocalVideoEnabled) {
+                        return
+                    }
+                    val t0 = System.currentTimeMillis()
+                    val ok = messaging.sendCallVideoFramesBurst(
+                        recipientOnion = video.recipientOnion,
+                        sequence = video.frameSeq,
+                        timestampMs = video.timestampMs,
+                        payloads = batch
+                    )
+                    if (!ok || System.currentTimeMillis() - t0 > 200L) {
+                        slowWrite = true
+                    }
+                }
+                if (slowWrite) {
+                    // Back off between complete frames instead of aborting mid-frame so fragments remain decodable.
+                    torVideoConserveUntilMs = System.currentTimeMillis() + 250L
+                }
+            }
+
+            while (isActive) {
+                val s = _sessionFlow.value
+                if (s == null || s.callId != callId || s.state == CallState.ENDED || s.state == CallState.IDLE) {
+                    break
+                }
+
+                if (!drainPendingAudio()) break
+
+                val queuedVideo = torVideoFrameChannel.tryReceive().getOrNull()
+                if (queuedVideo != null) {
+                    sendVideoFrameWithAudioPriority(queuedVideo)
+                    continue
+                }
+
+                // Wait non-blocking until either audio or video arrives (audio clause first!)
+                select<Unit> {
+                    torAudioOutChannel.onReceive { audio ->
+                        val cur = _sessionFlow.value
+                        if (cur != null && cur.callId == callId && cur.state == CallState.ACTIVE) {
+                            transmitTorAudioItem(audio, cur)
+                        }
+                    }
+                    torVideoFrameChannel.onReceive { video ->
+                        sendVideoFrameWithAudioPriority(video)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startTorVideoSenderLoop(callId: String) {
+        // Unified into the voice-first priority sender loop (torSenderJob) to avoid Tor TCP socket contention
+        torVideoSenderJob?.cancel()
+        torVideoSenderJob = null
+    }
+
+    private fun dispatchOutboundVideoFrame(
+        sequence: Long,
+        timestampMs: Long,
+        fragments: List<ByteArray>
+    ) {
+        val session = _sessionFlow.value ?: return
+        if (session.state != CallState.ACTIVE || !session.isLocalVideoEnabled || fragments.isEmpty()) return
+
+        val now = System.currentTimeMillis()
+        val verifiedEndpoint = verifiedDirectPeerEndpoint
+        val candidateEndpoint = candidateDirectPeerEndpoint
+        val verifiedAgeMs = if (verifiedEndpoint != null) (now - lastDirectP2pVerifiedAt) else Long.MAX_VALUE
+
+        var sentViaDirectUdp = false
+        if (!session.forceTorOnly) {
+            val targets = getActiveUdpTargets()
+            for (udpTarget in targets) {
+                var allSent = true
+                fragments.forEachIndexed { idx, frag ->
+                    if (fragments.size >= 8 && idx > 0 && (idx and 3) == 0) {
+                        LockSupport.parkNanos(350_000L)
+                    }
+                    val ok = sendDirectUdpPacketWithType(
+                        packetType = UDP_TYPE_VIDEO,
+                        callId = session.callId,
+                        target = udpTarget,
+                        sequence = sequence,
+                        timestampMs = timestampMs,
+                        plaintext = frag
+                    )
+                    if (!ok) allSent = false
+                }
+                if (allSent) sentViaDirectUdp = true
+            }
+        }
+
+        // Video stays strictly on Direct P2P UDP whenever UDP path is alive so we never bloat Tor circuits;
+        // fallback to conflated complete-frame Tor queue only when Force Tor Only is active or UDP cannot carry video.
+        if (!session.forceTorOnly && verifiedEndpoint != null && verifiedAgeMs <= DIRECT_P2P_STALE_MS && sentViaDirectUdp) {
+            return
+        }
+
+        val callUuid = currentCallUuid ?: runCatching { UUID.fromString(session.callId) }.getOrNull() ?: return
+        val crypto = activeCallCrypto ?: return
+        val encryptedList = ArrayList<ByteArray>(fragments.size)
+        for (frag in fragments) {
+            val aad = ByteBuffer.allocate(1 + 16 + 8 + 8)
+                .put(TOR_VIDEO_MAGIC_V1)
+                .putLong(callUuid.mostSignificantBits)
+                .putLong(callUuid.leastSignificantBits)
+                .putLong(sequence)
+                .putLong(timestampMs)
+                .array()
+            val nonce = nextMonotonicNonce()
+            val cipherBytes = encryptUdpGcm(frag, crypto.sendKey, nonce, aad, crypto.sendKeySpec) ?: return
+            val torPayload = ByteBuffer.allocate(1 + 16 + DIRECT_UDP_NONCE_BYTES + cipherBytes.size)
+                .put(TOR_VIDEO_MAGIC_V1)
+                .putLong(callUuid.mostSignificantBits)
+                .putLong(callUuid.leastSignificantBits)
+                .put(nonce)
+                .put(cipherBytes)
+                .array()
+            encryptedList.add(torPayload)
+        }
+
+        torVideoFrameChannel.trySend(
+            OutboundTorVideoFrame(
+                recipientOnion = session.peerOnion,
+                frameSeq = sequence,
+                timestampMs = timestampMs,
+                encryptedFragments = encryptedList
+            )
+        )
+    }
+
+    private fun sendVideoPliRequest() {
+        val current = _sessionFlow.value ?: return
+        if (current.state != CallState.ACTIVE) return
+        val target = if (!current.forceTorOnly) verifiedDirectPeerEndpoint ?: candidateDirectPeerEndpoint else null
+        if (target != null && sendDirectUdpVideoControl(current.callId, target, byteArrayOf(VIDEO_CTRL_PLI))) {
+            return
+        }
+        scope.launch {
+            val messaging = TorMessagingService.getInstance(context)
+            val myInfo = messaging.getMyContactInfo()
+            val payload = buildSignalJson(
+                type = "VIDEO_PLI",
+                callId = current.callId,
+                senderOnion = myInfo.onionAddress,
+                senderNickname = myInfo.nickname,
+                senderPubKey = myInfo.publicKey
+            )
+            messaging.sendCallSignalFrame(current.peerOnion, payload)
+        }
+    }
+
+    private fun sendVideoStateNotification(callId: String, peerOnion: String, enabled: Boolean) {
+        val current = _sessionFlow.value
+        val target = if (current?.forceTorOnly == false) {
+            verifiedDirectPeerEndpoint ?: candidateDirectPeerEndpoint
+        } else null
+        if (target != null) {
+            sendDirectUdpVideoControl(callId, target, byteArrayOf(VIDEO_CTRL_STATE, if (enabled) 1 else 0))
+        }
+        scope.launch {
+            val messaging = TorMessagingService.getInstance(context)
+            val myInfo = messaging.getMyContactInfo()
+            val payload = buildSignalJson(
+                type = "VIDEO_STATE",
+                callId = callId,
+                senderOnion = myInfo.onionAddress,
+                senderNickname = myInfo.nickname,
+                senderPubKey = myInfo.publicKey,
+                isVideo = enabled,
+                localVideoEnabled = enabled
+            )
+            messaging.sendCallSignalFrame(peerOnion, payload)
+        }
+    }
+
+    private fun sendWebRtcSdpSignal(generation: Int, sdpType: String, sdp: String) {
+        val current = _sessionFlow.value ?: return
+        if (current.forceTorOnly || current.state == CallState.ENDED || current.state == CallState.IDLE) return
+        val localFps = AegisCallCrypto.extractDtlsFingerprintsFromSdp(sdp)
+        if (localFps.isNotEmpty() && dtlsFingerprints.addAll(localFps)) {
+            publishSecurityCode(current.callId)
+        }
+        scope.launch {
+            val messaging = TorMessagingService.getInstance(context)
+            val myInfo = messaging.getMyContactInfo()
+            val sdpGz = compressSdpGzipBase64(sdp)
+            val useGzip = sdpGz.isNotBlank()
+            val encodedBody = if (useGzip) sdpGz else sdp
+            val payload = JSONObject().apply {
+                put("type", "WEBRTC_SDP")
+                put("callId", current.callId)
+                put("senderOnion", myInfo.onionAddress)
+                put("generation", generation)
+                put("sdpType", sdpType)
+                if (useGzip) put("sdpGz", sdpGz) else put("sdp", sdp)
+                put("timestamp", System.currentTimeMillis())
+            }.toString().toByteArray(Charsets.UTF_8)
+
+            // Fast-path: also transmit compact SDPs over Direct UDP; large SDPs stay strictly on Tor signaling.
+            val udpCtrl = ByteArray(1 + payload.size).also {
+                it[0] = VIDEO_CTRL_WEBRTC_SIG
+                System.arraycopy(payload, 0, it, 1, payload.size)
+            }
+            if (udpCtrl.size <= 1_200) {
+                for (target in getActiveUdpTargets()) {
+                    sendDirectUdpVideoControl(current.callId, target, udpCtrl)
+                }
+            }
+
+            if (payload.size <= MAX_SDP_SIGNAL_BYTES) {
+                sendCallSignalWithRetry(messaging, current.peerOnion, payload, maxAttempts = 2)
+            } else {
+                // Fragment oversized SDPs cleanly across bounded WEBRTC_SDP_PART frames
+                val chunks = encodedBody.chunked(2_200).take(MAX_SDP_PARTS)
+                val partId = UUID.randomUUID().toString()
+                chunks.forEachIndexed { idx, part ->
+                    val partPayload = JSONObject().apply {
+                        put("type", "WEBRTC_SDP_PART")
+                        put("callId", current.callId)
+                        put("senderOnion", myInfo.onionAddress)
+                        put("generation", generation)
+                        put("sdpType", sdpType)
+                        put("isGzip", useGzip)
+                        put("partId", partId)
+                        put("partIndex", idx)
+                        put("totalParts", chunks.size)
+                        put("chunk", part)
+                        put("timestamp", System.currentTimeMillis())
+                    }.toString().toByteArray(Charsets.UTF_8)
+                    sendCallSignalWithRetry(messaging, current.peerOnion, partPayload, maxAttempts = 2)
+                }
+            }
+        }
+    }
+
+    private fun sendWebRtcIceSignal(generation: Int, candidates: List<org.webrtc.IceCandidate>) {
+        val current = _sessionFlow.value ?: return
+        if (current.forceTorOnly || current.state == CallState.ENDED || current.state == CallState.IDLE) return
+        if (candidates.isEmpty()) return
+        scope.launch {
+            val messaging = TorMessagingService.getInstance(context)
+            val myInfo = messaging.getMyContactInfo()
+            val arr = JSONArray()
+            for (c in candidates) {
+                arr.put(
+                    JSONObject().apply {
+                        put("sdpMid", c.sdpMid ?: "0")
+                        put("sdpMLineIndex", c.sdpMLineIndex)
+                        put("sdp", c.sdp)
+                    }
+                )
+            }
+            val payload = JSONObject().apply {
+                put("type", "WEBRTC_ICE")
+                put("callId", current.callId)
+                put("senderOnion", myInfo.onionAddress)
+                put("generation", generation)
+                put("candidates", arr)
+                put("timestamp", System.currentTimeMillis())
+            }.toString().toByteArray(Charsets.UTF_8)
+
+            val udpCtrl = ByteArray(1 + payload.size).also {
+                it[0] = VIDEO_CTRL_WEBRTC_SIG
+                System.arraycopy(payload, 0, it, 1, payload.size)
+            }
+            for (target in getActiveUdpTargets()) {
+                sendDirectUdpVideoControl(current.callId, target, udpCtrl)
+            }
+
+            messaging.sendCallSignalFrame(current.peerOnion, payload)
+        }
+    }
+
+    private fun compressSdpGzipBase64(sdp: String): String {
+        return try {
+            val baos = java.io.ByteArrayOutputStream()
+            java.util.zip.GZIPOutputStream(baos).use { gz ->
+                gz.write(sdp.toByteArray(Charsets.UTF_8))
+            }
+            android.util.Base64.encodeToString(baos.toByteArray(), android.util.Base64.NO_WRAP)
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    private fun decompressSdpGzipBase64(b64: String): String =
+        decompressSdpGzipBase64Bounded(b64)
+
+    private fun negotiateVideoCodec(remoteCodecs: JSONArray?): String {
+        val localSupported = videoEngine.getSupportedHardwareCodecs()
+        if (remoteCodecs == null) return CallVideoEngine.CODEC_AVC
+        val remoteList = ArrayList<String>(remoteCodecs.length())
+        for (i in 0 until remoteCodecs.length()) {
+            remoteList.add(remoteCodecs.optString(i).uppercase())
+        }
+        return when {
+            localSupported.contains(CallVideoEngine.CODEC_DELTA_PULSE) &&
+                remoteList.contains(CallVideoEngine.CODEC_DELTA_PULSE) ->
+                CallVideoEngine.CODEC_DELTA_PULSE
+            localSupported.contains(CallVideoEngine.CODEC_HEVC) &&
+                remoteList.contains(CallVideoEngine.CODEC_HEVC) ->
+                CallVideoEngine.CODEC_HEVC
+            else -> CallVideoEngine.CODEC_AVC
         }
     }
 
@@ -1022,6 +2520,10 @@ class SeamlessCallManager private constructor(private val context: Context) {
             val socket = DatagramSocket(0).apply {
                 reuseAddress = true
                 trafficClass = 0xB8 // Expedited Forwarding (EF) DSCP for VoIP
+                runCatching {
+                    receiveBufferSize = 512 * 1024
+                    sendBufferSize = 512 * 1024
+                }
             }
             udpSocket = socket
             val port = socket.localPort
@@ -1085,38 +2587,70 @@ class SeamlessCallManager private constructor(private val context: Context) {
             val stunServers = listOf(
                 "stun.cloudflare.com" to 3478,
                 "stun.l.google.com" to 19302,
-                "stun1.l.google.com" to 19302
+                "stun1.l.google.com" to 19302,
+                "stun2.l.google.com" to 19302
             )
+            // Query all STUN servers in parallel so slow DNS on one never stalls the others
             for ((host, port) in stunServers) {
-                runCatching {
-                    val txId = ByteArray(12).also { secureRandom.nextBytes(it) }
-                    val request = ByteBuffer.allocate(20)
-                        .putShort(0x0001.toShort()) // Binding Request
-                        .putShort(0x0000.toShort()) // Message Length = 0
-                        .putInt(0x2112A442)         // Magic Cookie
-                        .put(txId)
-                        .array()
-                    val target = InetSocketAddress(InetAddress.getByName(host), port)
-                    socket.send(DatagramPacket(request, request.size, target))
+                launch(Dispatchers.IO) {
+                    runCatching {
+                        val resolvedIp = InetAddress.getByName(host)
+                        val target = InetSocketAddress(resolvedIp, port)
+                        repeat(2) { attempt ->
+                            if (attempt > 0) delay(220L)
+                            if (socket.isClosed) return@launch
+                            val txId = ByteArray(12).also { secureRandom.nextBytes(it) }
+                            val sentAt = System.currentTimeMillis()
+                            pendingStunTxIds[bytesToHexLower(txId)] = sentAt
+                            if (pendingStunTxIds.size > 32) {
+                                pendingStunTxIds.entries.removeIf { sentAt - it.value > 15_000L }
+                            }
+                            val request = ByteBuffer.allocate(20)
+                                .putShort(0x0001.toShort()) // Binding Request
+                                .putShort(0x0000.toShort()) // Message Length = 0
+                                .putInt(0x2112A442)         // Magic Cookie
+                                .put(txId)
+                                .array()
+                            socket.send(DatagramPacket(request, request.size, target))
+                        }
+                    }
                 }
             }
 
-            // Wait 550ms for STUN replies to be harvested by startDirectUdpReceiverLoop
-            delay(550L)
-            val current = _sessionFlow.value
-            if (current?.callId == callId && !current.forceTorOnly && localUdpCandidates.isNotEmpty()) {
-                val messaging = TorMessagingService.getInstance(context)
-                val myInfo = messaging.getMyContactInfo()
-                val tricklePayload = buildSignalJson(
-                    type = "CANDIDATES",
-                    callId = callId,
-                    senderOnion = myInfo.onionAddress,
-                    senderNickname = myInfo.nickname,
-                    senderPubKey = myInfo.publicKey,
-                    candidates = localUdpCandidates.toList()
-                )
-                messaging.sendCallSignalFrame(peerOnion, tricklePayload)
+            // Initial settle trickle, plus late STUN replies also trigger coalesced trickle in handlePotentialStunPacket
+            delay(500L)
+            trickleLocalCandidatesAsync(callId, peerOnion)
+        }
+    }
+
+    private fun trickleLocalCandidatesAsync(callId: String, peerOnion: String) {
+        val now = System.currentTimeMillis()
+        val elapsed = now - lastCandidateTrickleAtMs
+        if (elapsed < 200L) {
+            if (candidateTrickleJob?.isActive != true) {
+                val waitMs = (220L - elapsed).coerceIn(30L, 220L)
+                candidateTrickleJob = scope.launch(Dispatchers.IO) {
+                    delay(waitMs)
+                    trickleLocalCandidatesAsync(callId, peerOnion)
+                }
             }
+            return
+        }
+        val current = _sessionFlow.value ?: return
+        if (current.callId != callId || current.forceTorOnly || localUdpCandidates.isEmpty()) return
+        lastCandidateTrickleAtMs = now
+        scope.launch(Dispatchers.IO) {
+            val messaging = TorMessagingService.getInstance(context)
+            val myInfo = messaging.getMyContactInfo()
+            val tricklePayload = buildSignalJson(
+                type = "CANDIDATES",
+                callId = callId,
+                senderOnion = myInfo.onionAddress,
+                senderNickname = myInfo.nickname,
+                senderPubKey = myInfo.publicKey,
+                candidates = localUdpCandidates.toList()
+            )
+            messaging.sendCallSignalFrame(peerOnion, tricklePayload)
         }
     }
 
@@ -1124,8 +2658,10 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
     private fun handlePotentialStunPacket(data: ByteArray, length: Int) {
         val mapped = parseStunBindingResponse(data, length) ?: return
+        var isNewEndpoint = false
         if (!localUdpCandidates.contains(mapped)) {
             localUdpCandidates.add(0, mapped)
+            isNewEndpoint = true
             Log.i(TAG, "🌍 Discovered STUN public endpoint: $mapped")
         }
 
@@ -1135,25 +2671,35 @@ class SeamlessCallManager private constructor(private val context: Context) {
         val lastColon = mapped.lastIndexOf(':')
         if (lastColon > 0 && !mapped.startsWith("[")) {
             val ip = mapped.substring(0, lastColon)
-            val port = mapped.substring(lastColon + 1).toIntOrNull() ?: return
-            val ports = synchronized(discoveredStunPortsByIp) {
-                val list = discoveredStunPortsByIp.getOrPut(ip) { mutableListOf() }
-                if (!list.contains(port)) list.add(port)
-                list.toList()
-            }
-            if (ports.size >= 2) {
-                val p1 = ports[ports.size - 2]
-                val p2 = ports[ports.size - 1]
-                val delta = p2 - p1
-                if (abs(delta) in 1..16) {
-                    for (step in 1..4) {
-                        val predictedPort = (p2 + delta * step).coerceIn(1025, 65534)
-                        val pred = "$ip:$predictedPort"
-                        if (!localUdpCandidates.contains(pred)) {
-                            localUdpCandidates.add(pred)
+            val port = mapped.substring(lastColon + 1).toIntOrNull()
+            if (port != null) {
+                val ports = synchronized(discoveredStunPortsByIp) {
+                    val list = discoveredStunPortsByIp.getOrPut(ip) { mutableListOf() }
+                    if (!list.contains(port)) list.add(port)
+                    list.toList()
+                }
+                if (ports.size >= 2) {
+                    val p1 = ports[ports.size - 2]
+                    val p2 = ports[ports.size - 1]
+                    val delta = p2 - p1
+                    if (abs(delta) in 1..16) {
+                        for (step in 1..4) {
+                            val predictedPort = (p2 + delta * step).coerceIn(1025, 65534)
+                            val pred = "$ip:$predictedPort"
+                            if (!localUdpCandidates.contains(pred)) {
+                                localUdpCandidates.add(pred)
+                                isNewEndpoint = true
+                            }
                         }
                     }
                 }
+            }
+        }
+
+        if (isNewEndpoint) {
+            val session = _sessionFlow.value
+            if (session != null && !session.forceTorOnly) {
+                trickleLocalCandidatesAsync(session.callId, session.peerOnion)
             }
         }
     }
@@ -1167,6 +2713,8 @@ class SeamlessCallManager private constructor(private val context: Context) {
         if (msgType != 0x0101 || cookie != 0x2112A442) return null
         val rxTxId = ByteArray(12)
         bb.get(rxTxId)
+        val sentAt = pendingStunTxIds[bytesToHexLower(rxTxId)] ?: return null
+        if (System.currentTimeMillis() - sentAt > 15_000L) return null
 
         val endOffset = (20 + msgLen).coerceAtMost(length)
         var offset = 20
@@ -1211,9 +2759,9 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
     private fun startDirectP2pProbing(callId: String) {
         p2pProbeJob?.cancel()
+        p2pFastBurstCounter.set(0)
         p2pProbeJob = scope.launch {
             val callUuid = runCatching { UUID.fromString(callId) }.getOrNull() ?: return@launch
-            var burstCount = 0
             while (isActive) {
                 val session = _sessionFlow.value
                 if (session == null || session.callId != callId || session.state != CallState.ACTIVE) break
@@ -1226,8 +2774,12 @@ class SeamlessCallManager private constructor(private val context: Context) {
                         sendDirectUdpProbe(callUuid, target, isAck = false, timestampMs = System.currentTimeMillis())
                     }
                 }
-                burstCount++
-                delay(if (burstCount <= 12) 350L else 1_200L)
+                val count = p2pFastBurstCounter.incrementAndGet()
+                delay(when {
+                    count <= 15 -> 60L
+                    count <= 40 -> 180L
+                    else -> 1_100L
+                })
             }
         }
     }
@@ -1235,7 +2787,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
     private fun startDirectUdpReceiverLoop(callId: String, socket: DatagramSocket) {
         p2pReceiveJob?.cancel()
         p2pReceiveJob = scope.launch(Dispatchers.IO) {
-            val buf = ByteArray(1500)
+            val buf = ByteArray(4096)
             while (isActive && !socket.isClosed) {
                 try {
                     val packet = DatagramPacket(buf, buf.size)
@@ -1265,7 +2817,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
     ) {
         val session = _sessionFlow.value ?: return
         if (session.callId != callId || session.forceTorOnly) return
-        val key = currentSessionKey ?: return
+        val crypto = activeCallCrypto ?: return
         if (data.size < 1 + 16 + 8 + DIRECT_UDP_NONCE_BYTES + 16) return
 
         val bb = ByteBuffer.wrap(data)
@@ -1286,17 +2838,21 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 bb.get(nonce)
                 val cipherBytes = ByteArray(bb.remaining())
                 bb.get(cipherBytes)
-                val plain = decryptUdpGcm(cipherBytes, key, nonce, aad) ?: return
+                val plain = decryptUdpGcm(cipherBytes, crypto.recvKey, nonce, aad, crypto.recvKeySpec) ?: return
                 if (plain.isEmpty()) return
+                val nonceSeq = extractNonceCounter(nonce)
+                if (nonceSeq >= 0L && !crypto.ctrlReplayWindow.checkAndMark(nonceSeq)) return
 
-                // Record candidate endpoint & reply with PROBE_ACK immediately,
-                // but do NOT stop Tor audio until we receive PROBE_ACK or UDP_TYPE_AUDIO!
+                // Record candidate endpoint & echo PROBE_ACK at a bounded rate (NO unsolicited reverse PROBE storm!)
                 candidateDirectPeerEndpoint = sender
-                if (!peerUdpCandidates.contains(sender)) {
+                if (!peerUdpCandidates.contains(sender) && peerUdpCandidates.size < MAX_PEER_UDP_CANDIDATES) {
                     peerUdpCandidates.add(0, sender)
                 }
-                sendDirectUdpProbe(packetCallId, sender, isAck = true, timestampMs = ts)
-                sendDirectUdpProbe(packetCallId, sender, isAck = false, timestampMs = System.currentTimeMillis())
+                val now = System.currentTimeMillis()
+                if (now - lastAutoProbeAckAtMs >= PROBE_ACK_MIN_INTERVAL_MS) {
+                    lastAutoProbeAckAtMs = now
+                    sendDirectUdpProbe(packetCallId, sender, isAck = true, timestampMs = ts)
+                }
             }
 
             UDP_TYPE_PROBE_ACK -> {
@@ -1311,27 +2867,34 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 bb.get(nonce)
                 val cipherBytes = ByteArray(bb.remaining())
                 bb.get(cipherBytes)
-                val plain = decryptUdpGcm(cipherBytes, key, nonce, aad) ?: return
+                val plain = decryptUdpGcm(cipherBytes, crypto.recvKey, nonce, aad, crypto.recvKeySpec) ?: return
                 if (plain.isEmpty()) return
+                val nonceSeq = extractNonceCounter(nonce)
+                if (nonceSeq >= 0L && !crypto.ctrlReplayWindow.checkAndMark(nonceSeq)) return
 
-                // Two-way UDP reachability is now cryptographically verified!
+                // Only a genuine echo of our own probe timestamp proves two-way NAT reachability.
                 val now = System.currentTimeMillis()
+                val rttRaw = now - ts
+                if (rttRaw !in 0L..5_000L) return
                 lastPeerActivityAtMs = now
                 verifiedDirectPeerEndpoint = sender
                 candidateDirectPeerEndpoint = sender
                 lastDirectP2pVerifiedAt = now
 
-                val rtt = (now - ts).toInt().coerceIn(1, 2000)
-                _sessionFlow.update {
-                    it?.copy(
-                        transportMode = CallTransportMode.DIRECT_P2P,
-                        rttMs = rtt,
-                        statusMessage = if (it.isMultipathActive) {
-                            "Encrypted • Multipath P2P + Tor (${rtt}ms)"
-                        } else {
-                            "Encrypted • Direct P2P (${rtt}ms)"
-                        }
-                    )
+                val rtt = rttRaw.toInt().coerceIn(1, 2000)
+                videoEngine.updateNetworkProfile(isDirectP2p = true, rttMs = rtt, lossDetected = false)
+                if (!webrtcVideoEngine.mediaConnected.value) {
+                    _sessionFlow.update {
+                        it?.copy(
+                            transportMode = CallTransportMode.DIRECT_P2P,
+                            rttMs = rtt,
+                            statusMessage = if (it.isMultipathActive) {
+                                "Encrypted • Multipath P2P + Tor (${rtt}ms)"
+                            } else {
+                                "Encrypted • Direct P2P (${rtt}ms)"
+                            }
+                        )
+                    }
                 }
             }
 
@@ -1350,19 +2913,125 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 bb.get(nonce)
                 val cipherBytes = ByteArray(bb.remaining())
                 bb.get(cipherBytes)
-                val decodedAudio = decryptUdpGcm(cipherBytes, key, nonce, aad) ?: return
+                val decodedAudio = decryptUdpGcm(cipherBytes, crypto.recvKey, nonce, aad, crypto.recvKeySpec) ?: return
+                val nonceSeq = extractNonceCounter(nonce)
+                if (nonceSeq >= 0L && !crypto.audioReplayWindow.checkAndMark(nonceSeq)) return
 
                 val now = System.currentTimeMillis()
                 lastPeerActivityAtMs = now
-                verifiedDirectPeerEndpoint = sender
                 candidateDirectPeerEndpoint = sender
-                lastDirectP2pVerifiedAt = now
 
                 val rxCount = rxAudioFramesCounter.incrementAndGet()
                 if ((rxCount and 3L) == 0L) {
                     _rxPacketPulseFlow.value = now
                 }
                 audioEngine?.onRemoteAudioFrame(seq, ts, decodedAudio)
+                if (!CallAudioEngine.isDtxSidFrame(decodedAudio)) {
+                    for ((recSeq, recPayload) in fecDecoder.onVoiceFrameMulti(seq, decodedAudio)) {
+                        audioEngine?.onRemoteAudioFrame(recSeq, ts, recPayload)
+                    }
+                }
+            }
+
+            UDP_TYPE_AUDIO_FEC -> {
+                if (data.size < 1 + 16 + 8 + 8 + DIRECT_UDP_NONCE_BYTES + 16) return
+                val seq = bb.long
+                val ts = bb.long
+                val aad = ByteBuffer.allocate(1 + 16 + 8 + 8)
+                    .put(pktType)
+                    .putLong(packetCallId.mostSignificantBits)
+                    .putLong(packetCallId.leastSignificantBits)
+                    .putLong(seq)
+                    .putLong(ts)
+                    .array()
+                val nonce = ByteArray(DIRECT_UDP_NONCE_BYTES)
+                bb.get(nonce)
+                val cipherBytes = ByteArray(bb.remaining())
+                bb.get(cipherBytes)
+                val fecBytes = decryptUdpGcm(cipherBytes, crypto.recvKey, nonce, aad, crypto.recvKeySpec) ?: return
+                val nonceSeq = extractNonceCounter(nonce)
+                if (nonceSeq >= 0L && !crypto.audioReplayWindow.checkAndMark(nonceSeq)) return
+
+                lastPeerActivityAtMs = System.currentTimeMillis()
+                for ((recSeq, recPayload) in fecDecoder.onFecPacketMulti(fecBytes)) {
+                    audioEngine?.onRemoteAudioFrame(recSeq, ts, recPayload)
+                }
+            }
+
+            UDP_TYPE_VIDEO -> {
+                if (data.size < 1 + 16 + 8 + 8 + DIRECT_UDP_NONCE_BYTES + 16) return
+                val seq = bb.long
+                val ts = bb.long
+                val aad = ByteBuffer.allocate(1 + 16 + 8 + 8)
+                    .put(pktType)
+                    .putLong(packetCallId.mostSignificantBits)
+                    .putLong(packetCallId.leastSignificantBits)
+                    .putLong(seq)
+                    .putLong(ts)
+                    .array()
+                val nonce = ByteArray(DIRECT_UDP_NONCE_BYTES)
+                bb.get(nonce)
+                val cipherBytes = ByteArray(bb.remaining())
+                bb.get(cipherBytes)
+                val plainFragment = decryptUdpGcm(cipherBytes, crypto.recvKey, nonce, aad, crypto.recvKeySpec) ?: return
+                val nonceSeq = extractNonceCounter(nonce)
+                if (nonceSeq >= 0L && !crypto.videoReplayWindow.checkAndMark(nonceSeq)) return
+
+                val now = System.currentTimeMillis()
+                lastPeerActivityAtMs = now
+                candidateDirectPeerEndpoint = sender
+
+                if (!session.isRemoteVideoEnabled) {
+                    _sessionFlow.update { s ->
+                        if (s?.callId == callId && !s.isRemoteVideoEnabled) {
+                            s.copy(isVideoCall = true, isRemoteVideoEnabled = true)
+                        } else s
+                    }
+                }
+                videoEngine.onRemoteVideoFragment(plainFragment)
+            }
+
+            UDP_TYPE_VIDEO_CTRL -> {
+                if (data.size < 1 + 16 + 8 + 8 + DIRECT_UDP_NONCE_BYTES + 16) return
+                val seq = bb.long
+                val ts = bb.long
+                val aad = ByteBuffer.allocate(1 + 16 + 8 + 8)
+                    .put(pktType)
+                    .putLong(packetCallId.mostSignificantBits)
+                    .putLong(packetCallId.leastSignificantBits)
+                    .putLong(seq)
+                    .putLong(ts)
+                    .array()
+                val nonce = ByteArray(DIRECT_UDP_NONCE_BYTES)
+                bb.get(nonce)
+                val cipherBytes = ByteArray(bb.remaining())
+                bb.get(cipherBytes)
+                val plainCtrl = decryptUdpGcm(cipherBytes, crypto.recvKey, nonce, aad, crypto.recvKeySpec) ?: return
+                val nonceSeq = extractNonceCounter(nonce)
+                if (nonceSeq >= 0L && !crypto.ctrlReplayWindow.checkAndMark(nonceSeq)) return
+                if (plainCtrl.isEmpty()) return
+
+                lastPeerActivityAtMs = System.currentTimeMillis()
+                when (plainCtrl[0]) {
+                    VIDEO_CTRL_PLI -> videoEngine.requestImmediateKeyframe()
+                    VIDEO_CTRL_WEBRTC_SIG -> if (plainCtrl.size > 2) {
+                        val sigBytes = plainCtrl.copyOfRange(1, plainCtrl.size)
+                        onIncomingTorCallSignal(session.peerOnion, sigBytes)
+                    }
+                    VIDEO_CTRL_STATE -> if (plainCtrl.size >= 2) {
+                        val enabled = plainCtrl[1].toInt() != 0
+                        _sessionFlow.update { s ->
+                            if (s?.callId == callId) {
+                                s.copy(
+                                    isVideoCall = s.isVideoCall || enabled,
+                                    isRemoteVideoEnabled = enabled,
+                                    isVideoSwapped = if (!enabled) false else s.isVideoSwapped
+                                )
+                            } else s
+                        }
+                        if (enabled) sendVideoPliRequest()
+                    }
+                }
             }
         }
     }
@@ -1374,7 +3043,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
         timestampMs: Long
     ) {
         val socket = udpSocket ?: return
-        val key = currentSessionKey ?: return
+        val crypto = activeCallCrypto ?: return
         try {
             val type = if (isAck) UDP_TYPE_PROBE_ACK else UDP_TYPE_PROBE
             val aad = ByteBuffer.allocate(1 + 16 + 8)
@@ -1383,8 +3052,8 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 .putLong(callUuid.leastSignificantBits)
                 .putLong(timestampMs)
                 .array()
-            val nonce = ByteArray(DIRECT_UDP_NONCE_BYTES).also { secureRandom.nextBytes(it) }
-            val cipher = encryptUdpGcm(byteArrayOf(0x50, 0x32, 0x50), key, nonce, aad) ?: return
+            val nonce = nextMonotonicNonce()
+            val cipher = encryptUdpGcm(byteArrayOf(0x50, 0x32, 0x50), crypto.sendKey, nonce, aad, crypto.sendKeySpec) ?: return
             val packetBytes = ByteBuffer.allocate(aad.size + nonce.size + cipher.size)
                 .put(aad)
                 .put(nonce)
@@ -1400,20 +3069,42 @@ class SeamlessCallManager private constructor(private val context: Context) {
         sequence: Long,
         timestampMs: Long,
         encodedAdpcm: ByteArray
+    ): Boolean = sendDirectUdpPacketWithType(UDP_TYPE_AUDIO, callId, target, sequence, timestampMs, encodedAdpcm)
+
+    private fun sendDirectUdpVideoControl(
+        callId: String,
+        target: InetSocketAddress,
+        ctrlBytes: ByteArray
+    ): Boolean = sendDirectUdpPacketWithType(
+        UDP_TYPE_VIDEO_CTRL,
+        callId,
+        target,
+        System.nanoTime(),
+        System.currentTimeMillis(),
+        ctrlBytes
+    )
+
+    private fun sendDirectUdpPacketWithType(
+        packetType: Byte,
+        callId: String,
+        target: InetSocketAddress,
+        sequence: Long,
+        timestampMs: Long,
+        plaintext: ByteArray
     ): Boolean {
         val socket = udpSocket ?: return false
-        val key = currentSessionKey ?: return false
+        val crypto = activeCallCrypto ?: return false
         return try {
-            val callUuid = UUID.fromString(callId)
+            val callUuid = currentCallUuid ?: UUID.fromString(callId)
             val aad = ByteBuffer.allocate(1 + 16 + 8 + 8)
-                .put(UDP_TYPE_AUDIO)
+                .put(packetType)
                 .putLong(callUuid.mostSignificantBits)
                 .putLong(callUuid.leastSignificantBits)
                 .putLong(sequence)
                 .putLong(timestampMs)
                 .array()
-            val nonce = ByteArray(DIRECT_UDP_NONCE_BYTES).also { secureRandom.nextBytes(it) }
-            val cipher = encryptUdpGcm(encodedAdpcm, key, nonce, aad) ?: return false
+            val nonce = nextMonotonicNonce()
+            val cipher = encryptUdpGcm(plaintext, crypto.sendKey, nonce, aad, crypto.sendKeySpec) ?: return false
             val packetBytes = ByteBuffer.allocate(aad.size + nonce.size + cipher.size)
                 .put(aad)
                 .put(nonce)
@@ -1426,10 +3117,22 @@ class SeamlessCallManager private constructor(private val context: Context) {
         }
     }
 
-    private fun encryptUdpGcm(plaintext: ByteArray, key: ByteArray, nonce: ByteArray, aad: ByteArray): ByteArray? {
+    private fun resolveKeySpec(key: ByteArray, cachedSpec: SecretKeySpec? = null): SecretKeySpec {
+        if (cachedSpec != null) return cachedSpec
+        val cached = currentSessionKeySpec
+        return if (cached != null && currentSessionKey === key) cached else SecretKeySpec(key, "AES")
+    }
+
+    private fun encryptUdpGcm(
+        plaintext: ByteArray,
+        key: ByteArray,
+        nonce: ByteArray,
+        aad: ByteArray,
+        keySpec: SecretKeySpec? = null
+    ): ByteArray? {
         return try {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
+            val cipher = encryptCipherTl.get() ?: Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, resolveKeySpec(key, keySpec), GCMParameterSpec(128, nonce))
             cipher.updateAAD(aad)
             cipher.doFinal(plaintext)
         } catch (_: Exception) {
@@ -1437,10 +3140,16 @@ class SeamlessCallManager private constructor(private val context: Context) {
         }
     }
 
-    private fun decryptUdpGcm(ciphertext: ByteArray, key: ByteArray, nonce: ByteArray, aad: ByteArray): ByteArray? {
+    private fun decryptUdpGcm(
+        ciphertext: ByteArray,
+        key: ByteArray,
+        nonce: ByteArray,
+        aad: ByteArray,
+        keySpec: SecretKeySpec? = null
+    ): ByteArray? {
         return try {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
+            val cipher = decryptCipherTl.get() ?: Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, resolveKeySpec(key, keySpec), GCMParameterSpec(128, nonce))
             cipher.updateAAD(aad)
             cipher.doFinal(ciphertext)
         } catch (_: Exception) {
@@ -1471,22 +3180,25 @@ class SeamlessCallManager private constructor(private val context: Context) {
         heartbeatJob = scope.launch {
             val messaging = TorMessagingService.getInstance(context)
             while (isActive) {
-                delay(2_800L)
+                delay(4_000L)
                 val current = _sessionFlow.value
                 if (current == null || current.callId != callId || current.state != CallState.ACTIVE) break
-                if (lastPeerActivityAtMs > 0L && (System.currentTimeMillis() - lastPeerActivityAtMs) > 25_000L) {
+                val now = System.currentTimeMillis()
+                if (lastPeerActivityAtMs > 0L && (now - lastPeerActivityAtMs) > 25_000L) {
                     callMutex.withLock {
                         if (_sessionFlow.value?.callId == callId && _sessionFlow.value?.state == CallState.ACTIVE) {
                             endCallInternal(
                                 callId = callId,
                                 reason = "Connection lost",
                                 notifyPeer = false,
-                                logText = "📞 Voice call ended (Lost connection)"
+                                logText = if (current.isVideoCall) "📹 Video call ended (Lost connection)" else "📞 Voice call ended (Lost connection)"
                             )
                         }
                     }
                     break
                 }
+                val directVerified = verifiedDirectPeerEndpoint != null &&
+                    (now - lastDirectP2pVerifiedAt) <= DIRECT_P2P_STALE_MS
                 val myInfo = messaging.getMyContactInfo()
                 val hbPayload = buildSignalJson(
                     type = "HEARTBEAT",
@@ -1494,7 +3206,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
                     senderOnion = myInfo.onionAddress,
                     senderNickname = myInfo.nickname,
                     senderPubKey = myInfo.publicKey,
-                    candidates = if (current.forceTorOnly) emptyList() else localUdpCandidates.toList()
+                    candidates = if (current.forceTorOnly || directVerified) emptyList() else localUdpCandidates.toList()
                 )
                 messaging.sendCallSignalFrame(peerOnion, hbPayload)
             }
@@ -1505,49 +3217,124 @@ class SeamlessCallManager private constructor(private val context: Context) {
         ringTimeoutJob?.cancel()
         ringTimeoutJob = scope.launch {
             delay(RING_TIMEOUT_MS)
-            val current = _sessionFlow.value
-            if (current != null && current.callId == callId &&
-                (current.state == CallState.OUTGOING_DIALING ||
-                    current.state == CallState.OUTGOING_RINGING ||
-                    current.state == CallState.INCOMING_RINGING)
-            ) {
-                val logText = if (current.isIncoming) "📞 Missed voice call" else "📞 Outgoing voice call (No answer)"
-                endCallInternal(
-                    callId = callId,
-                    reason = if (current.isIncoming) "Missed call" else "No answer",
-                    notifyPeer = !current.isIncoming,
-                    logText = logText
-                )
+            callMutex.withLock {
+                val current = _sessionFlow.value
+                if (current != null && current.callId == callId &&
+                    (current.state == CallState.OUTGOING_DIALING ||
+                        current.state == CallState.OUTGOING_RINGING ||
+                        current.state == CallState.INCOMING_RINGING)
+                ) {
+                    val icon = if (current.isVideoCall) "📹" else "📞"
+                    val kind = if (current.isVideoCall) "video" else "voice"
+                    val logText = if (current.isIncoming) "$icon Missed $kind call" else "$icon Outgoing $kind call (No answer)"
+                    if (current.isIncoming) {
+                        showMissedCallNotification(current)
+                    }
+                    endCallInternal(
+                        callId = callId,
+                        reason = if (current.isIncoming) "Missed call" else "No answer",
+                        notifyPeer = !current.isIncoming,
+                        logText = logText
+                    )
+                }
             }
         }
     }
 
     private fun startIncomingRingtoneAndVibration() {
         stopRingingAndVibration()
-        try {
-            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            ringtone = RingtoneManager.getRingtone(context, uri)?.also { it.play() }
-        } catch (e: Exception) {
-            Log.w(TAG, "Ringtone play error: ${e.message}")
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        val ringerMode = am?.ringerMode ?: AudioManager.RINGER_MODE_NORMAL
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        val dndActive = nm != null && nm.currentInterruptionFilter != NotificationManager.INTERRUPTION_FILTER_ALL
+
+        if (ringerMode == AudioManager.RINGER_MODE_NORMAL && !dndActive) {
+            try {
+                val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                ringtone = RingtoneManager.getRingtone(context, uri)?.also {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        it.isLooping = true
+                    }
+                    it.play()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Ringtone play error: ${e.message}")
+            }
         }
 
-        try {
-            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
-            } else {
-                context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-            }
-            if (vibrator?.hasVibrator() == true) {
-                val pattern = longArrayOf(0L, 600L, 500L, 600L, 1200L)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    vibrator.vibrate(VibrationEffect.createWaveform(pattern, 0))
+        if (ringerMode != AudioManager.RINGER_MODE_SILENT && !dndActive) {
+            try {
+                val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
                 } else {
-                    vibrator.vibrate(pattern, 0)
+                    context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                }
+                if (vibrator?.hasVibrator() == true) {
+                    val timings = longArrayOf(0L, 65L, 110L, 85L, 180L, 65L, 130L, 95L, 1450L)
+                    val amplitudes = intArrayOf(0, 85, 195, 70, 0, 110, 235, 80, 0)
+                    val fallbackTimings = longArrayOf(0L, 260L, 180L, 320L, 1450L)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        val effect = if (vibrator.hasAmplitudeControl()) {
+                            VibrationEffect.createWaveform(timings, amplitudes, 0)
+                        } else {
+                            VibrationEffect.createWaveform(fallbackTimings, 0)
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            val attrs = VibrationAttributes.Builder()
+                                .setUsage(VibrationAttributes.USAGE_RINGTONE)
+                                .build()
+                            vibrator.vibrate(effect, attrs)
+                        } else {
+                            vibrator.vibrate(effect)
+                        }
+                    } else {
+                        vibrator.vibrate(fallbackTimings, 0)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Vibrator error: ${e.message}")
+            }
+        }
+    }
+
+    private fun showMissedCallNotification(session: CallSessionInfo) {
+        runCatching {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    MISSED_CALL_CHANNEL_ID,
+                    "Missed Encrypted Calls",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Missed voice and video calls over Tor"
+                }
+                nm.createNotificationChannel(channel)
+            }
+            val openIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                if (!session.contactId.isNullOrBlank()) {
+                    putExtra(com.seamless.android.net.TorMessageNotifier.EXTRA_OPEN_TOR_CHAT, true)
+                    putExtra(com.seamless.android.net.TorMessageNotifier.EXTRA_TOR_CONTACT_ID, session.contactId)
                 }
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "Vibrator error: ${e.message}")
+            val pi = PendingIntent.getActivity(
+                context,
+                (session.callId.hashCode() and 0x7FFF),
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val kind = if (session.isVideoCall) "video" else "voice"
+            val notif = NotificationCompat.Builder(context, MISSED_CALL_CHANNEL_ID)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle("Missed $kind call")
+                .setContentText("From ${session.peerNickname}")
+                .setAutoCancel(true)
+                .setContentIntent(pi)
+                .setCategory(NotificationCompat.CATEGORY_MISSED_CALL)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .build()
+            nm.notify(MISSED_CALL_NOTIFICATION_BASE_ID + (session.callId.hashCode() and 0xFF), notif)
         }
     }
 
@@ -1617,7 +3404,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
                     senderNickname = myInfo.nickname,
                     senderPubKey = myInfo.publicKey
                 )
-                messaging.sendCallSignalFrame(peerOnion, hangupPayload)
+                sendCallSignalWithRetry(messaging, peerOnion, hangupPayload, maxAttempts = 3)
             }
         }
 
@@ -1645,6 +3432,15 @@ class SeamlessCallManager private constructor(private val context: Context) {
         heartbeatJob = null
         torSenderJob?.cancel()
         torSenderJob = null
+        torVideoSenderJob?.cancel()
+        torVideoSenderJob = null
+        outgoingOfferJob?.cancel()
+        outgoingOfferJob = null
+        while (torVideoFrameChannel.tryReceive().isSuccess) {}
+        p2pFastBurstCounter.set(0)
+        lastCandidateTrickleAtMs = 0L
+        torVideoConserveUntilMs = 0L
+        lastAutoProbeAckAtMs = 0L
         ringTimeoutJob?.cancel()
         ringTimeoutJob = null
         p2pProbeJob?.cancel()
@@ -1653,14 +3449,37 @@ class SeamlessCallManager private constructor(private val context: Context) {
         p2pReceiveJob = null
         stunDiscoveryJob?.cancel()
         stunDiscoveryJob = null
+        candidateTrickleJob?.cancel()
+        candidateTrickleJob = null
+        unregisterCallNetworkCallback()
 
         stopRingingAndVibration()
         audioEngine?.stop()
+        webrtcVideoEngine.endSession()
+        webrtcGeneration.set(0)
+        processedWebRtcSdps.clear()
+        pendingSdpParts.clear()
+        dtlsFingerprints.clear()
+        fecEncoder.reset()
+        fecDecoder.reset()
+        videoEngine.stop()
+        wasLocalVideoPausedByBg = false
 
         try { udpSocket?.close() } catch (_: Exception) {}
         udpSocket = null
 
+        activeCallCrypto?.zeroize()
+        activeCallCrypto = null
+        AegisTorCrypto.zeroize(localEphemeralPriv, currentSessionKey)
+        localEphemeralPriv = null
+        localEphemeralPubHex = ""
+        localIdentityPubHexForCall = ""
+        remoteIdentityPubHexForCall = ""
         currentSessionKey = null
+        currentSessionKeySpec = null
+        currentCallUuid = null
+        pendingStunTxIds.clear()
+        firstContinuousDirectOkAtMs = 0L
         localUdpCandidates.clear()
         peerUdpCandidates.clear()
         synchronized(discoveredStunPortsByIp) {
@@ -1679,27 +3498,23 @@ class SeamlessCallManager private constructor(private val context: Context) {
     }
 
     /**
-     * Derives a 4-emoji Short Authentication String from the shared ephemeral call key.
-     * Both peers hold the identical key + callId, so both screens show the same symbols.
+     * Derives a MITM-proof 4-emoji Bound Short Authentication String cryptographically binding
+     * the ephemeral X25519 secret, sorted static identity keys, callId, and WebRTC DTLS fingerprints.
      */
     private fun publishSecurityCode(callId: String) {
-        val key = currentSessionKey
-        if (key == null || key.size != 32) {
+        val crypto = activeCallCrypto
+        if (crypto == null || crypto.sasSecret.size != 32) {
             _securityCodeFlow.value = emptyList()
             return
         }
-        val digest = MessageDigest.getInstance("SHA-256").run {
-            update("SeamlessCallSAS/v1".toByteArray(Charsets.UTF_8))
-            update(key)
-            update(callId.toByteArray(Charsets.UTF_8))
-            digest()
-        }
-        val bits = ((digest[0].toInt() and 0xFF) shl 16) or
-            ((digest[1].toInt() and 0xFF) shl 8) or
-            (digest[2].toInt() and 0xFF)
-        _securityCodeFlow.value = List(4) { i ->
-            SAS_EMOJIS[(bits shr (18 - i * 6)) and 0x3F]
-        }
+        _securityCodeFlow.value = AegisCallCrypto.deriveBoundSasEmojis(
+            sasSecret = crypto.sasSecret,
+            callId = callId,
+            localIdentityPubHex = localIdentityPubHexForCall,
+            remoteIdentityPubHex = remoteIdentityPubHexForCall,
+            dtlsFingerprints = dtlsFingerprints,
+            alphabet = SAS_EMOJIS
+        )
     }
 
     private suspend fun persistCallLogToChat(
@@ -1743,7 +3558,12 @@ class SeamlessCallManager private constructor(private val context: Context) {
         senderNickname: String,
         senderPubKey: String,
         sessionKey: ByteArray? = null,
-        candidates: List<String> = emptyList()
+        ephemeralPubHex: String? = null,
+        forceTorOnly: Boolean = false,
+        candidates: List<String> = emptyList(),
+        isVideo: Boolean = false,
+        localVideoEnabled: Boolean = false,
+        videoCodecs: List<String> = emptyList()
     ): ByteArray {
         val obj = JSONObject().apply {
             put("type", type)
@@ -1752,6 +3572,23 @@ class SeamlessCallManager private constructor(private val context: Context) {
             put("senderNickname", senderNickname)
             put("senderPubKey", senderPubKey)
             put("timestamp", System.currentTimeMillis())
+            if (isVideo) {
+                put("isVideo", true)
+            }
+            if (forceTorOnly || type == "TOR_MODE") {
+                put("forceTorOnly", forceTorOnly)
+            }
+            if (!ephemeralPubHex.isNullOrBlank()) {
+                put("ephemeralPubHex", ephemeralPubHex)
+            }
+            if (localVideoEnabled || type == "VIDEO_STATE" || type == "ACCEPT") {
+                put("localVideoEnabled", localVideoEnabled)
+            }
+            if (videoCodecs.isNotEmpty()) {
+                val codecsArr = JSONArray()
+                videoCodecs.forEach { codecsArr.put(it) }
+                put("videoCodecs", codecsArr)
+            }
             if (sessionKey != null) {
                 put("sessionKeyHex", sessionKey.joinToString("") { "%02x".format(it) })
             }
@@ -1766,19 +3603,18 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
     private fun mergeCandidatesIntoList(arr: JSONArray?) {
         if (arr == null) return
-        for (i in 0 until arr.length()) {
+        val maxEntries = minOf(arr.length(), MAX_PEER_UDP_CANDIDATES * 2)
+        for (i in 0 until maxEntries) {
+            if (peerUdpCandidates.size >= MAX_PEER_UDP_CANDIDATES) break
             val entry = arr.optString(i).trim()
-            val lastColon = entry.lastIndexOf(':')
-            if (lastColon > 0 && lastColon < entry.length - 1) {
-                val host = entry.substring(0, lastColon).trim().removeSurrounding("[", "]").substringBefore('%')
-                val port = entry.substring(lastColon + 1).trim().toIntOrNull() ?: continue
-                if (host.isNotBlank() && port in 1..65535) {
-                    runCatching {
-                        val sockAddr = InetSocketAddress(host, port)
-                        if (!peerUdpCandidates.contains(sockAddr)) {
-                            peerUdpCandidates.add(sockAddr)
-                        }
-                    }
+            val sockAddr = parseStrictIpLiteralSocketAddress(entry) ?: continue
+            if (!peerUdpCandidates.contains(sockAddr)) {
+                val addr = sockAddr.address
+                val isPublicRoutable = addr != null && !addr.isSiteLocalAddress && !addr.isLoopbackAddress && !addr.isLinkLocalAddress
+                if (isPublicRoutable) {
+                    peerUdpCandidates.add(0, sockAddr)
+                } else {
+                    peerUdpCandidates.add(sockAddr)
                 }
             }
         }

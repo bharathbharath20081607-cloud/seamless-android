@@ -82,8 +82,8 @@ class MailboxClient private constructor(private val context: Context) {
         override fun hashCode(): Int = id.hashCode()
     }
 
-    // Registered mailboxes
-    private val mailboxes = mutableListOf<RegisteredMailbox>()
+    // Registered mailboxes (thread-safe snapshot backing for sync readers + suspend writers)
+    private val mailboxes = java.util.concurrent.CopyOnWriteArrayList<RegisteredMailbox>()
     private val mutex = Mutex()
     // A manual wake-up can arrive while the periodic poll is in flight. One
     // serialized poll prevents the same mailbox entry being fetched and
@@ -295,22 +295,32 @@ class MailboxClient private constructor(private val context: Context) {
             // This prevents message loss if the app crashes between fetch and processing.
             val committedIds = messageCallback?.onMessagesReceived(allMessages).orEmpty()
 
-            // Now safe to confirm receipt — delete from mailbox server
-            for (msg in allMessages) {
-                if (msg.id !in committedIds) continue
-                try {
-                    val matchingMailbox = registeredMailboxes.firstOrNull {
-                        it.onionAddress == msg.mailboxOnion && (msg.folderId == null || it.folderId == msg.folderId)
-                    } ?: registeredMailboxes.firstOrNull { it.onionAddress == msg.mailboxOnion }
-                    deleteFromMailbox(
-                        mailboxOnion = msg.mailboxOnion,
-                        messageId = msg.id,
-                        accessToken = matchingMailbox?.accessToken,
-                        folderId = msg.folderId ?: matchingMailbox?.folderId ?: myOwnerId
-                    )
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to confirm receipt for ${msg.id}: ${e.message}")
-                }
+            // Now safe to confirm receipt — delete confirmed items from mailbox servers in parallel (bounded concurrency).
+            val deleteSemaphore = kotlinx.coroutines.sync.Semaphore(6)
+            coroutineScope {
+                allMessages
+                    .filter { it.id in committedIds }
+                    .map { msg ->
+                        async {
+                            deleteSemaphore.acquire()
+                            try {
+                                val matchingMailbox = registeredMailboxes.firstOrNull {
+                                    it.onionAddress == msg.mailboxOnion && (msg.folderId == null || it.folderId == msg.folderId)
+                                } ?: registeredMailboxes.firstOrNull { it.onionAddress == msg.mailboxOnion }
+                                deleteFromMailbox(
+                                    mailboxOnion = msg.mailboxOnion,
+                                    messageId = msg.id,
+                                    accessToken = matchingMailbox?.accessToken,
+                                    folderId = msg.folderId ?: matchingMailbox?.folderId ?: myOwnerId
+                                )
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to confirm receipt for ${msg.id}: ${e.message}")
+                            } finally {
+                                deleteSemaphore.release()
+                            }
+                        }
+                    }
+                    .awaitAll()
             }
         }
 

@@ -35,6 +35,7 @@ class PluggableTransportManager private constructor(private val context: Context
         private const val PREFS_NAME = "pluggable_transport"
         private const val KEY_MANUAL_STRATEGY = "manual_strategy"
         private const val KEY_AUTO_ENABLED = "auto_detection_enabled"
+        private const val KEY_CUSTOM_BRIDGES = "custom_bridges"
 
         // Default obfs4 bridges (from Tor Browser's built-in bridges)
         // These are public bridges that are regularly refreshed
@@ -49,9 +50,14 @@ class PluggableTransportManager private constructor(private val context: Context
             "meek_lite 192.0.2.18:80 BE776A53492E1E044A26F17306E1BC46A55A1625 url=https://meek.azureedge.net/ front=ajax.aspnetcdn.com"
         )
 
-        // Snowflake configuration
+        // WebTunnel HTTPS bridges (camouflage as normal HTTPS web requests)
+        private val DEFAULT_WEBTUNNEL_BRIDGES = listOf(
+            "webtunnel [2001:db8:3398:b43a:8c38:5b64:48ef:90aa]:443 935D418A13825285C3A2067847E4D3E1E55A029A url=https://wt.bridges.torproject.org/ ver=0.0.1"
+        )
+
+        // Snowflake configuration (via bundled liblyrebird.so — avoid defunct stun.ekiga.net)
         private val DEFAULT_SNOWFLAKE_BRIDGES = listOf(
-            "snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://snowflake-broker.torproject.net.global.prod.fastly.net/ front=cdn.sstatic.net ice=stun:stun.l.google.com:19302,stun:stun.ekiga.net utls-imitate=hellorandomizedalpn"
+            "snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://snowflake-broker.torproject.net.global.prod.fastly.net/ front=cdn.sstatic.net ice=stun:stun.l.google.com:19302,stun:stun.cloudflare.com:3478 utls-imitate=hellorandomizedalpn"
         )
 
         @Volatile
@@ -127,46 +133,77 @@ class PluggableTransportManager private constructor(private val context: Context
         return applyStrategy(result.strategy)
     }
 
+    fun setCustomBridges(lines: List<String>) {
+        val cleaned = lines.map { it.trim() }.filter { it.isNotEmpty() }.take(16)
+        prefs.edit().putString(KEY_CUSTOM_BRIDGES, cleaned.joinToString("\n")).apply()
+        val current = _currentStrategy.value
+        if (cleaned.isNotEmpty() || current != CensorshipDetector.TransportStrategy.VANILLA) {
+            applyStrategy(current)
+        }
+    }
+
+    fun getCustomBridges(): List<String> {
+        val raw = prefs.getString(KEY_CUSTOM_BRIDGES, null).orEmpty()
+        return raw.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
+    }
+
     /**
      * Apply a transport strategy and generate configuration for TorManager.
      */
     private fun applyStrategy(strategy: CensorshipDetector.TransportStrategy): TransportConfig {
         _currentStrategy.value = strategy
+        val customBridges = getCustomBridges()
+        val lyrebirdPath = findPtBinary("lyrebird") ?: findPtBinary("obfs4proxy")
 
         val config = when (strategy) {
             CensorshipDetector.TransportStrategy.VANILLA -> {
-                TransportConfig(
-                    strategy = strategy,
-                    bridges = emptyList(),
-                    ptBinaryPath = null
-                )
+                if (customBridges.isNotEmpty()) {
+                    TransportConfig(
+                        strategy = strategy,
+                        bridges = customBridges,
+                        ptBinaryPath = lyrebirdPath
+                    )
+                } else {
+                    TransportConfig(
+                        strategy = strategy,
+                        bridges = emptyList(),
+                        ptBinaryPath = null
+                    )
+                }
             }
 
             CensorshipDetector.TransportStrategy.OBFS4 -> {
-                val lyrebirdPath = findPtBinary("lyrebird") ?: findPtBinary("obfs4proxy")
                 TransportConfig(
                     strategy = strategy,
-                    bridges = DEFAULT_OBFS4_BRIDGES,
+                    bridges = customBridges.ifEmpty { DEFAULT_OBFS4_BRIDGES },
                     ptBinaryPath = lyrebirdPath,
                     extraArgs = mapOf("TunnelMode" to "obfs4")
                 )
             }
 
-            CensorshipDetector.TransportStrategy.MEEK_LITE -> {
-                val lyrebirdPath = findPtBinary("lyrebird") ?: findPtBinary("obfs4proxy")
+            CensorshipDetector.TransportStrategy.WEBTUNNEL -> {
                 TransportConfig(
                     strategy = strategy,
-                    bridges = DEFAULT_MEEK_BRIDGES,
+                    bridges = customBridges.ifEmpty { DEFAULT_WEBTUNNEL_BRIDGES },
+                    ptBinaryPath = lyrebirdPath,
+                    extraArgs = mapOf("TunnelMode" to "webtunnel")
+                )
+            }
+
+            CensorshipDetector.TransportStrategy.MEEK_LITE -> {
+                TransportConfig(
+                    strategy = strategy,
+                    bridges = customBridges.ifEmpty { DEFAULT_MEEK_BRIDGES },
                     ptBinaryPath = lyrebirdPath,
                     extraArgs = mapOf("TunnelMode" to "meek_lite")
                 )
             }
 
             CensorshipDetector.TransportStrategy.SNOWFLAKE -> {
-                val snowflakePath = findPtBinary("snowflake-client")
+                val snowflakePath = lyrebirdPath ?: findPtBinary("snowflake-client")
                 TransportConfig(
                     strategy = strategy,
-                    bridges = DEFAULT_SNOWFLAKE_BRIDGES,
+                    bridges = customBridges.ifEmpty { DEFAULT_SNOWFLAKE_BRIDGES },
                     ptBinaryPath = snowflakePath,
                     extraArgs = mapOf(
                         "TunnelMode" to "snowflake",
@@ -242,6 +279,7 @@ class PluggableTransportManager private constructor(private val context: Context
         if (config.ptBinaryPath != null) {
             val transport = when (config.strategy) {
                 CensorshipDetector.TransportStrategy.OBFS4 -> "obfs4"
+                CensorshipDetector.TransportStrategy.WEBTUNNEL -> "webtunnel"
                 CensorshipDetector.TransportStrategy.MEEK_LITE -> "meek_lite"
                 CensorshipDetector.TransportStrategy.SNOWFLAKE -> "snowflake"
                 else -> return sb.toString()
@@ -256,12 +294,14 @@ class PluggableTransportManager private constructor(private val context: Context
      * Get available transport strategies with their status.
      */
     fun getAvailableStrategies(): List<StrategyInfo> {
+        val lyrebirdAvailable = (findPtBinary("lyrebird") ?: findPtBinary("obfs4proxy")) != null
         return CensorshipDetector.TransportStrategy.values().map { strategy ->
             val available = when (strategy) {
                 CensorshipDetector.TransportStrategy.VANILLA -> true
-                CensorshipDetector.TransportStrategy.OBFS4 -> findPtBinary("lyrebird") != null
-                CensorshipDetector.TransportStrategy.MEEK_LITE -> findPtBinary("lyrebird") != null
-                CensorshipDetector.TransportStrategy.SNOWFLAKE -> findPtBinary("snowflake-client") != null
+                CensorshipDetector.TransportStrategy.OBFS4 -> lyrebirdAvailable
+                CensorshipDetector.TransportStrategy.WEBTUNNEL -> lyrebirdAvailable
+                CensorshipDetector.TransportStrategy.MEEK_LITE -> lyrebirdAvailable
+                CensorshipDetector.TransportStrategy.SNOWFLAKE -> lyrebirdAvailable || findPtBinary("snowflake-client") != null
             }
 
             StrategyInfo(

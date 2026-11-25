@@ -18,6 +18,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,7 +39,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.rounded.Call
+import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.ui.platform.LocalView
+import com.seamless.android.ui.call.rememberCallHaptics
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.filled.ContentCopy
@@ -50,6 +56,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Report
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -149,6 +156,27 @@ fun OnionContactsScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var showQrInput by remember { mutableStateOf(false) }
     var showCreateGroup by remember { mutableStateOf(false) }
+    var bannerDismissed by remember { mutableStateOf(false) }
+    var notifHealthy by remember { mutableStateOf(com.seamless.android.util.TorReliabilityHelper.isTorChannelAudible(context)) }
+    var batteryHealthy by remember { mutableStateOf(com.seamless.android.util.TorReliabilityHelper.isBatteryOptimizationIgnored(context)) }
+
+    val notifPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        notifHealthy = com.seamless.android.util.TorReliabilityHelper.isTorChannelAudible(context)
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner, context) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                notifHealthy = com.seamless.android.util.TorReliabilityHelper.isTorChannelAudible(context)
+                batteryHealthy = com.seamless.android.util.TorReliabilityHelper.isBatteryOptimizationIgnored(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     androidx.activity.compose.BackHandler {
         when {
@@ -164,9 +192,20 @@ fun OnionContactsScreen(
     }
 
     LaunchedEffect(Unit) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+            !com.seamless.android.util.TorReliabilityHelper.hasNotificationPermission(context)
+        ) {
+            notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
         if (serviceState == TorMessagingService.ServiceState.STOPPED) {
             TorForegroundService.start(context.applicationContext)
             messagingService.start()
+        }
+    }
+
+    LaunchedEffect(serviceState) {
+        if (serviceState == TorMessagingService.ServiceState.RUNNING) {
+            messagingService.prewarmActiveContacts()
         }
     }
 
@@ -241,6 +280,118 @@ fun OnionContactsScreen(
                             )
                         }
                     )
+                }
+            }
+
+            if (!bannerDismissed && (!notifHealthy || !batteryHealthy)) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    color = OnionUi.CanvasRaised,
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        OnionUi.Accent.copy(alpha = 0.35f)
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.NotificationsActive,
+                                contentDescription = null,
+                                tint = OnionUi.Accent,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (!notifHealthy && !batteryHealthy) {
+                                        "Enable alerts & background sync"
+                                    } else if (!notifHealthy) {
+                                        "Tor message alerts are muted"
+                                    } else {
+                                        "Keep Tor alive in background"
+                                    },
+                                    style = androidx.compose.material3.MaterialTheme.typography.labelLarge,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = if (!notifHealthy) {
+                                        "Allow sound & lockscreen banners so new Tor messages never arrive silently."
+                                    } else {
+                                        "Disable battery restrictions to receive Tor messages & calls reliably."
+                                    },
+                                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.72f)
+                                )
+                            }
+                            IconButton(
+                                onClick = { bannerDismissed = true },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Dismiss",
+                                    tint = Color.White.copy(alpha = 0.6f),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (!notifHealthy) {
+                                TextButton(
+                                    onClick = {
+                                        val needsRuntimePerm =
+                                            android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+                                                androidx.core.content.ContextCompat.checkSelfPermission(
+                                                    context,
+                                                    android.Manifest.permission.POST_NOTIFICATIONS
+                                                ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                                        if (needsRuntimePerm) {
+                                            notifPermLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                                        } else {
+                                            com.seamless.android.util.TorReliabilityHelper
+                                                .openTorNotificationSettings(context)
+                                        }
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        text = "Enable Alerts",
+                                        color = OnionUi.Accent,
+                                        style = androidx.compose.material3.MaterialTheme.typography.labelMedium
+                                    )
+                                }
+                            }
+                            if (!batteryHealthy) {
+                                TextButton(
+                                    onClick = {
+                                        com.seamless.android.util.TorReliabilityHelper
+                                            .openBackgroundReliabilitySettings(context)
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        text = "Allow Background",
+                                        color = OnionUi.Accent,
+                                        style = androidx.compose.material3.MaterialTheme.typography.labelMedium
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -399,12 +550,30 @@ private fun ContactCard(
     onClick: () -> Unit
 ) {
     val context = LocalContext.current
+    val callHaptics = rememberCallHaptics()
+    val view = LocalView.current
     val callManager = remember { com.seamless.android.call.SeamlessCallManager.getInstance(context) }
     val micPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
             callManager.startOutgoingCall(contact)
         } else {
             Toast.makeText(context, "Microphone permission is required for voice calls", Toast.LENGTH_SHORT).show()
+        }
+    }
+    val videoPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        val hasMic = grants[Manifest.permission.RECORD_AUDIO] == true ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        val hasCam = grants[Manifest.permission.CAMERA] == true ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        when {
+            hasMic && hasCam -> callManager.startOutgoingCall(contact, isVideoCall = true)
+            hasMic -> {
+                Toast.makeText(context, "Camera permission denied — starting voice call", Toast.LENGTH_SHORT).show()
+                callManager.startOutgoingCall(contact, isVideoCall = false)
+            }
+            else -> Toast.makeText(context, "Microphone and camera permissions are required for video calls", Toast.LENGTH_SHORT).show()
         }
     }
     Card(
@@ -441,7 +610,10 @@ private fun ContactCard(
                 Text(
                     text = when {
                         contact.requiresRendezvous() -> "Address pending. Re-scan after Tor is ready."
-                        lastMessage != null -> lastMessage.text
+                        lastMessage != null -> com.seamless.android.net.TorRichChatCodec.friendlyPreviewText(
+                            lastMessage.text,
+                            lastMessage.attachmentMimeType
+                        )
                         else -> contact.onionAddress.take(18) + "..."
                     },
                     color = OnionUi.TextSecondary,
@@ -452,24 +624,73 @@ private fun ContactCard(
             }
 
             if (!contact.requiresRendezvous() && contact.effectiveTrustState() != TorContactTrustState.BLOCKED) {
-                IconButton(
-                    onClick = {
-                        val hasMic = ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.RECORD_AUDIO
-                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                        if (hasMic) {
-                            callManager.startOutgoingCall(contact)
-                        } else {
-                            micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        }
-                    }
+                Spacer(Modifier.width(12.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        Icons.Default.Call,
-                        contentDescription = "Voice Call ${contact.nickname}",
-                        tint = OnionUi.Accent
-                    )
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(Color(0x1E34D399))
+                            .border(1.dp, Color(0x4D34D399), CircleShape)
+                            .clickable(role = androidx.compose.ui.semantics.Role.Button) {
+                                callHaptics.toggleOn(view)
+                                val hasMic = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.RECORD_AUDIO
+                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                if (hasMic) {
+                                    callManager.startOutgoingCall(contact)
+                                } else {
+                                    micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            }
+                    ) {
+                        Icon(
+                            Icons.Rounded.Call,
+                            contentDescription = "Voice Call ${contact.nickname}",
+                            tint = Color(0xFF34D399),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(Color(0x1E38BDF8))
+                            .border(1.dp, Color(0x4D38BDF8), CircleShape)
+                            .clickable(role = androidx.compose.ui.semantics.Role.Button) {
+                                callHaptics.toggleOn(view)
+                                val hasMic = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.RECORD_AUDIO
+                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                val hasCam = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.CAMERA
+                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                if (hasMic && hasCam) {
+                                    callManager.startOutgoingCall(contact, isVideoCall = true)
+                                } else {
+                                    val needed = buildList {
+                                        if (!hasMic) add(Manifest.permission.RECORD_AUDIO)
+                                        if (!hasCam) add(Manifest.permission.CAMERA)
+                                    }.toTypedArray()
+                                    videoPermLauncher.launch(needed)
+                                }
+                            }
+                    ) {
+                        Icon(
+                            Icons.Rounded.Videocam,
+                            contentDescription = "HD Video Call ${contact.nickname}",
+                            tint = Color(0xFF38BDF8),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
             }
         }

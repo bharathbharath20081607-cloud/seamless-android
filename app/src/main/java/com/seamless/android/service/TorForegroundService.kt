@@ -104,6 +104,7 @@ class TorForegroundService : Service() {
         Log.i(TAG, "🧅 TorForegroundService created")
 
         createNotificationChannel()
+        com.seamless.android.net.TorMessageNotifier(applicationContext).ensureChannelsCreated()
         try {
             if (Build.VERSION.SDK_INT >= 34) {
                 startForeground(
@@ -194,15 +195,16 @@ class TorForegroundService : Service() {
         // Release wake lock
         releaseWakeLock()
 
-        // Stop messaging service
-        serviceScope.launch {
+        // Stop messaging service before cancelling serviceScope so stop() completes cleanly.
+        CoroutineScope(Dispatchers.IO).launch {
             try {
                 TorMessagingService.getInstance(applicationContext).stop()
             } catch (e: Exception) {
                 Log.e(TAG, "Error stopping messaging: ${e.message}")
+            } finally {
+                serviceScope.cancel()
             }
         }
-        serviceScope.cancel()
 
         super.onDestroy()
     }
@@ -247,8 +249,10 @@ class TorForegroundService : Service() {
                             delay(2000) // Wait for circuits to rebuild
                             TorHiddenServiceManager.getInstance(applicationContext)
                                 .republishHiddenService()
-                            TorMessagingService.getInstance(applicationContext)
-                                .refreshMailboxHost()
+                            TorMessagingService.getInstance(applicationContext).apply {
+                                refreshMailboxHost()
+                                onNetworkRestored()
+                            }
                         } catch (e: Exception) {
                             Log.w(TAG, "Failed to re-enable network after Doze: ${e.message}")
                         }
@@ -292,16 +296,16 @@ class TorForegroundService : Service() {
                 Log.i(TAG, "🌐 Network available (handle=$handle) → rebuilding Tor circuits")
                 serviceScope.launch {
                     try {
-                        // Re-enable networking on the daemon
+                        // Reset Tor circuits across interface handover (bounces DisableNetwork + NEWNYM).
                         TorDaemonManager.getInstance(applicationContext as Application)
-                            .enableNetwork(true)
+                            .resetNetworkForHandover()
 
-                        // Wait a moment then republish
-                        delay(3000)
                         TorHiddenServiceManager.getInstance(applicationContext)
                             .republishHiddenService()
-                        TorMessagingService.getInstance(applicationContext)
-                            .refreshMailboxHost()
+                        TorMessagingService.getInstance(applicationContext).apply {
+                            refreshMailboxHost()
+                            onNetworkRestored()
+                        }
                     } catch (e: Exception) {
                         Log.w(TAG, "Error on network available: ${e.message}")
                     }
@@ -314,11 +318,17 @@ class TorForegroundService : Service() {
                 val stillOnline = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
                 if (stillOnline) {
                     lastAvailableNetworkHandle = activeNet?.networkHandle ?: 0L
-                    Log.i(TAG, "📶 Previous network lost, but active internet network remains online — keeping Tor enabled")
+                    Log.i(TAG, "📶 Previous network lost, switching Tor circuits onto active internet network")
                     serviceScope.launch {
                         try {
                             TorDaemonManager.getInstance(applicationContext as Application)
-                                .enableNetwork(true)
+                                .resetNetworkForHandover()
+                            TorHiddenServiceManager.getInstance(applicationContext)
+                                .republishHiddenService()
+                            TorMessagingService.getInstance(applicationContext).apply {
+                                refreshMailboxHost()
+                                onNetworkRestored()
+                            }
                         } catch (_: Exception) {}
                     }
                     return

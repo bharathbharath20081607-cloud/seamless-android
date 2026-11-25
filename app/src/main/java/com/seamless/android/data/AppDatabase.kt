@@ -324,5 +324,12 @@ abstract class AppDatabase : RoomDatabase() {
                 instance
             }
         }
+
+        @androidx.annotation.VisibleForTesting
+        internal fun setInstanceForTesting(db: AppDatabase?) {
+            synchronized(this) {
+                INSTANCE = db
+            }
+        }
     }
 }

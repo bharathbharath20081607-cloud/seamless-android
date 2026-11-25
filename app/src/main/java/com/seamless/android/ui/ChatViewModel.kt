@@ -617,6 +617,7 @@ class ChatViewModel(
                     meshService?.let { service ->
                         privateChatManager.startPrivateChat(canonical, service)
                     }
+                    setCurrentPrivateChatPeer(canonical)
                 }
             }
             // Send private message

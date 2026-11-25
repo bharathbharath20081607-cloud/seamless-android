@@ -43,9 +43,19 @@ class MeshDelegateHandler(
                         return@launch
                     }
                 }
-                
-                // Trigger haptic feedback
-                try { onHapticFeedback() } catch (_: Exception) {}
+
+                val myPeerId = getMyPeerID()
+                val isOwnMessage = !message.senderPeerID.isNullOrBlank() &&
+                    myPeerId.isNotBlank() &&
+                    message.senderPeerID == myPeerId
+                if (message.isPrivate && isOwnMessage) {
+                    return@launch
+                }
+
+                // Trigger haptic feedback only for incoming messages from others
+                if (!isOwnMessage) {
+                    try { onHapticFeedback() } catch (_: Exception) {}
+                }
 
                 if (message.isPrivate) {
                     // Private message
@@ -71,7 +81,6 @@ class MeshDelegateHandler(
                     // Channel message
                     if (state.getJoinedChannelsValue().contains(message.channel)) {
                         channelManager.addChannelMessage(message.channel, message, message.senderPeerID)
-                        val myPeerId = getMyPeerID()
                         if (message.senderPeerID != myPeerId &&
                             (notificationManager.getAppBackgroundState() || state.getCurrentChannelValue() != message.channel)
                         ) {
@@ -85,6 +94,9 @@ class MeshDelegateHandler(
                 } else {
                     // Public mesh message - always store to preserve message history
                     messageManager.addMessage(message)
+                    if (!isOwnMessage && !notificationManager.getAppBackgroundState()) {
+                        notificationManager.playForegroundIncomingSound()
+                    }
 
                     // Check for mentions in mesh chat
                     checkAndTriggerMeshMentionNotification(message)
@@ -150,6 +162,7 @@ class MeshDelegateHandler(
                         // Merge conversations and switch selection to the live mesh peer (or noiseHex)
                         com.seamless.android.services.ConversationAliasResolver.unifyChatsIntoPeer(state, canonical, listOf(currentPeer))
                         state.setSelectedPrivateChatPeer(canonical)
+                        notificationManager.setCurrentPrivateChatPeer(canonical)
                     }
                 } else if (isMeshEphemeral && !peers.contains(currentPeer)) {
                     // Forward case: Mesh chat lost connection. If mutual favorite exists, migrate to Nostr (noiseHex)
@@ -170,6 +183,7 @@ class MeshDelegateHandler(
                                 keysToMerge = listOf(currentPeer)
                             )
                             state.setSelectedPrivateChatPeer(noiseHex)
+                            notificationManager.setCurrentPrivateChatPeer(noiseHex)
                         }
                     } else {
                         privateChatManager.cleanupDisconnectedPeer(currentPeer)

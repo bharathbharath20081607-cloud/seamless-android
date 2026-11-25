@@ -38,17 +38,19 @@ class NotificationManager(
     companion object {
         private const val TAG = "NotificationManager"
         private const val LEGACY_CHANNEL_ID = "bitchat_dm_notifications"
+        private const val LEGACY_DM_CHANNEL_ID_V2 = "seamless_dm_notifications_v2"
         private const val LEGACY_GEOHASH_CHANNEL_ID = "bitchat_geohash_notifications"
-        private const val CHANNEL_ID = "seamless_dm_notifications_v2"
-        private const val GEOHASH_CHANNEL_ID = "seamless_geohash_notifications_v2"
-        private const val ACTIVE_PEERS_CHANNEL_ID = "seamless_active_peers_v2"
+        private const val LEGACY_GEOHASH_CHANNEL_ID_V2 = "seamless_geohash_notifications_v2"
+        const val CHANNEL_ID = "seamless_dm_notifications_v3"
+        const val GEOHASH_CHANNEL_ID = "seamless_geohash_notifications_v3"
+        const val ACTIVE_PEERS_CHANNEL_ID = "seamless_active_peers_v2"
         private const val WIFI_DIRECT_CHANNEL_ID = "bitchat_wifi_direct_notifications"
         private const val GROUP_KEY_DM = "bitchat_dm_group"
         private const val GROUP_KEY_GEOHASH = "bitchat_geohash_group"
         private const val NOTIFICATION_REQUEST_CODE = 1000
         private const val GEOHASH_NOTIFICATION_REQUEST_CODE = 2000
         private const val SUMMARY_NOTIFICATION_ID = 999
-      private const val GEOHASH_SUMMARY_NOTIFICATION_ID = 998
+        private const val GEOHASH_SUMMARY_NOTIFICATION_ID = 998
         private const val ACTIVE_PEERS_NOTIFICATION_ID = 997
         private const val ACTIVE_PEERS_NOTIFICATION_TIME_INTERVAL = com.seamless.android.util.AppConstants.UI.ACTIVE_PEERS_NOTIFICATION_INTERVAL_MS
 
@@ -58,12 +60,14 @@ class NotificationManager(
         const val EXTRA_PEER_ID = "peer_id"
         const val EXTRA_SENDER_NICKNAME = "sender_nickname"
         const val EXTRA_GEOHASH = "geohash"
+
+        internal fun seamlessSoundUri(context: Context): Uri =
+            Uri.parse("${ContentResolver.SCHEME_ANDROID_RESOURCE}://${context.packageName}/raw/seamless_notification")
     }
 
     private val systemNotificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-    private fun getSeamlessSoundUri(): Uri =
-        Uri.parse("${ContentResolver.SCHEME_ANDROID_RESOURCE}://${context.packageName}/${R.raw.seamless_notification}")
+    private fun getSeamlessSoundUri(): Uri = seamlessSoundUri(context)
     
     // Track pending notifications per sender to enable grouping
     private val pendingNotifications = ConcurrentHashMap<String, MutableList<PendingNotification>>()
@@ -72,6 +76,9 @@ class NotificationManager(
     // Track app background state
     @Volatile
     private var isAppInBackground = false
+
+    @Volatile
+    private var lastForegroundSoundAtMs = 0L
     
     // Track current view state
     @Volatile
@@ -104,7 +111,9 @@ class NotificationManager(
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching { systemNotificationManager.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
+            runCatching { systemNotificationManager.deleteNotificationChannel(LEGACY_DM_CHANNEL_ID_V2) }
             runCatching { systemNotificationManager.deleteNotificationChannel(LEGACY_GEOHASH_CHANNEL_ID) }
+            runCatching { systemNotificationManager.deleteNotificationChannel(LEGACY_GEOHASH_CHANNEL_ID_V2) }
 
             val soundUri = getSeamlessSoundUri()
             val audioAttributes = AudioAttributes.Builder()
@@ -119,6 +128,8 @@ class NotificationManager(
                 description = dmDescriptionText
                 setSound(soundUri, audioAttributes)
                 enableVibration(true)
+                vibrationPattern = longArrayOf(0L, 180L, 90L, 180L)
+                enableLights(true)
                 setShowBadge(true)
             }
             systemNotificationManager.createNotificationChannel(dmChannel)
@@ -131,6 +142,8 @@ class NotificationManager(
                 description = geohashDescriptionText
                 setSound(soundUri, audioAttributes)
                 enableVibration(true)
+                vibrationPattern = longArrayOf(0L, 180L, 90L, 180L)
+                enableLights(true)
                 setShowBadge(true)
             }
             systemNotificationManager.createNotificationChannel(geohashChannel)
@@ -161,11 +174,57 @@ class NotificationManager(
         }
     }
 
+    fun playForegroundIncomingSound() {
+        val now = System.currentTimeMillis()
+        if (now - lastForegroundSoundAtMs < 900L) return
+        lastForegroundSoundAtMs = now
+        com.seamless.android.util.InAppSoundPlayer.playIncomingMessageSound(context)
+    }
+
+    private fun shouldPostSystemNotification(): Boolean =
+        isAppInBackground && !com.seamless.android.util.AppForegroundTracker.isAppInForeground(context)
+
+    fun clearAllMessageNotifications() {
+        for (peerId in pendingNotifications.keys.toList()) {
+            val id = if (peerId == "mesh_mentions") 4000 else peerId.hashCode()
+            runCatching { notificationManager.cancel(id) }
+        }
+        pendingNotifications.clear()
+        runCatching { notificationManager.cancel(SUMMARY_NOTIFICATION_ID) }
+
+        for (geohash in pendingGeohashNotifications.keys.toList()) {
+            runCatching { notificationManager.cancel(3000 + geohash.hashCode()) }
+        }
+        pendingGeohashNotifications.clear()
+        runCatching { notificationManager.cancel(GEOHASH_SUMMARY_NOTIFICATION_ID) }
+        runCatching { notificationManager.cancel(ACTIVE_PEERS_NOTIFICATION_ID) }
+    }
+
+    private fun postNotification(notificationId: Int, notification: android.app.Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.w(TAG, "Cannot post notification ($notificationId): POST_NOTIFICATIONS permission not granted")
+            return
+        }
+        runCatching {
+            notificationManager.notify(notificationId, notification)
+        }.onFailure { e ->
+            Log.w(TAG, "Failed to post notification ($notificationId): ${e.message}")
+        }
+    }
+
     /**
      * Update app background state - notifications should only be shown when app is backgrounded
      */
     fun setAppBackgroundState(inBackground: Boolean) {
         isAppInBackground = inBackground
+        if (!inBackground) {
+            clearAllMessageNotifications()
+        }
         Log.d(TAG, "App background state changed: $inBackground")
     }
 
@@ -189,11 +248,9 @@ class NotificationManager(
      * Show a notification for a private message with proper grouping and state awareness
      */
     fun showPrivateMessageNotification(senderPeerID: String, senderNickname: String, messageContent: String) {
-        // Only show notifications if app is in background OR user is not viewing this specific chat
-        val shouldNotify = isAppInBackground || (!isAppInBackground && currentPrivateChatPeer != senderPeerID)
-        
-        if (!shouldNotify) {
-            Log.d(TAG, "Skipping notification - app in foreground and viewing chat with $senderNickname")
+        if (!shouldPostSystemNotification()) {
+            Log.d(TAG, "App is in foreground — playing subtle in-app chime instead of system notification ($senderNickname)")
+            playForegroundIncomingSound()
             return
         }
 
@@ -223,7 +280,7 @@ class NotificationManager(
         val activePeerNotificationIntervalExceeded =
           (currentTime - notificationIntervalManager.lastNetworkNotificationTime) > ACTIVE_PEERS_NOTIFICATION_TIME_INTERVAL
         val newPeers = peers - notificationIntervalManager.recentlySeenPeers
-        if (isAppInBackground && activePeerNotificationIntervalExceeded && newPeers.isNotEmpty()) {
+        if (shouldPostSystemNotification() && activePeerNotificationIntervalExceeded && newPeers.isNotEmpty()) {
             Log.d(TAG, "Showing notification for active peers")
             showNotificationForActivePeers(peers.size)
             notificationIntervalManager.setLastNetworkNotificationTime(currentTime)
@@ -321,7 +378,7 @@ class NotificationManager(
 
         // Use sender peer ID hash as notification ID to group messages from same sender
         val notificationId = senderPeerID.hashCode()
-        notificationManager.notify(notificationId, builder.build())
+        postNotification(notificationId, builder.build())
 
         Log.d(TAG, "Displayed notification for $contentTitle with ID $notificationId")
     }
@@ -347,20 +404,19 @@ class NotificationManager(
             context.getString(R.string.notification_active_peers_many, peersSize)
         }
 
-        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(context, ACTIVE_PEERS_CHANNEL_ID)
           .setSmallIcon(R.drawable.ic_notification)
           .setContentTitle(contentTitle)
           .setContentText(contentText)
           .setContentIntent(pendingIntent)
           .setAutoCancel(true)
-          .setChannelId(ACTIVE_PEERS_CHANNEL_ID)
           .setSilent(true)
           .setPriority(NotificationCompat.PRIORITY_MIN)
           .setCategory(NotificationCompat.CATEGORY_MESSAGE)
           .setShowWhen(true)
           .setWhen(System.currentTimeMillis())
 
-        notificationManager.notify(ACTIVE_PEERS_NOTIFICATION_ID, builder.build())
+        postNotification(ACTIVE_PEERS_NOTIFICATION_ID, builder.build())
         Log.d(TAG, "Displayed notification for $contentTitle with ID $ACTIVE_PEERS_NOTIFICATION_ID")
     }
     private fun showSummaryNotification() {
@@ -413,7 +469,7 @@ class NotificationManager(
         
         builder.setStyle(style)
 
-        notificationManager.notify(SUMMARY_NOTIFICATION_ID, builder.build())
+        postNotification(SUMMARY_NOTIFICATION_ID, builder.build())
 
         Log.d(TAG, "Displayed summary notification for $senderCount senders")
     }
@@ -453,11 +509,8 @@ class NotificationManager(
         isFirstMessage: Boolean = false,
         locationName: String? = null
     ) {
-        // Only show notifications if app is in background OR user is not viewing this specific geohash
-        val shouldNotify = isAppInBackground || (!isAppInBackground && currentGeohash != geohash)
-
-        if (!shouldNotify) {
-            Log.d(TAG, "Skipping geohash notification - app in foreground and viewing geohash $geohash")
+        if (!shouldPostSystemNotification()) {
+            Log.d(TAG, "Skipping geohash notification - app is in foreground ($geohash)")
             return
         }
 
@@ -571,7 +624,7 @@ class NotificationManager(
 
         // Use geohash hash as notification ID to group messages from same geohash
         val notificationId = 3000 + geohash.hashCode()
-        notificationManager.notify(notificationId, builder.build())
+        postNotification(notificationId, builder.build())
 
         Log.d(TAG, "Displayed geohash notification for $contentTitle with ID $notificationId")
     }
@@ -639,7 +692,7 @@ class NotificationManager(
 
         builder.setStyle(style)
 
-        notificationManager.notify(GEOHASH_SUMMARY_NOTIFICATION_ID, builder.build())
+        postNotification(GEOHASH_SUMMARY_NOTIFICATION_ID, builder.build())
 
         Log.d(TAG, "Displayed geohash summary notification for $geohashCount locations")
     }
@@ -676,13 +729,9 @@ class NotificationManager(
         messageContent: String,
         senderPeerID: String? = null
     ) {
-        // Only show notifications if app is in background OR user is not viewing mesh chat
-        // User is viewing mesh chat when: not in private chat AND not in geohash chat
-        val isViewingMeshChat = currentPrivateChatPeer == null && currentGeohash == null
-        val shouldNotify = isAppInBackground || (!isAppInBackground && !isViewingMeshChat)
-
-        if (!shouldNotify) {
-            Log.d(TAG, "Skipping mesh mention notification - app in foreground and viewing mesh chat")
+        if (!shouldPostSystemNotification()) {
+            Log.d(TAG, "Skipping mesh mention notification - app is in foreground")
+            playForegroundIncomingSound()
             return
         }
 
@@ -781,7 +830,7 @@ class NotificationManager(
 
         // Use a special notification ID for mesh mentions
         val notificationId = 4000 // Different from DM and geohash IDs
-        notificationManager.notify(notificationId, builder.build())
+        postNotification(notificationId, builder.build())
 
         Log.d(TAG, "Displayed mesh mention notification: $contentTitle")
     }

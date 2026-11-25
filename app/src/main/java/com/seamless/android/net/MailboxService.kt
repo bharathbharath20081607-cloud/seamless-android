@@ -86,6 +86,7 @@ class MailboxService private constructor(private val context: Context) {
     )
 
     private val authorizedOwners = ConcurrentHashMap<String, OwnerRegistration>()
+    private val authorizedOutboxTokens = ConcurrentHashMap<String, ByteArray>()
     private val storageLock = Any() // JVM lock for compound storage operations (safe on NanoHTTPD threads)
     private val ownerRegistryLock = Any()
     private val secureIdentityState = SecureIdentityStateManager(context)
@@ -128,8 +129,15 @@ class MailboxService private constructor(private val context: Context) {
     /**
      * Unregister an owner
      */
+    fun registerContactOutboxToken(recipientFolderId: String, token: String) {
+        val folder = recipientFolderId.trim().lowercase()
+        if (folder.isBlank() || token.length < 32) return
+        authorizedOutboxTokens[folder] = hashAccessToken(token)
+    }
+
     fun unregisterOwner(ownerId: String) {
         authorizedOwners.remove(ownerId)
+        authorizedOutboxTokens.remove(ownerId.trim().lowercase())
         persistAuthorizedOwners()
         synchronized(storageLock) {
             storedMessages.remove(ownerId)
@@ -299,7 +307,6 @@ class MailboxService private constructor(private val context: Context) {
                         val json = JSONObject().apply {
                             put("status", "ok")
                             put("version", "1.0")
-                            put("messages", storedMessages.values.sumOf { it.size })
                         }
                         newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
                     }
@@ -388,12 +395,13 @@ class MailboxService private constructor(private val context: Context) {
          * GET /api/files/{folderId} — Download all messages for a folder
          */
         private fun handleDownload(session: IHTTPSession, folderId: String): Response {
-            if (!hasOwnerAccess(session, folderId)) {
+            val cleanFolderId = folderId.trim().lowercase()
+            if (!hasOwnerAccess(session, cleanFolderId)) {
                 return newErrorResponse(Response.Status.FORBIDDEN, "Mailbox access denied")
             }
 
             val messages = synchronized(storageLock) {
-                storedMessages[folderId]?.toList() ?: emptyList()
+                storedMessages[cleanFolderId]?.toList() ?: emptyList()
             }
 
             val filesArray = JSONArray()
@@ -408,7 +416,7 @@ class MailboxService private constructor(private val context: Context) {
             }
 
             val json = JSONObject().apply {
-                put("folderId", folderId)
+                put("folderId", cleanFolderId)
                 put("files", filesArray)
             }
 
@@ -420,8 +428,16 @@ class MailboxService private constructor(private val context: Context) {
          * DELETE /api/files/{folderId}/{fileId} — Confirm receipt, delete
          */
         private fun handleDelete(session: IHTTPSession, folderId: String, fileId: String): Response {
-            if (!hasOwnerAccess(session, folderId)) {
+            val cleanFolderId = folderId.trim().lowercase()
+            if (!hasOwnerAccess(session, cleanFolderId)) {
                 return newErrorResponse(Response.Status.FORBIDDEN, "Mailbox access denied")
+            }
+
+            val belongsToFolder = synchronized(storageLock) {
+                storedMessages[cleanFolderId]?.any { it.id == fileId } == true
+            }
+            if (!belongsToFolder) {
+                return newErrorResponse(Response.Status.NOT_FOUND, "File not found in folder")
             }
 
             // Delete durable state first. A success response must never leave a
@@ -433,11 +449,11 @@ class MailboxService private constructor(private val context: Context) {
                 return newErrorResponse(Response.Status.INTERNAL_ERROR, "Mailbox storage unavailable")
             }
             synchronized(storageLock) {
-                storedMessages[folderId]?.removeAll { it.id == fileId }
+                storedMessages[cleanFolderId]?.removeAll { it.id == fileId }
             }
 
             updateStats()
-            Log.d(TAG, "🗑️ Deleted message $fileId from folder $folderId")
+            Log.d(TAG, "🗑️ Deleted message $fileId from folder $cleanFolderId")
 
             val json = JSONObject().apply { put("status", "deleted") }
             return newFixedLengthResponse(Response.Status.OK, "application/json", json.toString())
@@ -487,22 +503,19 @@ class MailboxService private constructor(private val context: Context) {
         private fun hasOwnerAccess(session: IHTTPSession, rawOwnerId: String): Boolean {
             val ownerId = rawOwnerId.trim().lowercase()
             val token = session.headers["x-seamless-mailbox-capability"].orEmpty()
+            if (token.isBlank()) return false
+
+            val tokenHash = hashAccessToken(token)
             val registration = authorizedOwners[ownerId]
             if (registration != null) {
-                if (token.isBlank()) return false
-                return MessageDigest.isEqual(registration.accessTokenHash, hashAccessToken(token))
+                return MessageDigest.isEqual(registration.accessTokenHash, tokenHash)
             }
-            if (false) {
-                if (false) {
-                    return true
-                }
+            val pairwiseTokenHash = authorizedOutboxTokens[ownerId]
+            if (pairwiseTokenHash != null) {
+                return MessageDigest.isEqual(pairwiseTokenHash, tokenHash)
             }
-            // Also support deterministic Tier 1 Outbox capability token derived from ownerId
             val deterministicToken = deriveContactOutboxToken(ownerId)
-            return token.isNotBlank() && MessageDigest.isEqual(
-                hashAccessToken(deterministicToken),
-                hashAccessToken(token)
-            )
+            return MessageDigest.isEqual(hashAccessToken(deterministicToken), tokenHash)
         }
     }
 

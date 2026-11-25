@@ -88,18 +88,46 @@ interface TorMessageDao {
         addressAliases: List<String>,
         readAt: Long = System.currentTimeMillis()
     )
+
+    @Query("""
+        SELECT id FROM tor_messages
+        WHERE (contactId = :contactId OR contactOnionAddress IN (:addressAliases))
+          AND isFromMe = 0 AND readAt IS NULL
+    """)
+    suspend fun getUnreadIncomingIdsIdentity(contactId: String, addressAliases: List<String>): List<String>
+
+    @Query("""
+        UPDATE tor_messages SET deliveryState = 'READ'
+        WHERE id IN (:messageIds)
+          AND isFromMe = 1
+          AND (contactId = :contactId OR contactOnionAddress IN (:addressAliases))
+    """)
+    suspend fun markOutgoingReadForContact(
+        messageIds: List<String>,
+        contactId: String,
+        addressAliases: List<String>
+    )
     
     /**
      * Update delivery state
      */
-    @Query("UPDATE tor_messages SET deliveryState = :deliveryState WHERE id = :messageId")
+    @Query("UPDATE tor_messages SET deliveryState = :deliveryState WHERE id = :messageId AND (deliveryState != 'READ' OR :deliveryState = 'READ')")
     suspend fun updateDeliveryState(messageId: String, deliveryState: String)
 
     @Query("UPDATE tor_messages SET deliveryRoute = :deliveryRoute WHERE id = :messageId")
     suspend fun updateDeliveryRoute(messageId: String, deliveryRoute: String)
 
-    @Query("UPDATE tor_messages SET deliveryState = :deliveryState, deliveryRoute = :deliveryRoute WHERE id = :messageId")
+    @Query("UPDATE tor_messages SET deliveryState = :deliveryState, deliveryRoute = :deliveryRoute WHERE id = :messageId AND (deliveryState != 'READ' OR :deliveryState = 'READ')")
     suspend fun updateDelivery(messageId: String, deliveryState: String, deliveryRoute: String)
+
+    @Query("UPDATE tor_messages SET attachmentPath = :path, attachmentMimeType = :mimeType WHERE id = :messageId")
+    suspend fun updateAttachment(messageId: String, path: String, mimeType: String)
+
+    @Query("UPDATE tor_messages SET text = :text WHERE id = :messageId")
+    suspend fun updateMessageText(messageId: String, text: String)
+
+    @Query("UPDATE tor_messages SET text = :text, attachmentPath = NULL, attachmentMimeType = NULL WHERE id = :messageId")
+    suspend fun clearAttachmentAndUpdateText(messageId: String, text: String)
     
     /**
      * Get a specific message

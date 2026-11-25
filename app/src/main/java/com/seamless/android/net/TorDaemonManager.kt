@@ -15,7 +15,14 @@ import org.briarproject.onionwrapper.TorWrapper
 import org.briarproject.onionwrapper.TorWrapper.HiddenServiceProperties
 import org.briarproject.onionwrapper.TorWrapper.Observer
 import org.briarproject.onionwrapper.TorWrapper.TorState
+import java.io.BufferedReader
 import java.io.File
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.nio.charset.StandardCharsets
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -50,7 +57,27 @@ class TorDaemonManager private constructor(private val application: Application)
             "x86_64" to "x86_64_pie",
             "x86" to "x86_pie"
         )
-        
+
+        private val STRICT_V3_ONION_ID = Regex("^[a-z2-7]{56}$")
+        private val BOOTSTRAP_CACHE_FILES = listOf(
+            "cached-microdesc-consensus",
+            "cached-microdescs",
+            "cached-microdescs.new",
+            "cached-certs",
+            "unverified-microdesc-consensus"
+        )
+
+        internal fun extractV3OnionId(endpoint: String): String? {
+            val raw = endpoint.trim()
+                .removePrefix("http://")
+                .removePrefix("https://")
+                .substringBefore("/")
+                .substringBefore(":")
+                .lowercase()
+                .removeSuffix(".onion")
+            return if (STRICT_V3_ONION_ID.matches(raw)) raw else null
+        }
+
         @Volatile
         private var instance: TorDaemonManager? = null
         
@@ -84,7 +111,17 @@ class TorDaemonManager private constructor(private val application: Application)
     
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val isRunning = AtomicBoolean(false)
+    private val startStopMutex = Mutex()
     private val publishMutex = Mutex()
+    private val handoverMutex = Mutex()
+    private val uploadedOnions = ConcurrentHashMap.newKeySet<String>()
+    @Volatile
+    private var consecutiveBootstrapFailures = 0
+    @Volatile
+    private var reachedConnectedThisStart = false
+
+    private fun normalizeOnionKey(onion: String): String =
+        onion.trim().lowercase().removeSuffix(".onion")
     
     // Executors for TorWrapper
     private val ioExecutor: Executor = Executors.newCachedThreadPool()
@@ -107,20 +144,40 @@ class TorDaemonManager private constructor(private val application: Application)
         loadSavedOnionAddress()
     }
     
+    private fun clearCorruptBootstrapCacheIfNeeded() {
+        if (consecutiveBootstrapFailures < 2) return
+        var deleted = 0
+        val dirs = listOf(File(torDirectory, ".tor"), torDirectory)
+        for (dir in dirs) {
+            if (!dir.exists()) continue
+            for (name in BOOTSTRAP_CACHE_FILES) {
+                val f = File(dir, name)
+                if (f.exists() && runCatching { f.delete() }.getOrDefault(false)) {
+                    deleted++
+                }
+            }
+        }
+        consecutiveBootstrapFailures = 0
+        Log.w(TAG, "🧹 Purged $deleted cached Tor consensus/microdescriptor file(s) after repeated bootstrap failures")
+    }
+
     /**
      * Start the Tor daemon
      */
     suspend fun start(): Boolean = withContext(Dispatchers.IO) {
+        startStopMutex.withLock {
         if (isRunning.get()) {
             Log.d(TAG, "Tor daemon already running")
             return@withContext true
         }
         
         try {
+            reachedConnectedThisStart = false
             _status.value = _status.value.copy(state = DaemonState.STARTING, error = null)
             
-            // Ensure directory exists
+            // Ensure directory exists and clear corrupt consensus caches after repeated failures
             torDirectory.mkdirs()
+            clearCorruptBootstrapCacheIfNeeded()
             
             // Get architecture
             val architecture = getArchitecture()
@@ -140,8 +197,8 @@ class TorDaemonManager private constructor(private val application: Application)
             loadMailboxPrivateKey()
             
             // ━━━ Configure Bridges / Pluggable Transports ━━━
-            // If PluggableTransportManager detected censorship and has bridge config,
-            // write it to the daemon's torrc so the C-Tor binary uses bridges for outbound.
+            val ptManager = PluggableTransportManager.getInstance(application)
+            val ptConfig = ptManager.transportConfig.value ?: runCatching { ptManager.initialize() }.getOrNull()
             configureBridges()
             
             // AndroidTorWrapper creates its own process wake lock and requires
@@ -177,6 +234,8 @@ class TorDaemonManager private constructor(private val application: Application)
                         }
                         TorState.CONNECTED -> {
                             Log.i(TAG, "✅ Tor connected to network!")
+                            reachedConnectedThisStart = true
+                            consecutiveBootstrapFailures = 0
                             _status.value = _status.value.copy(
                                 state = DaemonState.CONNECTED,
                                 bootstrapPercent = 100
@@ -190,6 +249,9 @@ class TorDaemonManager private constructor(private val application: Application)
                             _status.value = _status.value.copy(state = DaemonState.STOPPING)
                         }
                         TorState.STOPPED -> {
+                            if (!reachedConnectedThisStart) {
+                                consecutiveBootstrapFailures++
+                            }
                             _status.value = _status.value.copy(state = DaemonState.STOPPED)
                             isRunning.set(false)
                             stopHealthMonitoring()
@@ -209,7 +271,12 @@ class TorDaemonManager private constructor(private val application: Application)
                 
                 override fun onHsDescriptorUpload(onion: String) {
                     Log.i(TAG, "🧅 Hidden service descriptor uploaded: ${onion.take(10)}...")
-                    hsDescriptorUploaded = true
+                    val normalized = normalizeOnionKey(onion)
+                    if (normalized.isNotEmpty()) {
+                        uploadedOnions.add(normalized)
+                    } else {
+                        hiddenServiceProps?.onion?.let { uploadedOnions.add(normalizeOnionKey(it)) }
+                    }
                 }
                 
                 override fun onClockSkewDetected(skewSeconds: Long) {
@@ -222,8 +289,16 @@ class TorDaemonManager private constructor(private val application: Application)
             torWrapper = wrapper
             isRunning.set(true)
 
+            if (ptConfig != null && ptConfig.bridges.isNotEmpty()) {
+                runCatching { wrapper.enableBridges(ptConfig.bridges) }
+                    .onFailure { Log.w(TAG, "enableBridges failed: ${it.message}") }
+            } else {
+                runCatching { wrapper.disableBridges() }
+            }
+
             // Start Tor
             wrapper.start()
+            applyMobileTorConfig()
             applyIpv6Preference(wrapper)
 
             // Pre-register ADD_ONION on the local control socket immediately so the
@@ -238,6 +313,7 @@ class TorDaemonManager private constructor(private val application: Application)
             true
             
         } catch (e: Exception) {
+            consecutiveBootstrapFailures++
             val errorMessage = "${e::class.java.simpleName}: ${e.message ?: "unknown error"}"
             Log.e(TAG, "Failed to start Tor daemon: $errorMessage", e)
             isRunning.set(false)
@@ -247,6 +323,7 @@ class TorDaemonManager private constructor(private val application: Application)
                 error = errorMessage
             )
             false
+        }
         }
     }
     
@@ -440,6 +517,9 @@ class TorDaemonManager private constructor(private val application: Application)
             }
         }
 
+        if (!reachedConnectedThisStart) {
+            consecutiveBootstrapFailures++
+        }
         val message = "Hidden service publish failed after $maxAttempts attempts"
         Log.e(TAG, message)
         _status.value = _status.value.copy(state = DaemonState.ERROR, error = message)
@@ -460,14 +540,10 @@ class TorDaemonManager private constructor(private val application: Application)
         return try {
             wrapper.publishHiddenService(localPort, virtualPort, savedKey)
         } catch (e: Exception) {
-            if (savedKey.isNullOrBlank() || isCollisionError(e)) throw e
-
-            Log.w(TAG, "Saved hidden service key failed; rotating onion identity once: ${e.message}")
-            hiddenServicePrivateKey = null
-            runCatching {
-                SecureIdentityStateManager(application).clearSecureValues("tor_hs_private_key", "tor_hs_onion_address")
+            if (!savedKey.isNullOrBlank()) {
+                Log.w(TAG, "Preserving permanent onion private key after publish error: ${e.message}")
             }
-            wrapper.publishHiddenService(localPort, virtualPort, null)
+            throw e
         }
     }
 
@@ -480,14 +556,10 @@ class TorDaemonManager private constructor(private val application: Application)
         return try {
             wrapper.publishHiddenService(localPort, virtualPort, savedKey)
         } catch (e: Exception) {
-            if (savedKey.isNullOrBlank() || isCollisionError(e)) throw e
-
-            Log.w(TAG, "Saved mailbox hidden-service key failed; rotating mailbox identity once: ${e.message}")
-            mailboxServicePrivateKey = null
-            runCatching {
-                SecureIdentityStateManager(application).clearSecureValues("tor_mailbox_hs_private_key")
+            if (!savedKey.isNullOrBlank()) {
+                Log.w(TAG, "Preserving permanent mailbox private key after publish error: ${e.message}")
             }
-            wrapper.publishHiddenService(localPort, virtualPort, null)
+            throw e
         }
     }
 
@@ -513,6 +585,7 @@ class TorDaemonManager private constructor(private val application: Application)
      * Stop the Tor daemon
      */
     suspend fun stop() = withContext(Dispatchers.IO) {
+        startStopMutex.withLock {
         if (!isRunning.get()) return@withContext
         
         try {
@@ -524,6 +597,7 @@ class TorDaemonManager private constructor(private val application: Application)
             hiddenServicePublishJob = null
 
             hiddenServiceProps?.let { props ->
+                uploadedOnions.remove(normalizeOnionKey(props.onion))
                 try {
                     torWrapper?.removeHiddenService(props.onion)
                 } catch (e: Exception) {
@@ -531,12 +605,16 @@ class TorDaemonManager private constructor(private val application: Application)
                 }
             }
             mailboxServiceProps?.let { props ->
+                uploadedOnions.remove(normalizeOnionKey(props.onion))
                 try {
                     torWrapper?.removeHiddenService(props.onion)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error removing mailbox hidden service: ${e.message}")
                 }
             }
+            hiddenServiceProps = null
+            mailboxServiceProps = null
+            uploadedOnions.clear()
             
             // Stop Tor
             torWrapper?.stop()
@@ -549,6 +627,7 @@ class TorDaemonManager private constructor(private val application: Application)
             
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping Tor daemon: ${e.message}", e)
+        }
         }
     }
     
@@ -647,26 +726,54 @@ class TorDaemonManager private constructor(private val application: Application)
      * When Doze exits: enable networking → Tor rebuilds guard connections
      */
     fun enableNetwork(enable: Boolean) {
-        try {
-            val wrapper = torWrapper
-            if (wrapper != null && wrapper.isTorRunning) {
-                applyIpv6Preference(wrapper)
-                wrapper.enableNetwork(enable)
-                Log.i(TAG, "🔌 Tor networking ${if (enable) "enabled" else "disabled"}")
-                
-                // If re-enabling, force republish hidden service
-                if (enable) {
-                    scope.launch {
-                        delay(3000) // Wait for circuits to rebuild
-                        republishHiddenServiceWithRetry()
-                    }
-                }
-            } else {
-                Log.d(TAG, "Cannot toggle network — Tor not running")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to toggle network: ${e.message}")
+        val wrapper = torWrapper
+        if (wrapper == null || !wrapper.isTorRunning) {
+            Log.d(TAG, "Cannot toggle network — Tor not running")
+            return
         }
+        scope.launch {
+            try {
+                if (enable) {
+                    applyIpv6Preference(wrapper)
+                    wrapper.enableNetwork(true)
+                    applyMobileTorConfig()
+                    Log.i(TAG, "🔌 Tor networking enabled")
+                    delay(3000) // Wait for circuits to rebuild
+                    republishHiddenServiceWithRetry()
+                } else {
+                    wrapper.enableNetwork(false)
+                    Log.i(TAG, "🔌 Tor networking disabled")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to toggle network: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Forces C-Tor to tear down stalled OR sockets after a Wi-Fi <-> Cellular interface
+     * handover by bouncing DisableNetwork cleanly (since AbstractTorWrapper.enableNetwork(true)
+     * is a no-op when already true), re-applying dual-stack/mobile SETCONF tuning, and signaling NEWNYM.
+     */
+    suspend fun resetNetworkForHandover() = withContext(Dispatchers.IO) {
+        val wrapper = torWrapper ?: return@withContext
+        if (!wrapper.isTorRunning) return@withContext
+        handoverMutex.withLock {
+            try {
+                Log.i(TAG, "🔄 Resetting Tor circuits for network handover")
+                runCatching { wrapper.enableNetwork(false) }
+                delay(250)
+                applyIpv6Preference(wrapper)
+                wrapper.enableNetwork(true)
+                applyMobileTorConfig()
+                sendControlCommands(listOf("SIGNAL NEWNYM"))
+                uploadedOnions.clear()
+            } catch (e: Exception) {
+                Log.w(TAG, "Handover Tor reset failed: ${e.message}")
+            }
+        }
+        delay(2000)
+        republishHiddenServiceWithRetry()
     }
     
     /**
@@ -679,11 +786,13 @@ class TorDaemonManager private constructor(private val application: Application)
         val alreadyUploaded = publishMutex.withLock {
             val existing = hiddenServiceProps
             if (existing != null && existing.onion.isNotBlank() && torWrapper?.isTorRunning == true) {
-                if (hsDescriptorUploaded) {
+                val normalized = normalizeOnionKey(existing.onion)
+                if (uploadedOnions.contains(normalized)) {
                     Log.d(TAG, "✅ Hidden service ${existing.onion.take(16)}...onion descriptor already uploaded — skipping republish")
                     true
                 } else {
                     Log.i(TAG, "♻️ Removing un-uploaded hidden service ${existing.onion.take(16)}...onion before republish")
+                    uploadedOnions.remove(normalized)
                     runCatching { torWrapper?.removeHiddenService(existing.onion) }
                     hiddenServiceProps = null
                     false
@@ -739,36 +848,190 @@ class TorDaemonManager private constructor(private val application: Application)
      * Cleanup resources
      */
     fun destroy() {
-        scope.launch { stop() }
         stopHealthMonitoring()
-        scope.cancel()
         instance = null
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                stop()
+            } finally {
+                scope.cancel()
+            }
+        }
     }
     
-    // ===== Bridge Configuration =====
+    // ===== Control Port Tuning & Dual-Stack Configuration =====
+
+    private fun readControlReply(reader: BufferedReader): Pair<Boolean, List<String>> {
+        val lines = mutableListOf<String>()
+        while (true) {
+            val line = reader.readLine() ?: return false to lines
+            lines.add(line)
+            if (line.length >= 4 && line[3] == ' ') {
+                return line.startsWith("250 ") to lines
+            }
+            if (line.length >= 3 && (line[0] == '4' || line[0] == '5') && (line.length == 3 || line[3] == ' ')) {
+                return false to lines
+            }
+        }
+    }
+
+    private fun hexEncode(bytes: ByteArray): String {
+        val hexChars = "0123456789abcdef"
+        val out = CharArray(bytes.size * 2)
+        for (i in bytes.indices) {
+            val v = bytes[i].toInt() and 0xFF
+            out[i * 2] = hexChars[v ushr 4]
+            out[i * 2 + 1] = hexChars[v and 0x0F]
+        }
+        return String(out)
+    }
+
+    private fun findControlCookieFile(protocolInfoLines: List<String>): File? {
+        val cookieMatch = Regex("""COOKIEFILE="([^"]+)"""").find(protocolInfoLines.joinToString("\n"))
+        val candidates = buildList {
+            cookieMatch?.groupValues?.getOrNull(1)?.let { rawPath ->
+                add(File(rawPath.replace("\\\\", "\\").replace("\\\"", "\"")))
+            }
+            add(File(torDirectory, ".tor/control_auth_cookie"))
+            add(File(torDirectory, "control_auth_cookie"))
+            add(File(torDirectory, "control.authcookie"))
+        }
+        return candidates.firstOrNull { it.exists() && it.canRead() && it.length() > 0L }
+    }
+
+    private fun sendControlCommands(commands: List<String>): Boolean {
+        if (commands.isEmpty()) return true
+        return try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress("127.0.0.1", CONTROL_PORT), 1500)
+                socket.soTimeout = 1500
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII))
+                val writer = OutputStreamWriter(socket.getOutputStream(), StandardCharsets.US_ASCII)
+
+                writer.write("PROTOCOLINFO 1\r\n")
+                writer.flush()
+                val (infoOk, infoLines) = readControlReply(reader)
+                val infoJoined = infoLines.joinToString(" ")
+                val cookieFile = findControlCookieFile(infoLines)
+                val authLine = when {
+                    cookieFile != null -> "AUTHENTICATE ${hexEncode(cookieFile.readBytes())}\r\n"
+                    infoOk && infoJoined.contains("NULL") -> "AUTHENTICATE\r\n"
+                    else -> "AUTHENTICATE\r\n"
+                }
+                writer.write(authLine)
+                writer.flush()
+                val (authOk, authLines) = readControlReply(reader)
+                if (!authOk) {
+                    Log.w(TAG, "Tor control auth failed: ${authLines.lastOrNull()}")
+                    return false
+                }
+
+                var allOk = true
+                for (cmd in commands) {
+                    writer.write("$cmd\r\n")
+                    writer.flush()
+                    val (cmdOk, cmdLines) = readControlReply(reader)
+                    if (!cmdOk) {
+                        allOk = false
+                        Log.w(TAG, "Tor control '$cmd' returned: ${cmdLines.lastOrNull()}")
+                    }
+                }
+                runCatching {
+                    writer.write("QUIT\r\n")
+                    writer.flush()
+                }
+                allOk
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Tor control command failed: ${e.message}")
+            false
+        }
+    }
 
     /**
-     * Enables IPv6 guard connections only when the active network has a real
-     * global IPv6 default route. Many mobile carriers and home routers hand out
-     * IPv6 addresses with broken routing, which makes Tor loop on
-     * "No route to host (os error 113)" and stay at 0% bootstrap.
+     * Re-applies mobile-tuned C-Tor parameters over the authenticated ControlPort
+     * because onionwrapper's wrapper.start() overwrites torrc on disk.
+     */
+    private fun applyMobileTorConfig() {
+        val ok = sendControlCommands(
+            listOf(
+                "SETCONF KeepalivePeriod=30 NewCircuitPeriod=30 MaxCircuitDirtiness=600 LearnCircuitBuildTimeout=1 NumEntryGuards=2 SocksTimeout=45 CircuitStreamTimeout=20 ConnectionPadding=auto UseMicrodescriptors=1"
+            )
+        )
+        runCatching {
+            sendControlCommands(
+                listOf("SETCONF HiddenServicePoWDefensesEnabled=1 HiddenServiceNumIntroductionPoints=5")
+            )
+        }
+        runCatching {
+            sendControlCommands(
+                listOf("SETCONF ConfluxEnabled=1 ConfluxClientUX=high_throughput")
+            )
+        }
+        if (ok) {
+            Log.i(TAG, "⚙️ Applied mobile C-Tor 0.4.9 + Conflux tuning via batched ControlPort SETCONF")
+        }
+    }
+
+    /**
+     * Proactively trigger v3 hidden service descriptor fetches (`HSFETCH`) for active
+     * contacts and mailbox endpoints right after Tor connects or recovers from a handover,
+     * cutting first-message latency on cold starts.
+     */
+    suspend fun prefetchOnionDescriptors(endpoints: Collection<String>): Int = withContext(Dispatchers.IO) {
+        if (_status.value.state != DaemonState.CONNECTED) return@withContext 0
+        val onionIds = endpoints
+            .asSequence()
+            .mapNotNull { extractV3OnionId(it) }
+            .distinct()
+            .take(24)
+            .toList()
+        if (onionIds.isEmpty()) return@withContext 0
+        val ok = sendControlCommands(onionIds.map { "HSFETCH $it" })
+        if (ok) {
+            Log.i(TAG, "🔍 Prefetched ${onionIds.size} v3 onion descriptor(s) via HSFETCH")
+            onionIds.size
+        } else {
+            0
+        }
+    }
+
+    /**
+     * Applies true dual-stack (ClientUseIPv4=1 ClientUseIPv6=1), IPv6-only, or IPv4-only routing.
+     * Note: onionwrapper's enableIpv6(true) sets ClientUseIPv4=0, which breaks dual-stack phones
+     * that lack global IPv6 reachability; calling SETCONF directly preserves IPv4 + IPv6 together.
      */
     private fun applyIpv6Preference(wrapper: TorWrapper) {
-        val hasIpv6 = hasUsableIpv6Route()
+        val (hasV4, hasV6) = detectNetworkAddressAvailability()
         try {
-            wrapper.enableIpv6(hasIpv6)
-            Log.i(TAG, "IPv6 guard connections ${if (hasIpv6) "enabled" else "disabled (IPv4 only)"}")
+            when {
+                !hasV4 && hasV6 -> {
+                    wrapper.enableIpv6(true)
+                    sendControlCommands(listOf("SETCONF ClientUseIPv4=0 ClientUseIPv6=1"))
+                    Log.i(TAG, "IPv6-only mode enabled (ClientUseIPv4=0 ClientUseIPv6=1)")
+                }
+                hasV4 && hasV6 -> {
+                    wrapper.enableIpv6(false)
+                    sendControlCommands(listOf("SETCONF ClientUseIPv4=1 ClientUseIPv6=1"))
+                    Log.i(TAG, "Dual-stack mode enabled (ClientUseIPv4=1 ClientUseIPv6=1)")
+                }
+                else -> {
+                    wrapper.enableIpv6(false)
+                    sendControlCommands(listOf("SETCONF ClientUseIPv4=1 ClientUseIPv6=0"))
+                    Log.i(TAG, "IPv4-only mode enabled (ClientUseIPv4=1 ClientUseIPv6=0)")
+                }
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Could not apply IPv6 preference: ${e.message}")
         }
     }
 
-    private fun hasUsableIpv6Route(): Boolean {
+    private fun detectNetworkAddressAvailability(): Pair<Boolean, Boolean> {
         return try {
             val cm = application.getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
-                as? android.net.ConnectivityManager ?: return false
-            val network = cm.activeNetwork ?: return false
-            val props = cm.getLinkProperties(network) ?: return false
+                as? android.net.ConnectivityManager ?: return true to false
+            val network = cm.activeNetwork ?: return true to false
+            val props = cm.getLinkProperties(network) ?: return true to false
             val hasGlobalV6 = props.linkAddresses.any { la ->
                 val addr = la.address
                 addr is java.net.Inet6Address && !addr.isLinkLocalAddress &&
@@ -780,10 +1043,10 @@ class TorDaemonManager private constructor(private val application: Application)
                     route.destination.prefixLength == 0
             }
             val hasV4 = props.linkAddresses.any { it.address is java.net.Inet4Address }
-            // IPv6-only networks (NAT64/464XLAT) must keep IPv6 on.
-            (hasGlobalV6 && hasV6Default) || !hasV4
+            val hasUsableV6 = (hasGlobalV6 && hasV6Default) || !hasV4
+            hasV4 to hasUsableV6
         } catch (e: Exception) {
-            false
+            true to false
         }
     }
     
@@ -804,11 +1067,13 @@ class TorDaemonManager private constructor(private val application: Application)
                 appendLine("KeepalivePeriod 30")
                 appendLine("NewCircuitPeriod 15")
                 appendLine("MaxCircuitDirtiness 600")
-                appendLine("CircuitBuildTimeout 30")
+                appendLine("CircuitBuildTimeout 25")
                 appendLine("LearnCircuitBuildTimeout 1")
-                appendLine("NumEntryGuards 4")
+                appendLine("NumEntryGuards 2")
                 appendLine("SocksTimeout 30")
                 appendLine("CircuitStreamTimeout 20")
+                appendLine("ConfluxEnabled 1")
+                appendLine("ConfluxClientUX high_throughput")
                 if (bridgeLines.isNotEmpty()) {
                     appendLine(bridgeLines)
                 }
@@ -825,25 +1090,24 @@ class TorDaemonManager private constructor(private val application: Application)
     
     // ===== Health Monitoring =====
     
-    @Volatile
-    private var hsDescriptorUploaded = false
     private var healthJob: Job? = null
     
     /**
-     * Periodically check that our hidden service descriptor is uploaded.
-     * If it hasn't been uploaded within 2 minutes of CONNECTED state,
-     * force a republish.
+     * Periodically verify that our active hidden service descriptor has uploaded.
+     * Once confirmed via onHsDescriptorUpload(), C-Tor refreshes descriptors automatically;
+     * do NOT clear the confirmation map every 10 minutes (which triggered destructive DEL_ONION).
      */
     private fun startHealthMonitoring() {
         healthJob?.cancel()
-        hsDescriptorUploaded = false
         
         healthJob = scope.launch {
             // Wait 2 minutes for initial descriptor upload
             delay(120_000)
             
             while (isActive && isRunning.get()) {
-                if (!hsDescriptorUploaded) {
+                val currentOnion = hiddenServiceProps?.onion?.let(::normalizeOnionKey)
+                val isUploaded = !currentOnion.isNullOrEmpty() && uploadedOnions.contains(currentOnion)
+                if (!isUploaded) {
                     Log.w(TAG, "⚠️ HS descriptor not confirmed uploaded — forcing republish")
                     try {
                         republishHiddenServiceWithRetry()
@@ -851,9 +1115,6 @@ class TorDaemonManager private constructor(private val application: Application)
                         Log.e(TAG, "Health check republish failed: ${e.message}")
                     }
                 }
-                
-                // Reset flag and check again in 10 minutes
-                hsDescriptorUploaded = false
                 delay(600_000)
             }
         }

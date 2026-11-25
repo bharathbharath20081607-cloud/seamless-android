@@ -55,15 +55,19 @@ class OnionMessageQueue private constructor(private val context: Context) {
         // (4.5s, 6.3s, 8.8s, 12.3s ... capped) so a slow circuit is not flooded
         // with duplicates while a dead one is still detected quickly.
         const val ACK_RETRY_DELAY_MS = 4_500L
+        // Bulk image chunks traverse high-latency Tor circuits and must not flood duplicates at 4.5s.
+        const val ATTACHMENT_ACK_RETRY_DELAY_MS = 14_000L
         const val MAX_ACK_RETRY_DELAY_MS = 90_000L
         const val ACK_RETRY_GROWTH = 1.4
         // Persisting the whole queue (every photo chunk) through encrypted
         // preferences is expensive. Writes are coalesced into one snapshot
         // per debounce window instead of one per state transition.
         const val SAVE_DEBOUNCE_MS = 250L
-        // File chunks are ordered over the Tor stream; a 40-chunk window (~160 KB
-        // of 4 KB frames) keeps the circuit saturated without memory pressure.
-        const val ATTACHMENT_WINDOW_SIZE = 40
+        // File chunks are ordered over the Tor stream; a 40-cell window (~160 KB
+        // of 4 KB frames) keeps the circuit saturated while slicing 12 frames per
+        // dispatch pass so text, control, and call frames never wait behind an image burst.
+        const val ATTACHMENT_WINDOW_SIZE = 96
+        const val ATTACHMENT_DISPATCH_SLICE = 32
         
         // Cleanup
         const val MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000L  // 7 days
@@ -263,6 +267,72 @@ class OnionMessageQueue private constructor(private val context: Context) {
         message.id
     }
 
+    data class BatchFrameSpec(
+        val frame: OnionMessageProtocol.OnionFrame,
+        val mailboxPayload: ByteArray? = null,
+        val uiMessageId: String = frame.messageId.toString(),
+        val completesUiMessage: Boolean = true
+    )
+
+    suspend fun enqueueBatch(
+        recipientOnion: String,
+        specs: List<BatchFrameSpec>
+    ): List<String> = mutex.withLock {
+        if (specs.isEmpty()) return@withLock emptyList()
+        val now = System.currentTimeMillis()
+        val queue = queues.getOrPut(recipientOnion) { mutableListOf() }
+        val ids = ArrayList<String>(specs.size)
+        for (spec in specs) {
+            val id = spec.frame.messageId.toString()
+            queue.add(
+                QueuedMessage(
+                    id = id,
+                    recipientOnion = recipientOnion,
+                    frameData = spec.frame.encode(),
+                    mailboxPayload = spec.mailboxPayload,
+                    uiMessageId = spec.uiMessageId,
+                    completesUiMessage = spec.completesUiMessage,
+                    state = OnionMessageProtocol.DeliveryState.PENDING,
+                    nextRetryAt = now
+                )
+            )
+            deliveryStatus[id] = DeliveryInfo(
+                messageId = id,
+                state = OnionMessageProtocol.DeliveryState.PENDING
+            )
+            ids.add(id)
+        }
+        saveToDisk()
+        Log.d(TAG, "📬 Batch-enqueued ${ids.size} frames for $recipientOnion")
+        ids
+    }
+
+    suspend fun markSendingBatch(messageIds: Collection<String>) = mutex.withLock {
+        if (messageIds.isEmpty()) return@withLock
+        val now = System.currentTimeMillis()
+        for (messageId in messageIds) {
+            findMessage(messageId)?.let { message ->
+                if (message.state == OnionMessageProtocol.DeliveryState.SENT) {
+                    message.retryCount++
+                }
+                message.lastAttemptAt = now
+            }
+            updateMessageState(messageId, OnionMessageProtocol.DeliveryState.SENDING)
+        }
+        saveToDisk()
+    }
+
+    suspend fun markSentBatch(messageIds: Collection<String>) = mutex.withLock {
+        if (messageIds.isEmpty()) return@withLock
+        val now = System.currentTimeMillis()
+        for (messageId in messageIds) {
+            updateMessageState(messageId, OnionMessageProtocol.DeliveryState.SENT)
+            findMessage(messageId)?.lastAttemptAt = now
+            deliveryStatus[messageId]?.sentAt = now
+        }
+        saveToDisk()
+    }
+
     /**
      * Mark a message as actively sending.
      */
@@ -404,7 +474,8 @@ class OnionMessageQueue private constructor(private val context: Context) {
      */
     suspend fun getPendingMessages(recipientOnion: String): List<QueuedMessage> = mutex.withLock {
         val now = System.currentTimeMillis()
-        queues[recipientOnion]?.filter { isDueForDelivery(it, now) } ?: emptyList()
+        val messages = queues[recipientOnion] ?: return@withLock emptyList()
+        buildDispatchBatch(messages, now)
     }
     
     /**
@@ -413,11 +484,31 @@ class OnionMessageQueue private constructor(private val context: Context) {
     suspend fun getAllPendingMessages(): Map<String, List<QueuedMessage>> = mutex.withLock {
         val now = System.currentTimeMillis()
         queues.mapValues { (_, messages) ->
-            val regular = messages.filter {
-                isDueForDelivery(it, now) && !isAttachmentFrame(it)
-            }
-            regular + nextAttachmentWindow(messages, now)
+            buildDispatchBatch(messages, now)
         }.filterValues { it.isNotEmpty() }
+    }
+
+    private fun buildDispatchBatch(messages: List<QueuedMessage>, now: Long): List<QueuedMessage> {
+        val regular = messages
+            .asSequence()
+            .filter { isDueForDelivery(it, now) && !isAttachmentFrame(it) }
+            .sortedWith(compareBy<QueuedMessage> { dispatchPriority(it) }.thenBy { it.createdAt })
+            .toList()
+        val attachmentSlice = nextAttachmentWindow(messages, now).take(ATTACHMENT_DISPATCH_SLICE)
+        return regular + attachmentSlice
+    }
+
+    private fun dispatchPriority(message: QueuedMessage): Int = when (frameType(message)) {
+        OnionMessageProtocol.FrameType.CALL_SIGNAL,
+        OnionMessageProtocol.FrameType.CONTACT_EXCHANGE,
+        OnionMessageProtocol.FrameType.MAILBOX_EXCHANGE,
+        OnionMessageProtocol.FrameType.ACK,
+        OnionMessageProtocol.FrameType.NACK -> 0
+        OnionMessageProtocol.FrameType.SYNC_OFFER,
+        OnionMessageProtocol.FrameType.SYNC_REQUEST,
+        OnionMessageProtocol.FrameType.SYNC_BATCH,
+        OnionMessageProtocol.FrameType.SYNC_ACK -> 2
+        else -> 1
     }
     
     /**
@@ -492,9 +583,10 @@ class OnionMessageQueue private constructor(private val context: Context) {
     }
 
     private fun isAttachmentFrame(message: QueuedMessage): Boolean {
-        return when (OnionMessageProtocol.OnionFrame.decode(message.frameData)?.frameType) {
+        return when (frameType(message)) {
             OnionMessageProtocol.FrameType.FILE_META,
-            OnionMessageProtocol.FrameType.FILE_CHUNK -> true
+            OnionMessageProtocol.FrameType.FILE_CHUNK,
+            OnionMessageProtocol.FrameType.FILE_PARITY -> true
             else -> false
         }
     }
@@ -569,8 +661,14 @@ class OnionMessageQueue private constructor(private val context: Context) {
             .toList()
     }
 
-    private fun frameType(message: QueuedMessage): OnionMessageProtocol.FrameType? =
-        OnionMessageProtocol.OnionFrame.decode(message.frameData)?.frameType
+    private fun frameType(message: QueuedMessage): OnionMessageProtocol.FrameType? {
+        val data = message.frameData
+        return if (data.size >= OnionMessageProtocol.HEADER_SIZE) {
+            OnionMessageProtocol.FrameType.fromCode(data[33])
+        } else {
+            OnionMessageProtocol.OnionFrame.decode(data)?.frameType
+        }
+    }
 
     private fun findMessage(messageId: String): QueuedMessage? {
         for (queue in queues.values) {
@@ -580,11 +678,12 @@ class OnionMessageQueue private constructor(private val context: Context) {
         return null
     }
 
-    private fun ackRetryDelay(retryCount: Int): Long {
-        val delay = ACK_RETRY_DELAY_MS * ACK_RETRY_GROWTH.pow(retryCount.coerceIn(0, 12).toDouble())
+    private fun ackRetryDelay(retryCount: Int, isBulkChunk: Boolean = false): Long {
+        val baseDelay = if (isBulkChunk) ATTACHMENT_ACK_RETRY_DELAY_MS else ACK_RETRY_DELAY_MS
+        val delay = baseDelay * ACK_RETRY_GROWTH.pow(retryCount.coerceIn(0, 12).toDouble())
         return min(delay.toLong(), MAX_ACK_RETRY_DELAY_MS)
     }
-
+    
     private fun isDueForDelivery(message: QueuedMessage, now: Long): Boolean {
         if (isExpired(message, now)) return false
         return when (message.state) {
@@ -593,8 +692,11 @@ class OnionMessageQueue private constructor(private val context: Context) {
                 // Older persisted queues can contain SENT frames without an
                 // attempt timestamp. Treat those as due instead of leaving a
                 // message permanently stuck on a single tick.
+                val type = frameType(message)
+                val isBulkChunk = type == OnionMessageProtocol.FrameType.FILE_CHUNK ||
+                    type == OnionMessageProtocol.FrameType.FILE_PARITY
                 message.lastAttemptAt <= 0L ||
-                    now - message.lastAttemptAt >= ackRetryDelay(message.retryCount)
+                    now - message.lastAttemptAt >= ackRetryDelay(message.retryCount, isBulkChunk)
             }
             else -> false
         }
@@ -689,11 +791,19 @@ class OnionMessageQueue private constructor(private val context: Context) {
         
         // Remove empty queues
         queues.entries.removeIf { it.value.isEmpty() }
-        
-        // Cleanup old delivery status entries
-        deliveryStatus.entries.removeIf { (_, info) ->
-            val age = now - (info.readAt ?: info.deliveredAt ?: info.sentAt ?: 0L)
-            age > MESSAGE_TTL_MS
+
+        // Cleanup old delivery status entries (never delete entries for still-pending queued messages)
+        val activeIds = queues.values.flatten().mapTo(HashSet()) { it.id }
+        deliveryStatus.entries.removeIf { (id, info) ->
+            if (activeIds.contains(id) ||
+                info.state == OnionMessageProtocol.DeliveryState.PENDING ||
+                info.state == OnionMessageProtocol.DeliveryState.SENDING
+            ) {
+                false
+            } else {
+                val age = now - (info.readAt ?: info.deliveredAt ?: info.sentAt ?: now)
+                age > MESSAGE_TTL_MS
+            }
         }
         
         if (removed > 0) {

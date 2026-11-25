@@ -189,6 +189,8 @@ class TorHiddenServiceManager private constructor(private val context: Context) 
                 val daemonError = daemonManager.statusFlow.value.error ?: "Failed to start Tor daemon"
                 Log.e(TAG, "Failed to start Tor daemon: $daemonError")
                 isRunning.set(false)
+                daemonStatusJob?.cancel()
+                daemonStatusJob = null
                 serverJob?.cancel()
                 try {
                     serverSocket?.close()
@@ -241,13 +243,13 @@ class TorHiddenServiceManager private constructor(private val context: Context) 
             Log.e(TAG, "Error closing server socket: ${e.message}")
         }
         
-        // Stop Tor daemon
-        scope.launch {
-            torDaemonManager?.stop()
-        }
-        
+        // Stop Tor daemon (capture reference BEFORE clearing torDaemonManager)
+        val daemonToStop = torDaemonManager
         serverSocket = null
         torDaemonManager = null
+        scope.launch {
+            daemonToStop?.stop()
+        }
         _status.value = HiddenServiceStatus(state = HiddenServiceState.STOPPED)
         Log.i(TAG, "Hidden service stopped")
     }
@@ -306,9 +308,12 @@ class TorHiddenServiceManager private constructor(private val context: Context) 
 
                     clientSocket?.let { socket ->
                         Log.d(TAG, "📥 Incoming connection from ${socket.remoteSocketAddress}")
-
-                        // Notify listener
-                        connectionListener?.onIncomingConnection(socket)
+                        val listener = connectionListener
+                        if (listener != null) {
+                            listener.onIncomingConnection(socket)
+                        } else {
+                            runCatching { socket.close() }
+                        }
                     }
 
                 } catch (e: SocketException) {
@@ -332,6 +337,7 @@ class TorHiddenServiceManager private constructor(private val context: Context) 
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error accepting connection: ${e.message}")
+                    delay(500L)
                 }
             }
         }
