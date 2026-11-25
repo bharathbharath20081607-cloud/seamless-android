@@ -175,10 +175,7 @@ class NotificationManager(
     }
 
     fun playForegroundIncomingSound() {
-        val now = System.currentTimeMillis()
-        if (now - lastForegroundSoundAtMs < 900L) return
-        lastForegroundSoundAtMs = now
-        com.seamless.android.util.InAppSoundPlayer.playIncomingMessageSound(context)
+        // Silent while inside the app — notifications and sounds only fire when app is backgrounded/locked.
     }
 
     private fun shouldPostSystemNotification(): Boolean =

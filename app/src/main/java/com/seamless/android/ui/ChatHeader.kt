@@ -80,10 +80,10 @@ fun TorStatusDot(
     
     if (torStatus.mode != com.seamless.android.net.TorMode.OFF || onionReady) {
         val dotColor = when {
-            onionReady -> Color(0xFF00C851)
-            torStatus.running && torStatus.bootstrapPercent < 100 -> Color(0xFFFF9500) // Orange - bootstrapping
-            torStatus.running && torStatus.bootstrapPercent >= 100 -> Color(0xFF00C851) // Green - connected
-            else -> Color.Red // Red - error/disconnected
+            onionReady -> com.seamless.android.ui.theme.SeamlessColors.Emerald
+            torStatus.running && torStatus.bootstrapPercent < 100 -> com.seamless.android.ui.theme.SeamlessColors.Amber
+            torStatus.running && torStatus.bootstrapPercent >= 100 -> com.seamless.android.ui.theme.SeamlessColors.Emerald
+            else -> com.seamless.android.ui.theme.SeamlessColors.Error
         }
         Canvas(
             modifier = modifier
@@ -103,26 +103,27 @@ fun NoiseSessionIcon(
     sessionState: String?,
     modifier: Modifier = Modifier
 ) {
+    val mutedColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f)
     val (icon, color, contentDescription) = when (sessionState) {
         "uninitialized" -> Triple(
             Icons.Outlined.NoEncryption,
-            Color(0x87878700), // Grey - ready to establish
+            mutedColor,
             stringResource(R.string.cd_ready_for_handshake)
         )
         "handshaking" -> Triple(
             Icons.Outlined.Sync,
-            Color(0x87878700), // Grey - in progress
+            mutedColor,
             stringResource(R.string.cd_handshake_in_progress)
         )
         "established" -> Triple(
             Icons.Filled.Lock,
-            Color(0xFFFF9500), // Orange - secure
+            com.seamless.android.ui.theme.SeamlessColors.Emerald, // Precision system green E2EE lock
             stringResource(R.string.cd_encrypted)
         )
         else -> { // "failed" or any other state
             Triple(
                 Icons.Outlined.Warning,
-                Color(0xFFFF4444), // Red - error
+                com.seamless.android.ui.theme.SeamlessColors.Error, // Precision system red
                 stringResource(R.string.cd_handshake_failed)
             )
         }
@@ -177,7 +178,7 @@ fun NicknameEditor(
                 }
             ),
             modifier = Modifier
-                .widthIn(max = 120.dp)
+                .widthIn(min = 40.dp, max = 96.dp)
                 .horizontalScroll(scrollState)
         )
     }
@@ -670,23 +671,25 @@ private fun MainHeader(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Row(
-            modifier = Modifier.fillMaxHeight(),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight(),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // Hamburger menu button
             IconButton(
                 onClick = onMenuClick,
-                modifier = Modifier.size(42.dp) // Larger touch target
+                modifier = Modifier.size(40.dp)
             ) {
                 Icon(
                     imageVector = Icons.Outlined.Menu,
                     contentDescription = "Menu",
-                    modifier = Modifier.size(24.dp),
+                    modifier = Modifier.size(23.dp),
                     tint = colorScheme.primary
                 )
             }
             
-            Spacer(modifier = Modifier.width(4.dp))
+            Spacer(modifier = Modifier.width(2.dp))
             
             Text(
                 text = stringResource(R.string.app_brand),
@@ -695,6 +698,7 @@ private fun MainHeader(
                     letterSpacing = (-0.5).sp
                 ),
                 color = colorScheme.primary,
+                maxLines = 1,
                 modifier = Modifier.singleOrTripleClickable(
                     onSingleClick = onTitleClick,
                     onTripleClick = onTripleTitleClick
@@ -793,19 +797,6 @@ private fun MainHeader(
                     contentDescription = "Settings",
                     modifier = Modifier.size(20.dp),
                     tint = colorScheme.onSurface.copy(alpha = 0.75f)
-                )
-            }
-
-            // Unread private messages badge (click to open most recent DM)
-            if (hasUnreadPrivateMessages.isNotEmpty()) {
-                // Render icon directly to avoid symbol resolution issues
-                Icon(
-                    imageVector = Icons.Filled.Email,
-                    contentDescription = stringResource(R.string.cd_unread_private_messages),
-                    modifier = Modifier
-                        .size(16.dp)
-                        .clickable { viewModel.openLatestUnreadPrivateChat() },
-                    tint = com.seamless.android.ui.theme.SeamlessColors.Warning
                 )
             }
 

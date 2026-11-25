@@ -58,7 +58,6 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -79,6 +78,7 @@ import com.seamless.android.net.TorContactTrustState
 import com.seamless.android.net.TorMessagingService
 import com.seamless.android.net.TorRichChatCodec
 import com.seamless.android.service.TorForegroundService
+import com.seamless.android.ui.theme.tactilePress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -86,6 +86,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlin.math.abs
 
 /**
  * OnionChatScreen - Direct P2P chat with a contact via Tor hidden services
@@ -175,6 +176,42 @@ fun OnionChatScreen(
             isRecordingVoice = true
         } else {
             Toast.makeText(context, "Microphone permission is required for voice notes", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun launchCallWithChecks(isVideo: Boolean) {
+        when {
+            trustState == TorContactTrustState.BLOCKED ->
+                Toast.makeText(context, "Contact is blocked", Toast.LENGTH_SHORT).show()
+            trustState == TorContactTrustState.KEY_CHANGED ->
+                Toast.makeText(context, "Verify this contact before calling", Toast.LENGTH_SHORT).show()
+            !contactAddressReady ->
+                Toast.makeText(context, "Ask them to share their ready contact first", Toast.LENGTH_SHORT).show()
+            else -> {
+                callHaptics.toggleOn(view)
+                val hasMic = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                if (!isVideo) {
+                    if (hasMic) callManager.startOutgoingCall(contact)
+                    else callMicPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                } else {
+                    val hasCam = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.CAMERA
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (hasMic && hasCam) {
+                        callManager.startOutgoingCall(contact, isVideoCall = true)
+                    } else {
+                        val needed = buildList {
+                            if (!hasMic) add(Manifest.permission.RECORD_AUDIO)
+                            if (!hasCam) add(Manifest.permission.CAMERA)
+                        }.toTypedArray()
+                        callVideoPermLauncher.launch(needed)
+                    }
+                }
+            }
         }
     }
     val listState = rememberLazyListState()
@@ -286,7 +323,10 @@ fun OnionChatScreen(
                     messagingService.setChatVisible(contact.id, true)
                     scope.launch { messagingService.markContactReadAndSendReceipts(contact) }
                 }
-                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
+                Lifecycle.Event.ON_PAUSE -> {
+                    messagingService.setTyping(contact.id, false)
+                }
+                Lifecycle.Event.ON_STOP -> {
                     messagingService.setTyping(contact.id, false)
                     messagingService.setChatVisible(contact.id, false)
                 }
@@ -344,22 +384,19 @@ fun OnionChatScreen(
         }
     }
     
-    val glassColor = if (androidx.compose.foundation.isSystemInDarkTheme()) 
-        OnionUi.CanvasRaised
-    else 
-        Color.White.copy(alpha = 0.98f)
+    val glassColor = OnionUi.CanvasRaised
 
     // Disappearing messages state
     val privacyManager = com.seamless.android.ui.privacy.PrivacyPreferenceManager
     var disappearingTtl by remember { mutableStateOf(privacyManager.disappearingTtlMs.value) }
-    var showTimerMenu by remember { mutableStateOf(false) }
     val ttlOptions = listOf(
         0L to "Off",
-        5 * 60_000L to "5 minutes",
-        60 * 60_000L to "1 hour",
-        24 * 60 * 60_000L to "24 hours",
-        7 * 24 * 60 * 60_000L to "7 days"
+        5 * 60_000L to "5m",
+        60 * 60_000L to "1h",
+        24 * 60 * 60_000L to "24h",
+        7 * 24 * 60 * 60_000L to "7d"
     )
+    val timerShortLabel = ttlOptions.firstOrNull { it.first == disappearingTtl }?.second
 
     // Periodically cleanup expired disappearing messages
     LaunchedEffect(disappearingTtl) {
@@ -388,68 +425,83 @@ fun OnionChatScreen(
 
     Scaffold(
         topBar = {
-            Surface(
-                shadowElevation = 6.dp,
-                color = Color.Transparent
-            ) {
+            Column(modifier = Modifier.background(glassColor)) {
                 TopAppBar(
                     title = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            // Avatar with per-peer online indicator
-                            Box(contentAlignment = Alignment.BottomEnd) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(40.dp)
-                                        .clip(CircleShape)
-                                        .background(if (isPeerOnline) OnionUi.Accent else OnionUi.AccentStrong),
-                                    contentAlignment = Alignment.Center
-                                ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showTrustMenu = true }
+                        ) {
+                            OnionAvatar(
+                                label = contact.nickname,
+                                online = isPeerOnline,
+                                avatarId = contact.avatarId,
+                                size = 40.dp
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
-                                        text = contact.nickname.firstOrNull()?.uppercase() ?: "?",
-                                        color = Color.White,
-                                        fontWeight = FontWeight.Bold
+                                        text = contact.nickname,
+                                        color = OnionUi.TextPrimary,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 16.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    Icon(
+                                        imageVector = when (trustState) {
+                                            TorContactTrustState.VERIFIED -> Icons.Default.VerifiedUser
+                                            TorContactTrustState.KEY_CHANGED, TorContactTrustState.BLOCKED -> Icons.Default.Report
+                                            TorContactTrustState.UNVERIFIED -> Icons.Default.Shield
+                                        },
+                                        contentDescription = "Trust status",
+                                        tint = when (trustState) {
+                                            TorContactTrustState.VERIFIED -> OnionUi.Online
+                                            TorContactTrustState.KEY_CHANGED, TorContactTrustState.BLOCKED -> OnionUi.Danger
+                                            TorContactTrustState.UNVERIFIED -> OnionUi.TextMuted
+                                        },
+                                        modifier = Modifier.size(14.dp)
                                     )
                                 }
-                                // Online dot
-                                Box(
-                                    modifier = Modifier
-                                        .size(12.dp)
-                                        .clip(CircleShape)
-                                        .background(
-                                            if (isPeerOnline) Color(0xFF00E676) else Color(0xFF666666)
-                                        )
-                                )
-                            }
-                            
-                            Spacer(modifier = Modifier.width(12.dp))
-                            
-                            Column {
-                                Text(
-                                    contact.nickname,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    fontWeight = FontWeight.Bold
-                                )
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     val transportTier = messagingService.getActiveTransportTier(contact.onionAddress)
                                     val (peerStatusText, peerStatusColor) = when {
-                                        isPeerTyping -> "Typing" to OnionUi.Accent
+                                        isPeerTyping -> "Typing…" to OnionUi.Online
                                         !contactAddressReady -> "Address needs update" to OnionUi.Warning
                                         isPeerOnline && (lanPeers.contains(contact.onionAddress) ||
                                             transportTier == TorMessagingService.ActiveTransportTier.PHANTOM_LAN) ->
-                                            "⚡ Phantom-LAN" to OnionUi.Online
+                                            "Direct LAN · Encrypted" to OnionUi.Online
                                         isPeerOnline && transportTier == TorMessagingService.ActiveTransportTier.WARP_DUAL_TOR ->
-                                            "🚀 Dual-Warp" to OnionUi.Online
-                                        isPeerOnline -> "Connected" to OnionUi.Online
+                                            "Dual-Circuit · Encrypted" to OnionUi.Online
+                                        isPeerOnline -> "Online · Encrypted" to OnionUi.Online
                                         serviceState == TorMessagingService.ServiceState.RUNNING &&
-                                            !contact.mailboxOnion.isNullOrEmpty() -> "Mailbox ready" to OnionUi.Warning
-                                        serviceState == TorMessagingService.ServiceState.RUNNING -> "Tor ready" to OnionUi.Accent
+                                            !contact.mailboxOnion.isNullOrEmpty() -> "Mailbox ready" to OnionUi.TextSecondary
+                                        serviceState == TorMessagingService.ServiceState.RUNNING -> "Tor ready" to OnionUi.TextSecondary
                                         serviceState == TorMessagingService.ServiceState.WAITING_FOR_TOR -> "Connecting ${torStatus.bootstrapPercent}%" to OnionUi.Warning
-                                        serviceState == TorMessagingService.ServiceState.STARTING -> "Starting" to OnionUi.Warning
+                                        serviceState == TorMessagingService.ServiceState.STARTING -> "Starting…" to OnionUi.Warning
                                         serviceState == TorMessagingService.ServiceState.ERROR -> "Connection error" to OnionUi.Danger
-                                        else -> "Offline" to OnionUi.TextSecondary
+                                        else -> "Offline" to OnionUi.TextMuted
                                     }
-                                    OnionStatusChip(peerStatusText, peerStatusColor)
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .clip(CircleShape)
+                                            .background(peerStatusColor)
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    val timerSuffix = if (disappearingTtl > 0L && timerShortLabel != null) " · ⏱ $timerShortLabel" else ""
+                                    Text(
+                                        text = peerStatusText + timerSuffix,
+                                        color = if (isPeerTyping || isPeerOnline) peerStatusColor else OnionUi.TextSecondary,
+                                        fontSize = 11.5.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
                             }
                         }
@@ -459,512 +511,188 @@ fun OnionChatScreen(
                             Icon(
                                 Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = "Back",
-                                tint = MaterialTheme.colorScheme.onSurface
+                                tint = OnionUi.TextPrimary
                             )
                         }
                     },
                     actions = {
                         val callReady = contactAddressReady && trustState != TorContactTrustState.BLOCKED
-                        IconButton(onClick = {
-                            showSearchBar = !showSearchBar
-                            if (!showSearchBar) searchQuery = ""
-                        }) {
-                            Icon(
-                                Icons.Default.Search,
-                                contentDescription = "Search messages",
-                                tint = if (showSearchBar) OnionUi.Online else MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                        // Encrypted P2P + Tor Voice Call Button
                         Box(
                             contentAlignment = Alignment.Center,
                             modifier = Modifier
-                                .size(38.dp)
+                                .size(36.dp)
                                 .clip(CircleShape)
-                                .background(if (callReady) Color(0x1E34D399) else Color.Transparent)
+                                .background(if (callReady) OnionUi.Online.copy(alpha = 0.14f) else Color.Transparent)
                                 .then(
-                                    if (callReady) {
-                                        Modifier.border(0.9.dp, Color(0x4D34D399), CircleShape)
-                                    } else {
-                                        Modifier
-                                    }
+                                    if (callReady) Modifier.border(0.9.dp, OnionUi.Online.copy(alpha = 0.30f), CircleShape)
+                                    else Modifier
                                 )
                                 .clickable(role = androidx.compose.ui.semantics.Role.Button) {
-                                    when {
-                                        trustState == TorContactTrustState.BLOCKED -> {
-                                            Toast.makeText(context, "Contact is blocked", Toast.LENGTH_SHORT).show()
-                                        }
-                                        trustState == TorContactTrustState.KEY_CHANGED -> {
-                                            Toast.makeText(context, "Verify this contact before calling", Toast.LENGTH_SHORT).show()
-                                        }
-                                        !contactAddressReady -> {
-                                            Toast.makeText(context, "Ask them to share their ready Tor contact first", Toast.LENGTH_SHORT).show()
-                                        }
-                                        else -> {
-                                            callHaptics.toggleOn(view)
-                                            val hasMic = androidx.core.content.ContextCompat.checkSelfPermission(
-                                                context,
-                                                android.Manifest.permission.RECORD_AUDIO
-                                            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                                            if (hasMic) {
-                                                callManager.startOutgoingCall(contact)
-                                            } else {
-                                                callMicPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
-                                            }
-                                        }
-                                    }
+                                    launchCallWithChecks(isVideo = false)
                                 }
                         ) {
                             Icon(
                                 Icons.Rounded.Call,
                                 contentDescription = "Encrypted Voice Call",
-                                tint = if (callReady) {
-                                    Color(0xFF34D399)
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-                                },
-                                modifier = Modifier.size(19.dp)
+                                tint = if (callReady) OnionUi.Online else OnionUi.TextMuted.copy(alpha = 0.5f),
+                                modifier = Modifier.size(18.dp)
                             )
                         }
 
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
 
-                        // Encrypted HD P2P + Tor Video Call Button
                         Box(
                             contentAlignment = Alignment.Center,
                             modifier = Modifier
-                                .size(38.dp)
+                                .size(36.dp)
                                 .clip(CircleShape)
-                                .background(if (callReady) Color(0x1E38BDF8) else Color.Transparent)
+                                .background(if (callReady) OnionUi.Info.copy(alpha = 0.14f) else Color.Transparent)
                                 .then(
-                                    if (callReady) {
-                                        Modifier.border(0.9.dp, Color(0x4D38BDF8), CircleShape)
-                                    } else {
-                                        Modifier
-                                    }
+                                    if (callReady) Modifier.border(0.9.dp, OnionUi.Info.copy(alpha = 0.30f), CircleShape)
+                                    else Modifier
                                 )
                                 .clickable(role = androidx.compose.ui.semantics.Role.Button) {
-                                    when {
-                                        trustState == TorContactTrustState.BLOCKED -> {
-                                            Toast.makeText(context, "Contact is blocked", Toast.LENGTH_SHORT).show()
-                                        }
-                                        trustState == TorContactTrustState.KEY_CHANGED -> {
-                                            Toast.makeText(context, "Verify this contact before calling", Toast.LENGTH_SHORT).show()
-                                        }
-                                        !contactAddressReady -> {
-                                            Toast.makeText(context, "Ask them to share their ready Tor contact first", Toast.LENGTH_SHORT).show()
-                                        }
-                                        else -> {
-                                            callHaptics.toggleOn(view)
-                                            val hasMic = androidx.core.content.ContextCompat.checkSelfPermission(
-                                                context,
-                                                android.Manifest.permission.RECORD_AUDIO
-                                            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                                            val hasCam = androidx.core.content.ContextCompat.checkSelfPermission(
-                                                context,
-                                                android.Manifest.permission.CAMERA
-                                            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                                            if (hasMic && hasCam) {
-                                                callManager.startOutgoingCall(contact, isVideoCall = true)
-                                            } else {
-                                                val needed = buildList {
-                                                    if (!hasMic) add(android.Manifest.permission.RECORD_AUDIO)
-                                                    if (!hasCam) add(android.Manifest.permission.CAMERA)
-                                                }.toTypedArray()
-                                                callVideoPermLauncher.launch(needed)
-                                            }
-                                        }
-                                    }
+                                    launchCallWithChecks(isVideo = true)
                                 }
                         ) {
                             Icon(
                                 Icons.Rounded.Videocam,
-                                contentDescription = "Encrypted HD Video Call",
-                                tint = if (callReady) {
-                                    Color(0xFF38BDF8)
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-                                },
-                                modifier = Modifier.size(20.dp)
+                                contentDescription = "Encrypted Video Call",
+                                tint = if (callReady) OnionUi.Info else OnionUi.TextMuted.copy(alpha = 0.5f),
+                                modifier = Modifier.size(19.dp)
                             )
                         }
 
-                        Spacer(modifier = Modifier.width(4.dp))
-
-                        Box {
-                            IconButton(onClick = { showTrustMenu = true }) {
-                                Icon(
-                                    when (trustState) {
-                                        TorContactTrustState.VERIFIED -> Icons.Default.VerifiedUser
-                                        TorContactTrustState.KEY_CHANGED -> Icons.Default.Report
-                                        TorContactTrustState.BLOCKED -> Icons.Default.Block
-                                        TorContactTrustState.UNVERIFIED -> Icons.Default.GppMaybe
-                                    },
-                                    contentDescription = "Contact trust",
-                                    tint = when (trustState) {
-                                        TorContactTrustState.VERIFIED -> Color(0xFF00D4AA)
-                                        TorContactTrustState.KEY_CHANGED -> Color(0xFFFF5252)
-                                        TorContactTrustState.BLOCKED -> Color(0xFFFF5252)
-                                        TorContactTrustState.UNVERIFIED -> Color(0xFFFFC857)
-                                    }
-                                )
-                            }
-                            DropdownMenu(
-                                expanded = showTrustMenu,
-                                onDismissRequest = { showTrustMenu = false }
-                            ) {
-                                Text(
-                                    "Safety Number",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 14.sp,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                                )
-                                Text(
-                                    remember(contact.id) {
-                                        contact.safetyNumber(messagingService.getMyContactInfo().publicKey)
-                                    },
-                                    fontSize = 13.sp,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
-                                )
-                                HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
-                                DropdownMenuItem(
-                                    text = { Text("Mark verified") },
-                                    leadingIcon = { Icon(Icons.Default.VerifiedUser, contentDescription = null) },
-                                    onClick = {
-                                        contactManager.verifyContact(contact.id)
-                                        trustState = TorContactTrustState.VERIFIED
-                                        showTrustMenu = false
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Mark unverified") },
-                                    leadingIcon = { Icon(Icons.Default.GppMaybe, contentDescription = null) },
-                                    onClick = {
-                                        contactManager.markUnverified(contact.id)
-                                        trustState = TorContactTrustState.UNVERIFIED
-                                        showTrustMenu = false
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Block contact") },
-                                    leadingIcon = { Icon(Icons.Default.Block, contentDescription = null) },
-                                    onClick = {
-                                        contactManager.blockContact(contact.id)
-                                        trustState = TorContactTrustState.BLOCKED
-                                        showTrustMenu = false
-                                    }
-                                )
-                            }
-                        }
-
-                        // Disappearing Messages Timer
-                        Box {
-                            IconButton(onClick = { showTimerMenu = true }) {
-                                Icon(
-                                    if (disappearingTtl > 0L) Icons.Default.Timer else Icons.Default.TimerOff,
-                                    contentDescription = "Disappearing Messages",
-                                    tint = if (disappearingTtl > 0L) Color(0xFF00D4AA) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                                )
-                            }
-                            DropdownMenu(
-                                expanded = showTimerMenu,
-                                onDismissRequest = { showTimerMenu = false }
-                            ) {
-                                Text(
-                                    "Disappearing Messages",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 14.sp,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                                )
-                                ttlOptions.forEach { (ttl, label) ->
-                                    DropdownMenuItem(
-                                        text = {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text(label)
-                                                if (ttl == disappearingTtl) {
-                                                    Spacer(modifier = Modifier.width(8.dp))
-                                                    Icon(
-                                                        Icons.Default.Check,
-                                                        contentDescription = null,
-                                                        modifier = Modifier.size(16.dp),
-                                                        tint = Color(0xFF00D4AA)
-                                                    )
-                                                }
-                                            }
-                                        },
-                                        onClick = {
-                                            disappearingTtl = ttl
-                                            privacyManager.setDisappearingTtl(context, ttl)
-                                            showTimerMenu = false
-                                        }
-                                    )
-                                }
-                            }
+                        IconButton(onClick = { showTrustMenu = true }) {
+                            Icon(
+                                Icons.Default.MoreVert,
+                                contentDescription = "Contact details and security",
+                                tint = OnionUi.TextPrimary
+                            )
                         }
                     },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = glassColor
-                    )
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
                 )
+                HorizontalDivider(color = OnionUi.Hairline, thickness = 0.5.dp)
             }
         },
         bottomBar = {
-            // Modern glassmorphic composer with Quoted Reply, Burn-On-Read 🔥 toggle, + Attachment Sheet, and Sonic-Warp Mic
-            val inputGlassColor = if (androidx.compose.foundation.isSystemInDarkTheme()) OnionUi.CanvasRaised else Color.White
-            var isFocused by remember { mutableStateOf(false) }
-
-            Column(
-                modifier = Modifier
-                    .imePadding()
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
-            ) {
-                AnimatedVisibility(visible = replyingTo != null) {
-                    replyingTo?.let { target ->
-                        val preview = remember(target.text, target.attachmentMimeType) {
-                            TorRichChatCodec.friendlyPreviewText(target.text, target.attachmentMimeType)
-                        }
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(bottom = 8.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(OnionUi.Surface)
-                                .border(1.dp, OnionUi.Hairline, RoundedCornerShape(12.dp))
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .width(3.dp)
-                                    .height(28.dp)
-                                    .clip(RoundedCornerShape(2.dp))
-                                    .background(OnionUi.Online)
-                            )
-                            Spacer(Modifier.width(10.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    text = "Replying to ${if (target.isFromMe) "yourself" else contact.nickname}",
-                                    color = OnionUi.Online,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = preview,
-                                    color = OnionUi.TextSecondary,
-                                    fontSize = 12.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                            IconButton(onClick = { replyingTo = null }, modifier = Modifier.size(26.dp)) {
-                                Icon(Icons.Default.Close, "Cancel reply", tint = OnionUi.TextSecondary, modifier = Modifier.size(16.dp))
-                            }
-                        }
-                    }
-                }
-
-                if (isRecordingVoice) {
-                    SonicWarpRecorderBar(
-                        burnOnReadArmed = burnOnReadArmed,
-                        onCancel = { isRecordingVoice = false },
-                        onSendVoiceNote = { bytes, durationMs, fileName ->
-                            isRecordingVoice = false
-                            val useViewOnce = burnOnReadArmed
-                            burnOnReadArmed = false
-                            scope.launch {
-                                isSending = true
-                                try {
-                                    messagingService.sendAttachment(
-                                        contactId = contact.id,
-                                        bytes = bytes,
-                                        mimeType = "audio/mp4",
-                                        fileName = fileName,
-                                        durationMs = durationMs,
-                                        viewOnce = useViewOnce
-                                    ).onFailure { error ->
-                                        Toast.makeText(context, "Voice note failed: ${error.message}", Toast.LENGTH_SHORT).show()
-                                    }
-                                } finally {
-                                    isSending = false
-                                }
-                            }
-                        }
-                    )
-                } else {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .shadow(
-                                elevation = if (isFocused) 8.dp else 4.dp,
-                                shape = RoundedCornerShape(20.dp),
-                                spotColor = if (burnOnReadArmed) AegisEmberColor.copy(alpha = 0.35f)
-                                else if (isFocused) OnionUi.AccentStrong.copy(alpha = 0.32f)
-                                else Color.Black.copy(alpha = 0.18f)
-                            )
-                            .background(color = inputGlassColor, shape = RoundedCornerShape(20.dp))
-                            .border(
-                                width = if (burnOnReadArmed || isFocused) 1.5.dp else 1.dp,
-                                brush = SolidColor(
-                                    when {
-                                        burnOnReadArmed -> AegisEmberColor.copy(alpha = 0.85f)
-                                        isFocused -> OnionUi.AccentStrong
-                                        androidx.compose.foundation.isSystemInDarkTheme() -> Color.White.copy(alpha = 0.15f)
-                                        else -> Color.Black.copy(alpha = 0.1f)
-                                    }
-                                ),
-                                shape = RoundedCornerShape(20.dp)
-                            )
-                            .padding(horizontal = 6.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(
-                            onClick = {
-                                messagingService.speculativePrewarmBulk(contact.id)
-                                showAttachmentSheet = true
-                            },
-                            enabled = !isSending && trustState != TorContactTrustState.BLOCKED && contactAddressReady,
-                            modifier = Modifier.size(38.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.Add,
-                                contentDescription = "Attachments",
-                                tint = if (isSending) Color.White.copy(alpha = 0.35f) else OnionUi.Accent
-                            )
-                        }
-
-                        IconButton(
-                            onClick = { burnOnReadArmed = !burnOnReadArmed },
-                            modifier = Modifier.size(34.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.LocalFireDepartment,
-                                contentDescription = "Toggle Burn-On-Read",
-                                tint = if (burnOnReadArmed) AegisEmberColor else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-
-                        androidx.compose.foundation.text.BasicTextField(
-                            value = messageText,
-                            onValueChange = {
-                                messageText = it
-                                messagingService.setTyping(contact.id, it.isNotBlank())
-                            },
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(horizontal = 8.dp, vertical = 10.dp)
-                                .onFocusChanged {
-                                    isFocused = it.isFocused
-                                    if (!it.isFocused) messagingService.setTyping(contact.id, false)
-                                },
-                            textStyle = MaterialTheme.typography.bodyMedium.copy(
-                                color = MaterialTheme.colorScheme.onSurface,
-                                fontSize = 15.sp
-                            ),
-                            cursorBrush = SolidColor(if (burnOnReadArmed) AegisEmberColor else Color(0xFF00C6FF)),
-                            decorationBox = { innerTextField ->
-                                if (messageText.isEmpty()) {
-                                    Text(
-                                        if (burnOnReadArmed) "View-Once secret message…" else "Message…",
-                                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp),
-                                        color = if (burnOnReadArmed) AegisEmberColor.copy(alpha = 0.8f)
-                                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                innerTextField()
-                            }
-                        )
-
-                        Spacer(modifier = Modifier.width(6.dp))
-
-                        if (messageText.isBlank()) {
-                            FloatingActionButton(
-                                onClick = {
-                                    when {
-                                        trustState == TorContactTrustState.BLOCKED ->
-                                            Toast.makeText(context, "Contact is blocked", Toast.LENGTH_SHORT).show()
-                                        trustState == TorContactTrustState.KEY_CHANGED ->
-                                            Toast.makeText(context, "Verify this contact before recording", Toast.LENGTH_SHORT).show()
-                                        !contactAddressReady ->
-                                            Toast.makeText(context, "Ask them to share again after Tor is ready", Toast.LENGTH_SHORT).show()
-                                        !isSending -> {
-                                            messagingService.speculativePrewarmBulk(contact.id)
-                                            val hasMic = ContextCompat.checkSelfPermission(
-                                                context,
-                                                Manifest.permission.RECORD_AUDIO
-                                            ) == PackageManager.PERMISSION_GRANTED
-                                            if (hasMic) isRecordingVoice = true
-                                            else voicePermLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                        }
-                                    }
-                                },
-                                modifier = Modifier.size(44.dp),
-                                containerColor = if (burnOnReadArmed) AegisEmberColor else OnionUi.Online,
-                                elevation = FloatingActionButtonDefaults.elevation(0.dp, 0.dp)
-                            ) {
-                                if (isSending) {
-                                    CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.Black, strokeWidth = 2.dp)
-                                } else {
-                                    Icon(Icons.Default.Mic, contentDescription = "Record voice note", tint = Color.Black)
-                                }
-                            }
-                        } else {
-                            FloatingActionButton(
-                                onClick = {
-                                    if (trustState == TorContactTrustState.BLOCKED) {
-                                        Toast.makeText(context, "Contact is blocked", Toast.LENGTH_SHORT).show()
-                                    } else if (trustState == TorContactTrustState.KEY_CHANGED) {
-                                        Toast.makeText(context, "Verify this contact before sending", Toast.LENGTH_SHORT).show()
-                                    } else if (!contactAddressReady) {
-                                        Toast.makeText(context, "Ask them to share again after Tor is ready", Toast.LENGTH_SHORT).show()
-                                    } else if (messageText.isNotBlank() && !isSending) {
-                                        val text = messageText
-                                        val replyId = replyingTo?.id
-                                        val useBurn = burnOnReadArmed
-                                        messageText = ""
-                                        replyingTo = null
-                                        burnOnReadArmed = false
-                                        emojiEffectText = if (useBurn) "🔥" else text
-                                        emojiEffectToken++
-                                        messagingService.setTyping(contact.id, false)
-                                        isSending = true
-                                        scope.launch {
-                                            try {
-                                                messagingService.sendMessage(
-                                                    contactId = contact.id,
-                                                    text = text,
-                                                    replyToId = replyId,
-                                                    burnOnRead = useBurn
-                                                ).onFailure { error ->
-                                                    Toast.makeText(context, "Failed to send: ${error.message}", Toast.LENGTH_SHORT).show()
-                                                }
-                                            } catch (e: Exception) {
-                                                Toast.makeText(context, "Failed to send: ${e.message}", Toast.LENGTH_SHORT).show()
-                                            } finally {
-                                                isSending = false
-                                            }
-                                        }
-                                    }
-                                },
-                                modifier = Modifier.size(44.dp),
-                                containerColor = if (burnOnReadArmed) AegisEmberColor else OnionUi.AccentStrong,
-                                elevation = FloatingActionButtonDefaults.elevation(0.dp, 0.dp)
-                            ) {
-                                if (isSending) {
-                                    CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
-                                } else {
-                                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = Color.White)
-                                }
-                            }
-                        }
-                    }
-                }
+            val replyPreview = replyingTo?.let { target ->
+                TorRichChatCodec.friendlyPreviewText(target.text, target.attachmentMimeType)
             }
+            SovereignChatComposer(
+                modifier = Modifier.imePadding(),
+                value = messageText,
+                onValueChange = {
+                    messageText = it
+                    messagingService.setTyping(contact.id, it.isNotBlank())
+                },
+                placeholder = "Encrypted message…",
+                burnPlaceholder = "View-Once secret message…",
+                canSend = messageText.isNotBlank(),
+                enabled = trustState != TorContactTrustState.BLOCKED && contactAddressReady,
+                mediaEnabled = !isSending,
+                isSending = isSending,
+                burnOnReadArmed = burnOnReadArmed,
+                onToggleBurnOnRead = { burnOnReadArmed = !burnOnReadArmed },
+                isRecordingVoice = isRecordingVoice,
+                onStartVoiceNote = {
+                    when {
+                        trustState == TorContactTrustState.BLOCKED ->
+                            Toast.makeText(context, "Contact is blocked", Toast.LENGTH_SHORT).show()
+                        trustState == TorContactTrustState.KEY_CHANGED ->
+                            Toast.makeText(context, "Verify this contact before recording", Toast.LENGTH_SHORT).show()
+                        !contactAddressReady ->
+                            Toast.makeText(context, "Ask them to share again after Tor is ready", Toast.LENGTH_SHORT).show()
+                        !isSending -> {
+                            messagingService.speculativePrewarmBulk(contact.id)
+                            val hasMic = ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.RECORD_AUDIO
+                            ) == PackageManager.PERMISSION_GRANTED
+                            if (hasMic) isRecordingVoice = true
+                            else voicePermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    }
+                },
+                onCancelVoiceNote = { isRecordingVoice = false },
+                onSendVoiceNote = { bytes, durationMs, fileName ->
+                    isRecordingVoice = false
+                    val useViewOnce = burnOnReadArmed
+                    burnOnReadArmed = false
+                    scope.launch {
+                        isSending = true
+                        try {
+                            messagingService.sendAttachment(
+                                contactId = contact.id,
+                                bytes = bytes,
+                                mimeType = "audio/mp4",
+                                fileName = fileName,
+                                durationMs = durationMs,
+                                viewOnce = useViewOnce
+                            ).onFailure { error ->
+                                Toast.makeText(context, "Voice note failed: ${error.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        } finally {
+                            isSending = false
+                        }
+                    }
+                },
+                onOpenAttachments = {
+                    when {
+                        trustState == TorContactTrustState.BLOCKED ->
+                            Toast.makeText(context, "Contact is blocked", Toast.LENGTH_SHORT).show()
+                        trustState == TorContactTrustState.KEY_CHANGED ->
+                            Toast.makeText(context, "Verify this contact before sending", Toast.LENGTH_SHORT).show()
+                        !contactAddressReady ->
+                            Toast.makeText(context, "Ask them to share their ready contact first", Toast.LENGTH_SHORT).show()
+                        !isSending -> {
+                            messagingService.speculativePrewarmBulk(contact.id)
+                            showAttachmentSheet = true
+                        }
+                    }
+                },
+                onSendText = {
+                    if (trustState == TorContactTrustState.BLOCKED) {
+                        Toast.makeText(context, "Contact is blocked", Toast.LENGTH_SHORT).show()
+                    } else if (trustState == TorContactTrustState.KEY_CHANGED) {
+                        Toast.makeText(context, "Verify this contact before sending", Toast.LENGTH_SHORT).show()
+                    } else if (!contactAddressReady) {
+                        Toast.makeText(context, "Ask them to share again after Tor is ready", Toast.LENGTH_SHORT).show()
+                    } else if (messageText.isNotBlank() && !isSending) {
+                        val text = messageText
+                        val replyId = replyingTo?.id
+                        val useBurn = burnOnReadArmed
+                        messageText = ""
+                        replyingTo = null
+                        burnOnReadArmed = false
+                        emojiEffectText = if (useBurn) "🔥" else text
+                        emojiEffectToken++
+                        messagingService.setTyping(contact.id, false)
+                        isSending = true
+                        scope.launch {
+                            try {
+                                messagingService.sendMessage(
+                                    contactId = contact.id,
+                                    text = text,
+                                    replyToId = replyId,
+                                    burnOnRead = useBurn
+                                ).onFailure { error ->
+                                    Toast.makeText(context, "Failed to send: ${error.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Failed to send: ${e.message}", Toast.LENGTH_SHORT).show()
+                            } finally {
+                                isSending = false
+                            }
+                        }
+                    }
+                },
+                replySenderLabel = replyingTo?.let { if (it.isFromMe) "yourself" else contact.nickname },
+                replyPreviewText = replyPreview,
+                replyAccentColor = OnionUi.AccentBlue,
+                onCancelReply = { replyingTo = null }
+            )
         },
         containerColor = Color.Transparent
     ) { paddingValues ->
@@ -973,6 +701,16 @@ fun OnionChatScreen(
             else messagesFromDb.filter { msg ->
                 val searchable = TorRichChatCodec.friendlyPreviewText(msg.text, msg.attachmentMimeType)
                 searchable.contains(searchQuery, ignoreCase = true)
+            }
+        }
+        val isAtBottom by remember(displayedMessages.size) {
+            derivedStateOf {
+                val lastIdx = displayedMessages.lastIndex
+                if (lastIdx < 0) true
+                else {
+                    val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: lastIdx
+                    lastVisible >= lastIdx - 1
+                }
             }
         }
         Box(
@@ -995,72 +733,185 @@ fun OnionChatScreen(
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(32.dp),
+                            .padding(28.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
-                        Icon(
-                            if (searchQuery.isNotBlank()) Icons.Default.Search else Icons.Default.Lock,
-                            contentDescription = null,
-                            modifier = Modifier.size(64.dp),
-                            tint = OnionUi.Accent.copy(alpha = 0.56f)
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            if (searchQuery.isNotBlank()) "No matching messages" else "End-to-End Encrypted",
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            if (searchQuery.isNotBlank()) "Try another keyword in this encrypted chat."
-                            else "Messages, voice notes, 1 MB files & View-Once capsules are E2EE over Tor.",
-                            color = OnionUi.TextSecondary,
-                            fontSize = 14.sp,
-                            textAlign = TextAlign.Center
-                        )
-                        if (searchQuery.isBlank()) {
-                            Spacer(modifier = Modifier.height(24.dp))
-                            StatusIndicator(serviceState, torStatus, contactAddressReady, isPeerOnline)
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(24.dp))
+                                .background(OnionUi.Surface)
+                                .border(1.dp, OnionUi.Hairline, RoundedCornerShape(24.dp))
+                                .padding(horizontal = 24.dp, vertical = 28.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            OnionAvatar(
+                                label = contact.nickname,
+                                online = isPeerOnline,
+                                avatarId = contact.avatarId,
+                                size = 68.dp
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = if (searchQuery.isNotBlank()) "No matching messages"
+                                else "Encrypted chat with ${contact.nickname}",
+                                color = OnionUi.TextPrimary,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = if (searchQuery.isNotBlank()) "Try another keyword in this encrypted conversation."
+                                else "Messages, voice notes, files, and View-Once notes travel peer-to-peer over Tor — zero central servers.",
+                                color = OnionUi.TextSecondary,
+                                fontSize = 13.5.sp,
+                                lineHeight = 20.sp,
+                                textAlign = TextAlign.Center
+                            )
+                            if (searchQuery.isBlank()) {
+                                Spacer(modifier = Modifier.height(18.dp))
+                                StatusIndicator(serviceState, torStatus, contactAddressReady, isPeerOnline)
+                            }
                         }
                     }
                 } else {
+                    val timeFmt = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
-                        items(displayedMessages, key = { it.id }) { message ->
-                            TorMessageBubble(
-                                message = message,
-                                contactNickname = contact.nickname,
-                                isEdited = message.id in directEditedIds,
-                                isDeleted = message.id in directDeletedIds ||
-                                    TorRichChatCodec.parseReply(message.text).body == TorRichChatCodec.DELETED_DIRECT_MESSAGE_TEXT,
-                                isBurned = message.id in directBurnedIds ||
-                                    TorRichChatCodec.parseReply(message.text).body == TorRichChatCodec.BURNED_CAPSULE_TEXT,
-                                hasShredReceipt = message.id in directShredReceipts,
-                                reactions = directReactionsMap[message.id].orEmpty(),
-                                onLongPress = { actionTargetMessage = message },
-                                onQuotedMessageClick = { targetId ->
-                                    val idx = displayedMessages.indexOfFirst { it.id == targetId }
-                                    if (idx >= 0) scope.launch { listState.animateScrollToItem(idx) }
-                                },
-                                onReactionClick = { emoji ->
-                                    emojiEffectText = emoji
-                                    emojiEffectToken++
-                                    scope.launch { messagingService.sendDirectReaction(contact.id, message.id, emoji) }
-                                },
-                                onOpenBurnCapsule = { activeBurnTarget = message }
-                            )
+                        items(displayedMessages.size, key = { displayedMessages[it].id }) { index ->
+                            val message = displayedMessages[index]
+                            val previous = displayedMessages.getOrNull(index - 1)
+                            val next = displayedMessages.getOrNull(index + 1)
+                            val showDateHeader = previous == null || !isSameCalendarDay(previous.timestamp, message.timestamp)
+                            if (showDateHeader) {
+                                DateHeaderPill(formatDateHeader(message.timestamp))
+                            }
+
+                            val cleanBody = remember(message.text) { TorRichChatCodec.parseReply(message.text).body }
+                            val isMsgDeleted = message.id in directDeletedIds ||
+                                cleanBody == TorRichChatCodec.DELETED_DIRECT_MESSAGE_TEXT
+                            val isMsgBurned = message.id in directBurnedIds ||
+                                cleanBody == TorRichChatCodec.BURNED_CAPSULE_TEXT
+                            val callEvent = remember(message.id, cleanBody, message.attachmentPath, isMsgDeleted, isMsgBurned) {
+                                if (message.attachmentPath == null && !isMsgDeleted && !isMsgBurned) {
+                                    parseCallEventText(cleanBody)
+                                } else null
+                            }
+
+                            if (callEvent != null) {
+                                Spacer(modifier = Modifier.height(if (showDateHeader) 2.dp else 6.dp))
+                                CallEventChatCard(
+                                    event = callEvent,
+                                    timestampText = timeFmt.format(Date(message.timestamp)),
+                                    isFromMe = message.isFromMe,
+                                    onCallBack = { isVideo -> launchCallWithChecks(isVideo = isVideo) }
+                                )
+                            } else {
+                                fun isBubbleClusterable(neighbor: TorMessageEntity?): Boolean {
+                                    if (neighbor == null) return false
+                                    if (neighbor.isFromMe != message.isFromMe) return false
+                                    if (!isSameCalendarDay(neighbor.timestamp, message.timestamp)) return false
+                                    if (abs(message.timestamp - neighbor.timestamp) > 180_000L) return false
+                                    val neighborBody = TorRichChatCodec.parseReply(neighbor.text).body
+                                    return neighbor.attachmentPath != null || parseCallEventText(neighborBody) == null
+                                }
+                                val isFirstInCluster = showDateHeader || !isBubbleClusterable(previous)
+                                val isLastInCluster = next == null ||
+                                    !isSameCalendarDay(message.timestamp, next.timestamp) ||
+                                    !isBubbleClusterable(next)
+                                if (!showDateHeader && isFirstInCluster) {
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                }
+                                TorMessageBubble(
+                                    message = message,
+                                    contactNickname = contact.nickname,
+                                    isFirstInCluster = isFirstInCluster,
+                                    isLastInCluster = isLastInCluster,
+                                    isEdited = message.id in directEditedIds,
+                                    isDeleted = isMsgDeleted,
+                                    isBurned = isMsgBurned,
+                                    hasShredReceipt = message.id in directShredReceipts,
+                                    reactions = directReactionsMap[message.id].orEmpty(),
+                                    onLongPress = { actionTargetMessage = message },
+                                    onQuotedMessageClick = { targetId ->
+                                        val idx = displayedMessages.indexOfFirst { it.id == targetId }
+                                        if (idx >= 0) scope.launch { listState.animateScrollToItem(idx) }
+                                    },
+                                    onReactionClick = { emoji ->
+                                        emojiEffectText = emoji
+                                        emojiEffectToken++
+                                        scope.launch { messagingService.sendDirectReaction(contact.id, message.id, emoji) }
+                                    },
+                                    onOpenBurnCapsule = { activeBurnTarget = message }
+                                )
+                            }
                         }
                     }
                 }
             }
+
+            androidx.compose.animation.AnimatedVisibility(
+                visible = displayedMessages.isNotEmpty() && !isAtBottom,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = 14.dp)
+            ) {
+                JumpToLatestButton(
+                    onClick = {
+                        if (displayedMessages.isNotEmpty()) {
+                            scope.launch { listState.animateScrollToItem(displayedMessages.lastIndex) }
+                        }
+                    }
+                )
+            }
+
             TorEmojiBurst(emojiEffectToken, emojiEffectText)
         }
+    }
+
+    if (showTrustMenu) {
+        ContactSecuritySheet(
+            contact = contact,
+            isPeerOnline = isPeerOnline,
+            trustState = trustState,
+            safetyNumber = remember(contact.id) {
+                contact.safetyNumber(messagingService.getMyContactInfo().publicKey)
+            },
+            disappearingTtl = disappearingTtl,
+            ttlOptions = ttlOptions,
+            onSearchMessages = {
+                showTrustMenu = false
+                showSearchBar = true
+            },
+            onSelectTtl = { ttl ->
+                disappearingTtl = ttl
+                privacyManager.setDisappearingTtl(context, ttl)
+            },
+            onVerify = {
+                contactManager.verifyContact(contact.id)
+                trustState = TorContactTrustState.VERIFIED
+            },
+            onUnverify = {
+                contactManager.markUnverified(contact.id)
+                trustState = TorContactTrustState.UNVERIFIED
+            },
+            onToggleBlock = {
+                if (trustState == TorContactTrustState.BLOCKED) {
+                    contactManager.markUnverified(contact.id)
+                    trustState = TorContactTrustState.UNVERIFIED
+                } else {
+                    contactManager.blockContact(contact.id)
+                    trustState = TorContactTrustState.BLOCKED
+                }
+            },
+            onDismiss = { showTrustMenu = false }
+        )
     }
 
     if (showAttachmentSheet) {
@@ -1232,78 +1083,75 @@ private fun StatusIndicator(
     contactAddressReady: Boolean,
     isPeerOnline: Boolean
 ) {
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = Color(0xFF2A2A3E)
-        ),
-        shape = RoundedCornerShape(12.dp)
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(OnionUi.SurfacePressed)
+            .border(1.dp, OnionUi.Hairline, RoundedCornerShape(999.dp))
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            when {
-                !contactAddressReady -> {
-                    Icon(
-                        Icons.Default.Warning,
-                        contentDescription = null,
-                        tint = Color(0xFFFFC857),
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Contact address missing", color = Color.White, fontSize = 12.sp)
-                }
-                isPeerOnline -> {
-                    Icon(
-                        Icons.Default.CheckCircle,
-                        contentDescription = null,
-                        tint = Color(0xFF00D4AA),
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Direct connection verified", color = Color.White, fontSize = 12.sp)
-                }
-                serviceState == TorMessagingService.ServiceState.RUNNING -> {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        color = Color(0xFF00D4AA),
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Securing direct connection", color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
-                }
-                serviceState == TorMessagingService.ServiceState.WAITING_FOR_TOR -> {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        color = Color(0xFF6366F1),
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        "Connecting to Tor network... ${torStatus.bootstrapPercent}%",
-                        color = Color.White.copy(alpha = 0.8f),
-                        fontSize = 12.sp
-                    )
-                }
-                serviceState == TorMessagingService.ServiceState.STARTING -> {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        color = Color(0xFF6366F1),
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Initializing...", color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
-                }
-                else -> {
-                    Icon(
-                        Icons.Default.Warning,
-                        contentDescription = null,
-                        tint = Color(0xFFFF5555),
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Not connected", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
-                }
+        when {
+            !contactAddressReady -> {
+                Icon(
+                    Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = OnionUi.Warning,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(7.dp))
+                Text("Contact address missing", color = OnionUi.TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            }
+            isPeerOnline -> {
+                Icon(
+                    Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    tint = OnionUi.Online,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(7.dp))
+                Text("Direct connection verified", color = OnionUi.TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            }
+            serviceState == TorMessagingService.ServiceState.RUNNING -> {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    color = OnionUi.Online,
+                    strokeWidth = 2.dp
+                )
+                Spacer(modifier = Modifier.width(7.dp))
+                Text("Securing direct connection", color = OnionUi.TextSecondary, fontSize = 12.sp)
+            }
+            serviceState == TorMessagingService.ServiceState.WAITING_FOR_TOR -> {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    color = OnionUi.Warning,
+                    strokeWidth = 2.dp
+                )
+                Spacer(modifier = Modifier.width(7.dp))
+                Text(
+                    "Connecting to Tor network (${torStatus.bootstrapPercent}%)",
+                    color = OnionUi.TextSecondary,
+                    fontSize = 12.sp
+                )
+            }
+            serviceState == TorMessagingService.ServiceState.STARTING -> {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    color = OnionUi.Warning,
+                    strokeWidth = 2.dp
+                )
+                Spacer(modifier = Modifier.width(7.dp))
+                Text("Initializing Tor…", color = OnionUi.TextSecondary, fontSize = 12.sp)
+            }
+            else -> {
+                Icon(
+                    Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = OnionUi.Danger,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(7.dp))
+                Text("Offline", color = OnionUi.TextSecondary, fontSize = 12.sp)
             }
         }
     }
@@ -1314,6 +1162,8 @@ private fun StatusIndicator(
 private fun TorMessageBubble(
     message: TorMessageEntity,
     contactNickname: String,
+    isFirstInCluster: Boolean = true,
+    isLastInCluster: Boolean = true,
     isEdited: Boolean,
     isDeleted: Boolean,
     isBurned: Boolean,
@@ -1343,56 +1193,109 @@ private fun TorMessageBubble(
     val isStreamingPreview = attachment?.name?.startsWith("preview_") == true
     val isViewOnce = burnText != null || descriptor?.viewOnce == true || isBurned
 
-    val routeIcon = when (message.deliveryRoute) {
-        "MAILBOX" -> "📬"
-        "QUEUED" -> "🕒"
-        "BLUETOOTH" -> "📶"
-        "WIFI_DIRECT" -> "📡"
-        else -> "🔗"
-    }
-    val routeLabel = when (message.deliveryRoute) {
-        "MAILBOX" -> "via Mailbox"
-        "QUEUED" -> "Queued"
-        "BLUETOOTH" -> "via Bluetooth"
-        "WIFI_DIRECT" -> "via WiFi Direct"
-        else -> "Direct"
-    }
+    val primaryTextColor = if (message.isFromMe) OnionUi.OutgoingText else OnionUi.IncomingText
+    val secondaryTextColor = if (message.isFromMe) OnionUi.OutgoingSubtle else OnionUi.IncomingSubtle
+    val quoteBg = if (message.isFromMe) Color.Black.copy(alpha = 0.24f) else OnionUi.SurfacePressed
 
+    val topStart = if (!message.isFromMe && !isFirstInCluster) 6.dp else 20.dp
+    val topEnd = if (message.isFromMe && !isFirstInCluster) 6.dp else 20.dp
+    val bottomStart = if (message.isFromMe) 20.dp else if (!isLastInCluster) 6.dp else 4.dp
+    val bottomEnd = if (!message.isFromMe) 20.dp else if (!isLastInCluster) 6.dp else 4.dp
     val shape = RoundedCornerShape(
-        topStart = 22.dp,
-        topEnd = 22.dp,
-        bottomStart = if (message.isFromMe) 22.dp else 5.dp,
-        bottomEnd = if (message.isFromMe) 5.dp else 22.dp
+        topStart = topStart,
+        topEnd = topEnd,
+        bottomStart = bottomStart,
+        bottomEnd = bottomEnd
     )
+
     val bubbleBrush = if (message.isFromMe) {
         Brush.linearGradient(listOf(OnionUi.OutgoingStart, OnionUi.OutgoingEnd))
     } else {
         Brush.linearGradient(listOf(OnionUi.IncomingStart, OnionUi.IncomingEnd))
     }
-    val bubbleOutline = if (message.isFromMe) Color.White.copy(alpha = 0.17f) else Color.White.copy(alpha = 0.10f)
+    val bubbleOutline = if (message.isFromMe) OnionUi.OutgoingBorder else OnionUi.IncomingBorder
     var appeared by remember(message.id) { mutableStateOf(false) }
     LaunchedEffect(message.id) { appeared = true }
-    val bubbleAlpha by animateFloatAsState(if (appeared) 1f else 0f, tween(180), label = "bubble_alpha")
-    val bubbleOffset by animateFloatAsState(if (appeared) 0f else 18f, tween(220), label = "bubble_offset")
-    val bubbleScale by animateFloatAsState(if (appeared) 1f else 0.96f, tween(220), label = "bubble_scale")
+    val bubbleAlpha by animateFloatAsState(if (appeared) 1f else 0f, tween(160), label = "bubble_alpha")
+    val bubbleOffset by animateFloatAsState(if (appeared) 0f else 12f, tween(200), label = "bubble_offset")
+
+    val isPhotoOrAttachmentPending = message.attachmentPath != null && message.isFromMe &&
+        deliveryState !in setOf(
+            OnionMessageProtocol.DeliveryState.DELIVERED,
+            OnionMessageProtocol.DeliveryState.READ,
+            OnionMessageProtocol.DeliveryState.FAILED
+        )
+
+    @Composable
+    fun TimestampCluster() {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (isEdited && !isDeleted && !isBurned) {
+                Text(
+                    text = "edited · ",
+                    color = secondaryTextColor,
+                    fontSize = 10.sp,
+                    fontStyle = FontStyle.Italic
+                )
+            }
+            if (message.isFromMe && message.deliveryRoute == "MAILBOX" && deliveryState != OnionMessageProtocol.DeliveryState.PENDING) {
+                Text(text = "📬 ", fontSize = 10.sp)
+            }
+            Text(
+                text = timeFormat.format(Date(message.timestamp)),
+                color = secondaryTextColor,
+                fontSize = 10.5.sp
+            )
+            if (message.isFromMe) {
+                Spacer(modifier = Modifier.width(3.dp))
+                val (statusIcon, statusColor) = getDeliveryIcon(deliveryState, secondaryTextColor)
+                Icon(
+                    statusIcon,
+                    contentDescription = deliveryState.name.lowercase(),
+                    modifier = Modifier.size(13.dp),
+                    tint = statusColor
+                )
+            }
+        }
+    }
+
+    val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(
+        initialValue = null,
+        key1 = attachment?.absolutePath
+    ) {
+        value = if (!isDeleted && !isViewOnce && descriptor?.kind != "voice" && descriptor?.kind != "file") {
+            attachment?.absolutePath?.let { path ->
+                withContext(Dispatchers.IO) { decodeScaledFileBitmap(path, maxDimensionPx = 640) }
+            }
+        } else null
+    }
+
+    val isShortInlineText = !isDeleted &&
+        !isViewOnce &&
+        descriptor == null &&
+        bitmap == null &&
+        !isPhotoOrAttachmentPending &&
+        parsed.replyToSender.isNullOrBlank() &&
+        !isExpressiveEmoji(parsed.body) &&
+        parsed.body.length <= 28 &&
+        '\n' !in parsed.body
 
     Column(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 1.dp),
         horizontalAlignment = if (message.isFromMe) Alignment.End else Alignment.Start
     ) {
         Box(
             modifier = Modifier
-                .widthIn(max = 336.dp)
+                .widthIn(max = 324.dp)
                 .graphicsLayer {
                     alpha = bubbleAlpha
                     translationY = bubbleOffset
-                    scaleX = bubbleScale
-                    scaleY = bubbleScale
                 }
                 .shadow(
-                    elevation = if (message.isFromMe) 6.dp else 2.dp,
+                    elevation = if (message.isFromMe) 4.dp else 1.dp,
                     shape = shape,
-                    spotColor = Color.Black.copy(alpha = 0.34f)
+                    spotColor = Color.Black.copy(alpha = 0.28f)
                 )
                 .clip(shape)
                 .background(brush = bubbleBrush, shape = shape)
@@ -1402,104 +1305,115 @@ private fun TorMessageBubble(
                     onLongClick = { onLongPress() }
                 )
         ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
-            ) {
-                if (!isDeleted && !parsed.replyToSender.isNullOrBlank()) {
-                    val replyId = parsed.replyToId
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 6.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (message.isFromMe) Color.Black.copy(alpha = 0.25f) else OnionUi.SurfacePressed)
-                            .then(
-                                if (replyId != null) Modifier.clickable { onQuotedMessageClick(replyId) }
-                                else Modifier
-                            )
-                            .padding(horizontal = 9.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .width(3.dp)
-                                .height(26.dp)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(OnionUi.Online)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Column {
-                            Text(
-                                text = parsed.replyToSender,
-                                color = OnionUi.Online,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            if (!parsed.replyToPreview.isNullOrBlank()) {
-                                Text(
-                                    text = parsed.replyToPreview,
-                                    color = Color.White.copy(alpha = 0.72f),
-                                    fontSize = 11.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
+            if (isShortInlineText) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    Text(
+                        text = parsed.body,
+                        color = primaryTextColor,
+                        fontSize = 15.sp,
+                        lineHeight = 20.sp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Box(modifier = Modifier.padding(bottom = 1.dp)) {
+                        TimestampCluster()
                     }
                 }
-
-                when {
-                    isDeleted -> {
-                        Text(
-                            text = TorRichChatCodec.DELETED_DIRECT_MESSAGE_TEXT,
-                            color = Color.White.copy(alpha = 0.6f),
-                            fontSize = 14.sp,
-                            fontStyle = FontStyle.Italic
-                        )
-                    }
-                    isViewOnce -> {
-                        val kindLabel = when {
-                            descriptor?.kind == "voice" -> "Voice Note"
-                            descriptor?.kind == "photo" -> "Photo"
-                            descriptor?.kind == "file" -> "File"
-                            else -> "Secret Note"
-                        }
-                        val capsuleReady = burnText != null || (!isStreamingPreview && attachment != null)
-                        AegisBurnCapsuleCard(
-                            kindLabel = kindLabel,
-                            isFromMe = message.isFromMe,
-                            isBurned = isBurned,
-                            isReady = capsuleReady,
-                            hasShredReceipt = hasShredReceipt,
-                            onOpenCapsule = onOpenBurnCapsule
-                        )
-                    }
-                    descriptor?.kind == "voice" -> {
-                        OnionVoiceNoteCard(
-                            filePath = attachment?.absolutePath,
-                            durationMsHint = descriptor.durationMs,
-                            outgoing = message.isFromMe
-                        )
-                    }
-                    descriptor?.kind == "file" -> {
-                        OnionDocumentCard(
-                            filePath = attachment?.absolutePath,
-                            fileName = descriptor.fileName,
-                            totalBytes = descriptor.totalBytes,
-                            mimeType = message.attachmentMimeType,
-                            outgoing = message.isFromMe
-                        )
-                    }
-                    else -> {
-                        val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(
-                            initialValue = null,
-                            key1 = attachment?.absolutePath
+            } else {
+                val hPad = if (bitmap != null) 8.dp else 13.dp
+                val vPad = if (bitmap != null) 8.dp else 10.dp
+                Column(
+                    modifier = Modifier.padding(horizontal = hPad, vertical = vPad)
+                ) {
+                    if (!isDeleted && !parsed.replyToSender.isNullOrBlank()) {
+                        val replyId = parsed.replyToId
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 6.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(quoteBg)
+                                .then(
+                                    if (replyId != null) Modifier.clickable { onQuotedMessageClick(replyId) }
+                                    else Modifier
+                                )
+                                .padding(horizontal = 9.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            value = attachment?.absolutePath?.let { path ->
-                                withContext(Dispatchers.IO) { decodeScaledFileBitmap(path, maxDimensionPx = 640) }
+                            val quoteAccent = if (message.isFromMe) Color(0xFF93C5FD) else OnionUi.AccentBlue
+                            Box(
+                                modifier = Modifier
+                                    .width(3.dp)
+                                    .height(26.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(quoteAccent)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = parsed.replyToSender,
+                                    color = quoteAccent,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                if (!parsed.replyToPreview.isNullOrBlank()) {
+                                    Text(
+                                        text = parsed.replyToPreview,
+                                        color = secondaryTextColor,
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
-                        if (bitmap != null) {
+                    }
+
+                    when {
+                        isDeleted -> {
+                            Text(
+                                text = TorRichChatCodec.DELETED_DIRECT_MESSAGE_TEXT,
+                                color = secondaryTextColor,
+                                fontSize = 14.sp,
+                                fontStyle = FontStyle.Italic
+                            )
+                        }
+                        isViewOnce -> {
+                            val kindLabel = when {
+                                descriptor?.kind == "voice" -> "Voice Note"
+                                descriptor?.kind == "photo" -> "Photo"
+                                descriptor?.kind == "file" -> "File"
+                                else -> "Secret Note"
+                            }
+                            val capsuleReady = burnText != null || (!isStreamingPreview && attachment != null)
+                            AegisBurnCapsuleCard(
+                                kindLabel = kindLabel,
+                                isFromMe = message.isFromMe,
+                                isBurned = isBurned,
+                                isReady = capsuleReady,
+                                hasShredReceipt = hasShredReceipt,
+                                onOpenCapsule = onOpenBurnCapsule
+                            )
+                        }
+                        descriptor?.kind == "voice" -> {
+                            OnionVoiceNoteCard(
+                                filePath = attachment?.absolutePath,
+                                durationMsHint = descriptor.durationMs,
+                                outgoing = message.isFromMe
+                            )
+                        }
+                        descriptor?.kind == "file" -> {
+                            OnionDocumentCard(
+                                filePath = attachment?.absolutePath,
+                                fileName = descriptor.fileName,
+                                totalBytes = descriptor.totalBytes,
+                                mimeType = message.attachmentMimeType,
+                                outgoing = message.isFromMe
+                            )
+                        }
+                        bitmap != null -> {
                             Box {
                                 Image(
                                     bitmap = bitmap!!,
@@ -1513,7 +1427,7 @@ private fun TorMessageBubble(
                                                 Modifier.widthIn(max = 276.dp).heightIn(max = 300.dp)
                                             }
                                         )
-                                        .clip(RoundedCornerShape(12.dp))
+                                        .clip(RoundedCornerShape(14.dp))
                                         .then(
                                             if (!isStreamingPreview) {
                                                 Modifier.clickable { previewPath = attachment?.absolutePath }
@@ -1524,88 +1438,49 @@ private fun TorMessageBubble(
                                 )
                                 if (isStreamingPreview) {
                                     Text(
-                                        text = "⚡ HD streaming…",
-                                        color = OnionUi.Accent,
+                                        text = "Loading HD…",
+                                        color = Color.White,
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         modifier = Modifier
                                             .align(Alignment.BottomStart)
                                             .padding(8.dp)
                                             .clip(RoundedCornerShape(999.dp))
-                                            .background(Color.Black.copy(alpha = 0.62f))
+                                            .background(Color.Black.copy(alpha = 0.65f))
                                             .padding(horizontal = 8.dp, vertical = 3.dp)
                                     )
                                 }
                             }
-                        } else {
+                        }
+                        else -> {
                             Text(
                                 text = parsed.body,
-                                color = Color.White,
+                                color = primaryTextColor,
                                 fontSize = if (isExpressiveEmoji(parsed.body)) 30.sp else 15.sp,
                                 lineHeight = if (isExpressiveEmoji(parsed.body)) 36.sp else 21.sp
                             )
                         }
                     }
-                }
 
-                if (message.attachmentPath != null && message.isFromMe &&
-                    deliveryState !in setOf(
-                        OnionMessageProtocol.DeliveryState.DELIVERED,
-                        OnionMessageProtocol.DeliveryState.READ,
-                        OnionMessageProtocol.DeliveryState.FAILED
-                    )
-                ) {
-                    Spacer(Modifier.height(8.dp))
-                    LinearProgressIndicator(
-                        modifier = Modifier.fillMaxWidth().height(3.dp).clip(CircleShape),
-                        color = OnionUi.Accent,
-                        trackColor = Color.White.copy(alpha = 0.16f)
-                    )
-                    Text(
-                        "Securing encrypted attachment…",
-                        color = Color.White.copy(alpha = 0.62f),
-                        fontSize = 11.sp,
-                        modifier = Modifier.padding(top = 5.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(if (!isDeleted && isExpressiveEmoji(parsed.body)) 1.dp else 5.dp))
-
-                Row(
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.align(Alignment.End)
-                ) {
-                    if (isEdited && !isDeleted && !isBurned) {
-                        Text(
-                            text = "edited · ",
-                            color = Color.White.copy(alpha = 0.56f),
-                            fontSize = 10.sp,
-                            fontStyle = FontStyle.Italic
+                    if (isPhotoOrAttachmentPending) {
+                        Spacer(Modifier.height(6.dp))
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().height(3.dp).clip(CircleShape),
+                            color = if (message.isFromMe) Color.White else OnionUi.Online,
+                            trackColor = primaryTextColor.copy(alpha = 0.16f)
                         )
-                    }
-                    if (message.isFromMe && message.deliveryRoute != "DIRECT") {
                         Text(
-                            text = "$routeIcon ",
-                            fontSize = 10.sp
+                            "Sending encrypted attachment…",
+                            color = secondaryTextColor,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(top = 4.dp)
                         )
                     }
 
-                    Text(
-                        text = timeFormat.format(Date(message.timestamp)),
-                        color = Color.White.copy(alpha = 0.56f),
-                        fontSize = 11.sp
-                    )
+                    Spacer(modifier = Modifier.height(if (!isDeleted && isExpressiveEmoji(parsed.body)) 1.dp else 4.dp))
 
-                    if (message.isFromMe) {
-                        Spacer(modifier = Modifier.width(4.dp))
-                        val (statusIcon, statusColor) = getDeliveryIcon(deliveryState)
-                        Icon(
-                            statusIcon,
-                            contentDescription = routeLabel,
-                            modifier = Modifier.size(14.dp),
-                            tint = statusColor
-                        )
+                    Box(modifier = Modifier.align(Alignment.End)) {
+                        TimestampCluster()
                     }
                 }
             }
@@ -1665,6 +1540,227 @@ private fun TorMessageBubble(
                 }
             }
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+private fun ContactSecuritySheet(
+    contact: OnionContactManager.OnionContact,
+    isPeerOnline: Boolean,
+    trustState: TorContactTrustState,
+    safetyNumber: String,
+    disappearingTtl: Long,
+    ttlOptions: List<Pair<Long, String>>,
+    onSearchMessages: () -> Unit,
+    onSelectTtl: (Long) -> Unit,
+    onVerify: () -> Unit,
+    onUnverify: () -> Unit,
+    onToggleBlock: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = OnionUi.CanvasRaised,
+        contentColor = OnionUi.TextPrimary
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .navigationBarsPadding()
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OnionAvatar(
+                    label = contact.nickname,
+                    online = isPeerOnline,
+                    avatarId = contact.avatarId,
+                    size = 56.dp
+                )
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = contact.nickname,
+                        color = OnionUi.TextPrimary,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 19.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(3.dp))
+                    OnionStatusChip(
+                        label = when (trustState) {
+                            TorContactTrustState.VERIFIED -> "Verified contact"
+                            TorContactTrustState.KEY_CHANGED -> "Key changed · Verify"
+                            TorContactTrustState.BLOCKED -> "Blocked"
+                            TorContactTrustState.UNVERIFIED -> "Unverified · Check safety number"
+                        },
+                        color = when (trustState) {
+                            TorContactTrustState.VERIFIED -> OnionUi.Online
+                            TorContactTrustState.KEY_CHANGED, TorContactTrustState.BLOCKED -> OnionUi.Danger
+                            TorContactTrustState.UNVERIFIED -> OnionUi.Warning
+                        }
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(OnionUi.Surface)
+                    .border(1.dp, OnionUi.Hairline, RoundedCornerShape(14.dp))
+                    .tactilePress(scaleDown = 0.98f, onClick = onSearchMessages)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Search, null, tint = OnionUi.AccentBlue, modifier = Modifier.size(19.dp))
+                Spacer(Modifier.width(12.dp))
+                Text("Search in conversation", color = OnionUi.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(OnionUi.Surface)
+                    .border(1.dp, OnionUi.Hairline, RoundedCornerShape(14.dp))
+                    .padding(14.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Timer, null, tint = OnionUi.AccentBlue, modifier = Modifier.size(17.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Disappearing messages", color = OnionUi.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                }
+                Spacer(Modifier.height(10.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ttlOptions.forEach { (ttl, label) ->
+                        val active = ttl == disappearingTtl
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(
+                                    if (active) Brush.verticalGradient(listOf(OnionUi.PrimaryStart, OnionUi.PrimaryEnd))
+                                    else Brush.verticalGradient(listOf(OnionUi.SurfacePressed, OnionUi.SurfacePressed))
+                                )
+                                .border(
+                                    1.dp,
+                                    if (active) OnionUi.PrimaryRim else OnionUi.Hairline,
+                                    RoundedCornerShape(999.dp)
+                                )
+                                .clickable { onSelectTtl(ttl) }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                label,
+                                color = if (active) OnionUi.OnPrimary else OnionUi.TextPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(OnionUi.Surface)
+                    .border(1.dp, OnionUi.Hairline, RoundedCornerShape(14.dp))
+                    .padding(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.VerifiedUser,
+                            null,
+                            tint = if (trustState == TorContactTrustState.VERIFIED) OnionUi.Online else OnionUi.Warning,
+                            modifier = Modifier.size(17.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Safety Number", color = OnionUi.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    }
+                    IconButton(
+                        onClick = {
+                            val cb = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cb.setPrimaryClip(ClipData.newPlainText("Safety Number", safetyNumber))
+                            Toast.makeText(context, "Safety number copied", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(Icons.Default.ContentCopy, "Copy safety number", tint = OnionUi.TextSecondary, modifier = Modifier.size(16.dp))
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = safetyNumber,
+                    color = OnionUi.TextSecondary,
+                    fontSize = 12.5.sp,
+                    lineHeight = 18.sp
+                )
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = if (trustState == TorContactTrustState.VERIFIED) onUnverify else onVerify,
+                    shape = RoundedCornerShape(999.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (trustState == TorContactTrustState.VERIFIED) OnionUi.SurfacePressed else OnionUi.PrimaryStart,
+                        contentColor = if (trustState == TorContactTrustState.VERIFIED) OnionUi.TextPrimary else OnionUi.OnPrimary
+                    ),
+                    modifier = Modifier.fillMaxWidth().height(44.dp)
+                ) {
+                    Text(
+                        if (trustState == TorContactTrustState.VERIFIED) "Mark as Unverified" else "Mark Verified",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            val isBlocked = trustState == TorContactTrustState.BLOCKED
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (isBlocked) OnionUi.Surface else OnionUi.Danger.copy(alpha = 0.10f))
+                    .border(
+                        1.dp,
+                        if (isBlocked) OnionUi.Hairline else OnionUi.Danger.copy(alpha = 0.35f),
+                        RoundedCornerShape(14.dp)
+                    )
+                    .tactilePress(scaleDown = 0.98f, onClick = onToggleBlock)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Block, null, tint = if (isBlocked) OnionUi.TextPrimary else OnionUi.Danger, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = if (isBlocked) "Unblock Contact" else "Block Contact",
+                    color = if (isBlocked) OnionUi.TextPrimary else OnionUi.Danger,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp
+                )
+            }
+
+            Spacer(Modifier.height(22.dp))
+        }
     }
 }
 
@@ -2014,13 +2110,16 @@ internal fun prepareOptimizedImageForTor(context: android.content.Context, uri: 
 internal fun prepareImageForTor(context: android.content.Context, uri: Uri): ByteArray? =
     prepareOptimizedImageForTor(context, uri)?.bytes
 
-private fun getDeliveryIcon(state: OnionMessageProtocol.DeliveryState): Pair<androidx.compose.ui.graphics.vector.ImageVector, Color> {
+private fun getDeliveryIcon(
+    state: OnionMessageProtocol.DeliveryState,
+    mutedTint: Color
+): Pair<androidx.compose.ui.graphics.vector.ImageVector, Color> {
     return when (state) {
-        OnionMessageProtocol.DeliveryState.PENDING -> Icons.Default.Schedule to Color.White.copy(alpha = 0.5f)
-        OnionMessageProtocol.DeliveryState.SENDING -> Icons.Default.Schedule to Color.White.copy(alpha = 0.6f)
-        OnionMessageProtocol.DeliveryState.SENT -> Icons.Default.Done to Color.White.copy(alpha = 0.7f)
-        OnionMessageProtocol.DeliveryState.DELIVERED -> Icons.Default.DoneAll to Color.White.copy(alpha = 0.8f)
-        OnionMessageProtocol.DeliveryState.READ -> Icons.Default.DoneAll to Color(0xFF00D4AA)
-        OnionMessageProtocol.DeliveryState.FAILED -> Icons.Default.Error to Color(0xFFFF5555)
+        OnionMessageProtocol.DeliveryState.PENDING -> Icons.Default.Schedule to mutedTint
+        OnionMessageProtocol.DeliveryState.SENDING -> Icons.Default.Schedule to mutedTint
+        OnionMessageProtocol.DeliveryState.SENT -> Icons.Default.Done to mutedTint
+        OnionMessageProtocol.DeliveryState.DELIVERED -> Icons.Default.DoneAll to mutedTint
+        OnionMessageProtocol.DeliveryState.READ -> Icons.Default.DoneAll to Color(0xFF34D399)
+        OnionMessageProtocol.DeliveryState.FAILED -> Icons.Default.Error to OnionUi.Danger
     }
 }

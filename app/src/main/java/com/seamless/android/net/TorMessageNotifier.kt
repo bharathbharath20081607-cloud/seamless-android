@@ -96,10 +96,7 @@ class TorMessageNotifier(context: Context) {
     }
 
     fun playForegroundChime() {
-        val now = System.currentTimeMillis()
-        if (now - lastChimeAtMs < 900L) return
-        lastChimeAtMs = now
-        InAppSoundPlayer.playIncomingMessageSound(appContext)
+        // Silent while inside the app — notifications and sounds only fire when app is backgrounded/locked.
     }
 
     fun cancelAllMessageNotifications() {
@@ -133,7 +130,7 @@ class TorMessageNotifier(context: Context) {
 
     fun showIncoming(contact: OnionContactManager.OnionContact, preview: String, isPhoto: Boolean = false) {
         if (com.seamless.android.util.AppForegroundTracker.isAppInForeground(appContext)) {
-            playForegroundChime()
+            cancelContact(contact.id)
             return
         }
         ensureChannelsCreated()
@@ -202,7 +199,7 @@ class TorMessageNotifier(context: Context) {
     /** Group notification: one per group, updated in place with MessagingStyle + Reply/Mark Read actions. */
     fun showGroupEvent(groupId: String, title: String, body: String, senderName: String? = null) {
         if (com.seamless.android.util.AppForegroundTracker.isAppInForeground(appContext)) {
-            playForegroundChime()
+            cancelGroup(groupId)
             return
         }
         ensureChannelsCreated()

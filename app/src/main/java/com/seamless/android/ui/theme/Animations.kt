@@ -187,30 +187,30 @@ fun Modifier.specularSurface(
     val isDark = ThemePreferenceManager.isCurrentlyDark
     val fillBrush = if (isDark) {
         if (elevated) {
-            Brush.verticalGradient(listOf(Color(0xFF1A1A22), Color(0xFF121217)))
+            Brush.verticalGradient(listOf(Color(0xFF1B202C), Color(0xFF131720)))
         } else {
-            Brush.verticalGradient(listOf(Color(0xFF131318), Color(0xFF0C0C10)))
+            Brush.verticalGradient(listOf(Color(0xFF181C26), Color(0xFF11141C)))
         }
     } else {
         if (elevated) {
-            Brush.verticalGradient(listOf(Color(0xFFFFFFFF), Color(0xFFF7F7FA)))
+            Brush.verticalGradient(listOf(Color(0xFFFFFFFF), Color(0xFFF8FAFC)))
         } else {
-            Brush.verticalGradient(listOf(Color(0xFFFFFFFF), Color(0xFFFBFBFE)))
+            Brush.verticalGradient(listOf(Color(0xFFFFFFFF), Color(0xFFFAFBFD)))
         }
     }
 
     val borderBrush = if (isDark) {
         Brush.verticalGradient(
             listOf(
-                Color.White.copy(alpha = if (elevated) 0.16f else 0.11f),
-                Color.White.copy(alpha = 0.03f)
+                Color(0xFFF2F4F8).copy(alpha = if (elevated) 0.14f else 0.10f),
+                Color(0xFFF2F4F8).copy(alpha = 0.03f)
             )
         )
     } else {
         Brush.verticalGradient(
             listOf(
-                Color.Black.copy(alpha = 0.09f),
-                Color.Black.copy(alpha = 0.05f)
+                Color(0xFF0B0F17).copy(alpha = 0.09f),
+                Color(0xFF0B0F17).copy(alpha = 0.05f)
             )
         )
     }

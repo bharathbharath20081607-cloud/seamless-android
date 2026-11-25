@@ -936,10 +936,6 @@ class MainActivity : OrientationAwareActivity() {
 
     override fun onPause() {
         super.onPause()
-        runCatching {
-            com.seamless.android.net.TorMessagingService.getInstance(applicationContext).clearAllVisibleChats()
-            com.seamless.android.net.TorGroupMessaging.getInstance(applicationContext).visibleGroupId = null
-        }
         // Disable NFC foreground dispatch
         nfcHandoverService.disableForegroundDispatch(this)
     }
@@ -947,6 +943,10 @@ class MainActivity : OrientationAwareActivity() {
     override fun onStop() {
         super.onStop()
         if (!isChangingConfigurations && !com.seamless.android.util.AppForegroundTracker.isAppInForeground(this)) {
+            runCatching {
+                com.seamless.android.net.TorMessagingService.getInstance(applicationContext).clearAllVisibleChats()
+                com.seamless.android.net.TorGroupMessaging.getInstance(applicationContext).visibleGroupId = null
+            }
             meshService?.connectionManager?.setAppBackgroundState(true)
             meshServiceBinder?.setAppBackgroundState(true)
             chatViewModel.setAppBackgroundState(true)

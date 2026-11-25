@@ -76,10 +76,10 @@ class SlashCommandVisualTransformation : VisualTransformation {
                 // Add the styled slash command
                 withStyle(
                     style = SpanStyle(
-                        color = Color(0xFF00FF7F), // Bright green
+                        color = Color(0xFF60A5FA), // Precision Cobalt-Blue
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Medium,
-                        background = Color(0xFF2D2D2D) // Dark gray background
+                        background = Color(0xFF162235)
                     )
                 ) {
                     append(match.value)
@@ -120,7 +120,7 @@ class MentionVisualTransformation : VisualTransformation {
                 // Add the styled mention
                 withStyle(
                     style = SpanStyle(
-                        color = Color(0xFFFF9500), // Orange
+                        color = Color(0xFF38BDF8), // Precision System Sky
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.SemiBold
                     )

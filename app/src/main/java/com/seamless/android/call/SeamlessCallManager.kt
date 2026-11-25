@@ -3299,6 +3299,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
     }
 
     private fun showMissedCallNotification(session: CallSessionInfo) {
+        if (com.seamless.android.util.AppForegroundTracker.isAppInForeground(context)) return
         runCatching {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

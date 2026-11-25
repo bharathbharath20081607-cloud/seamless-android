@@ -18,6 +18,7 @@ object AppForegroundTracker : Application.ActivityLifecycleCallbacks {
 
     private val initialized = AtomicBoolean(false)
     private val startedCount = AtomicInteger(0)
+    private val resumedCount = AtomicInteger(0)
     private val foregroundListeners = CopyOnWriteArrayList<() -> Unit>()
 
     fun init(application: Application) {
@@ -31,14 +32,18 @@ object AppForegroundTracker : Application.ActivityLifecycleCallbacks {
     }
 
     fun isAppInForeground(context: Context? = null): Boolean {
-        if (startedCount.get() <= 0) return false
         if (context != null) {
             val locked = runCatching {
                 (context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager)?.isKeyguardLocked == true
             }.getOrDefault(false)
             if (locked) return false
         }
-        return true
+        return startedCount.get() > 0 || resumedCount.get() > 0
+    }
+
+    internal fun resetForTests() {
+        startedCount.set(0)
+        resumedCount.set(0)
     }
 
     override fun onActivityStarted(activity: Activity) {
@@ -54,8 +59,12 @@ object AppForegroundTracker : Application.ActivityLifecycleCallbacks {
     }
 
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
-    override fun onActivityResumed(activity: Activity) = Unit
-    override fun onActivityPaused(activity: Activity) = Unit
+    override fun onActivityResumed(activity: Activity) {
+        resumedCount.incrementAndGet()
+    }
+    override fun onActivityPaused(activity: Activity) {
+        resumedCount.updateAndGet { maxOf(0, it - 1) }
+    }
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
     override fun onActivityDestroyed(activity: Activity) = Unit
 }

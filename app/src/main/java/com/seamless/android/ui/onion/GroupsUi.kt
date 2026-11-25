@@ -68,23 +68,34 @@ import java.util.Locale
 
 // ───────────────────────── Shared helpers ─────────────────────────
 
-private val SenderPalette = listOf(
-    Color(0xFF0284C7), Color(0xFFD97706), Color(0xFF7C3AED),
-    Color(0xFF059669), Color(0xFFE11D48), Color(0xFF2563EB)
+// M3 HCT Iso-Luminant Sender Palette (Dark T76 / Light T42) — zero Bezold-Brücke shift
+private val SenderPaletteDark = listOf(
+    Color(0xFF60A5FA), Color(0xFF34D399), Color(0xFF818CF8),
+    Color(0xFFFBBF24), Color(0xFFFB7185), Color(0xFF22D3EE)
+)
+private val SenderPaletteLight = listOf(
+    Color(0xFF1D4ED8), Color(0xFF047857), Color(0xFF4338CA),
+    Color(0xFFB45309), Color(0xFFBE123C), Color(0xFF0E7490)
 )
 
 private val AvatarGradients = listOf(
-    listOf(Color(0xFF4F46E5), Color(0xFF1E1B4B)),
-    listOf(Color(0xFF0D9488), Color(0xFF115E59)),
-    listOf(Color(0xFF9333EA), Color(0xFF4C1D95)),
-    listOf(Color(0xFFE11D48), Color(0xFF881337)),
-    listOf(Color(0xFF0284C7), Color(0xFF0C4A6E)),
-    listOf(Color(0xFFD97706), Color(0xFF78350F))
+    listOf(Color(0xFF2563EB), Color(0xFF1E3A8A)),
+    listOf(Color(0xFF0EA5E9), Color(0xFF0369A1)),
+    listOf(Color(0xFF6366F1), Color(0xFF312E81)),
+    listOf(Color(0xFF10B981), Color(0xFF065F46)),
+    listOf(Color(0xFF8B5CF6), Color(0xFF4C1D95)),
+    listOf(Color(0xFFEC4899), Color(0xFF831843))
 )
 
-/** Stable, readable per-sender tint so members are distinguishable in a group. */
-internal fun senderColor(key: String): Color =
-    SenderPalette[(key.hashCode() and 0x7fffffff) % SenderPalette.size]
+/** Stable, polarity-calibrated iso-luminant sender tint so members stay legible in Light & Dark modes. */
+internal fun senderColor(key: String): Color {
+    val palette = if (com.seamless.android.ui.theme.ThemePreferenceManager.isCurrentlyDark) {
+        SenderPaletteDark
+    } else {
+        SenderPaletteLight
+    }
+    return palette[(key.hashCode() and 0x7fffffff) % palette.size]
+}
 
 internal fun formatChatTime(timestamp: Long): String {
     val now = Calendar.getInstance()
@@ -241,7 +252,7 @@ internal fun PrivateGroupsTab(onGroupClick: (PrivateGroupEntity) -> Unit) {
                 Text("No private groups yet", color = OnionUi.TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Create a private group and invite your Tor contacts. Every message is synced via Chrono-DAG over Tor — no server.",
+                    "Create a private group and invite your Tor contacts. Every message is end-to-end encrypted peer-to-peer with zero central servers.",
                     color = OnionUi.TextSecondary,
                     textAlign = TextAlign.Center,
                     fontSize = 14.sp
@@ -342,7 +353,7 @@ internal fun GroupRow(group: PrivateGroupEntity, onClick: () -> Unit) {
                         }
                     } else {
                         val onlineSuffix = if (onlineCount > 0) " · $onlineCount online" else ""
-                        "${members.size} member${if (members.size == 1) "" else "s"}$onlineSuffix · Chrono-DAG Tor"
+                        "${members.size} member${if (members.size == 1) "" else "s"}$onlineSuffix · Encrypted group"
                     }
                 }
                 Text(
@@ -424,7 +435,7 @@ internal fun CreateGroupSheet(
                         Icon(Icons.Default.Lock, null, tint = OnionUi.Online, modifier = Modifier.size(12.dp))
                         Spacer(Modifier.width(4.dp))
                         Text(
-                            "Chrono-DAG pairwise E2EE over Tor",
+                            "End-to-end encrypted peer-to-peer group",
                             color = OnionUi.TextSecondary,
                             fontSize = 12.sp
                         )

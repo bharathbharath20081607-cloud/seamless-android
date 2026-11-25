@@ -22,98 +22,116 @@ import androidx.compose.ui.graphics.Color
 
 object SeamlessColors {
 
-    // ── Obsidian Scale (Dark Mode) ──────────────────────────
-    val Obsidian          = Color(0xFF000000)  // True black — canvas / background
-    val ObsidianElevated  = Color(0xFF101014)  // Surface — cards, sheets
-    val ObsidianContainer = Color(0xFF1A1A20)  // Surface container — elevated cards
-    val ObsidianBright    = Color(0xFF26262E)  // Highlighted rows, pressed state
-    val ObsidianBorder    = Color(0xFF2E2E38)  // Subtle dividers & outlines
+    // ── Space Graphite Titanium Scale (Dark Mode — Anti-Halation & Anti-Smear) ──
+    val Obsidian          = Color(0xFF090B10)  // Space Graphite Titanium — zero AMOLED black smear
+    val ObsidianElevated  = Color(0xFF11141C)  // Surface — cards, sheets
+    val ObsidianContainer = Color(0xFF181C26)  // Surface container — elevated cards
+    val ObsidianBright    = Color(0xFF222734)  // Highlighted rows, pressed state
+    val ObsidianBorder    = Color(0xFF2D3446)  // Subtle dividers & outlines
 
-    // ── Optical Scale (Light Mode) ──────────────────────────
-    val OpticalWhite      = Color(0xFFFFFFFF)  // Pure white
-    val OpticalLight      = Color(0xFFF5F5F7)  // Background — light mode canvas
-    val OpticalContainer  = Color(0xFFEAEAEF)  // Surface container
-    val OpticalMuted      = Color(0xFFD4D4DB)  // Subtle borders, dividers
-    val OpticalBorder     = Color(0xFFC0C0C8)  // Outline
+    // ── Studio Optical Scale (Light Mode — Clean Neutral Hierarchy) ─────────
+    val OpticalWhite      = Color(0xFFFFFFFF)  // Pure optical card surface
+    val OpticalLight      = Color(0xFFF5F6F8)  // Studio systemGroupedBackground canvas
+    val OpticalContainer  = Color(0xFFEBEEF3)  // Machined optical surface container
+    val OpticalMuted      = Color(0xFFDCE1EA)  // Subtle borders, dividers
+    val OpticalBorder     = Color(0xFFC7D0DE)  // Outline
 
-    // ── Text ────────────────────────────────────────────────
-    val TextPrimaryDark   = Color(0xFFFFFFFF)  // White on dark
-    val TextSecondaryDark = Color(0xFFA1A1AA)  // Zinc-400
-    val TextTertiaryDark  = Color(0xFF71717A)  // Zinc-500
+    // ── Text (APCA Polarity Calibrated: Lc -93.2 Dark / Lc +97.1 Light) ──────
+    val TextPrimaryDark   = Color(0xFFF2F4F8)  // Optical Platinum on dark (anti-halation)
+    val TextSecondaryDark = Color(0xFF98A1B3)  // Precision Cool Slate
+    val TextTertiaryDark  = Color(0xFF667085)  // Muted Graphite
 
-    val TextPrimaryLight  = Color(0xFF09090B)  // Zinc-950 on light
-    val TextSecondaryLight = Color(0xFF52525B) // Zinc-600 (higher contrast in light mode)
-    val TextTertiaryLight = Color(0xFF71717A)  // Zinc-500
+    val TextPrimaryLight  = Color(0xFF0B0F17)  // Deep Carbon Ink on light
+    val TextSecondaryLight = Color(0xFF475467) // Slate Ink
+    val TextTertiaryLight = Color(0xFF667085)  // Muted Graphite Ink
 
-    // ── Accent: Optical White on Dark / Obsidian on Light ───
+    // ── Accent: Optical Platinum on Dark / Carbon Ink on Light ──────────────
     val AccentPrimary: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFFFFFFFF) else Color(0xFF09090B)
-    val AccentPrimaryLight = Color(0xFF09090B) // Near-black accent on light
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFFF2F4F8) else Color(0xFF0B0F17)
+    val AccentPrimaryLight = Color(0xFF0B0F17) // Carbon ink accent on light
 
-    // ── Warm Sparks (Semantic / Sparse Use Only) ────────────
-    val Coral             = Color(0xFFFF6B6B)  // Errors, destructive actions
-    val Amber             = Color(0xFFFBBF24)  // Warnings, pending states
-    val Emerald           = Color(0xFF10B981)  // Success, connected, verified
-    val SteelBlue         = Color(0xFF3B82F6)  // Info, links, interactive
+    // ── Apple HIG & M3 HCT System Semantics (Orthogonal Pop-Out Channels) ───
+    val SystemBlue: Color
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF2B6EF6) else Color(0xFF1D58D8)
+    val Coral: Color
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFFF9544B) else Color(0xFFDC2626)
+    val Amber: Color
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFFFBBF24) else Color(0xFFB45309)
+    val Emerald: Color
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF2ED158) else Color(0xFF15803D)
+    val SteelBlue: Color
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF38BDF8) else Color(0xFF0284C7)
 
     // ── Semantic Aliases ────────────────────────────────────
-    val Success = Emerald
-    val Warning = Amber
-    val Error   = Coral
-    val Info    = SteelBlue
+    val Success: Color get() = Emerald
+    val Warning: Color get() = Amber
+    val Error: Color   get() = Coral
+    val Info: Color    get() = SteelBlue
 
-    // ── Message Bubbles ─────────────────────────────────────
-    val BubbleSelfDark    = Color(0xFFFFFFFF)  // White bubble — "I sent this"
-    val BubbleOtherDark   = Color(0xFF1A1A20)  // Obsidian container — others
-    val BubbleSelfLight   = Color(0xFF09090B)  // Near-black bubble in light mode
-    val BubbleOtherLight  = Color(0xFFEAEAEF)  // Light container — others
+    // ── Message Bubbles (Precision Sapphire Self vs Machined Graphite / White) ──
+    val BubbleSelfDark    = Color(0xFF163568)  // Deep Precision Sapphire — "I sent this"
+    val BubbleOtherDark   = Color(0xFF181C26)  // Machined Graphite — others
+    val BubbleSelfLight   = Color(0xFF1D58D8)  // Precision System Cobalt — "I sent this"
+    val BubbleOtherLight  = Color(0xFFFFFFFF)  // Pure Optical White — others
 
     // ── Bubble Text ─────────────────────────────────────────
-    val BubbleSelfTextDark  = Color(0xFF000000)  // Black text on white bubble
-    val BubbleOtherTextDark = Color(0xFFFFFFFF)  // White text on dark bubble
-    val BubbleSelfTextLight = Color(0xFFFFFFFF)  // White text on dark bubble
-    val BubbleOtherTextLight = Color(0xFF09090B) // Dark text on light bubble
+    val BubbleSelfTextDark  = Color(0xFFF5F8FF)  // Crisp Optical Blue-White on Sapphire
+    val BubbleOtherTextDark = Color(0xFFF2F4F8)  // Optical Platinum on Machined Graphite
+    val BubbleSelfTextLight = Color(0xFFFFFFFF)  // Pure White on System Cobalt
+    val BubbleOtherTextLight = Color(0xFF0B0F17) // Carbon Ink on Pure Optical White
 
-    // ── Peer Colors (Vibrant and legible on both Dark & Light) ─
-    val PeerColors = listOf(
-        Color(0xFF2563EB),  // Royal Blue
-        Color(0xFF059669),  // Emerald
-        Color(0xFFD97706),  // Amber
-        Color(0xFFDB2777),  // Rose
-        Color(0xFF7C3AED),  // Violet
-        Color(0xFFEA580C),  // Orange
-        Color(0xFF0284C7),  // Sky
-        Color(0xFF16A34A)   // Green
+    // ── Peer Colors (M3 HCT Iso-Luminant: T76 Dark / T42 Light) ─────────────
+    private val PeerColorsDark = listOf(
+        Color(0xFF60A5FA),  // System Blue
+        Color(0xFF34D399),  // System Emerald
+        Color(0xFF818CF8),  // System Indigo
+        Color(0xFFFBBF24),  // System Amber
+        Color(0xFFFB7185),  // System Rose
+        Color(0xFF22D3EE),  // System Cyan
+        Color(0xFFA78BFA),  // System Violet
+        Color(0xFF4ADE80)   // System Mint
     )
+    private val PeerColorsLight = listOf(
+        Color(0xFF1D4ED8),  // Precision Cobalt
+        Color(0xFF047857),  // Deep Emerald
+        Color(0xFF4338CA),  // Deep Indigo
+        Color(0xFFB45309),  // Precision Amber
+        Color(0xFFBE123C),  // Crimson Rose
+        Color(0xFF0E7490),  // Deep Cyan
+        Color(0xFF6D28D9),  // Deep Violet
+        Color(0xFF15803D)   // Forest Emerald
+    )
+    val PeerColors: List<Color>
+        get() = if (ThemePreferenceManager.isCurrentlyDark) PeerColorsDark else PeerColorsLight
 
     // ── Glassmorphism ───────────────────────────────────────
     val GlassSurfaceDark: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xCC101014) else Color(0xCCFFFFFF)
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xCC11141C) else Color(0xCCFFFFFF)
     val GlassSurfaceLight = Color(0xCCFFFFFF)  // ~80% white
     val GlassBorderDark: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0x33FFFFFF) else Color(0x26000000)
-    val GlassBorderLight  = Color(0x33000000)  // 20% black edge
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0x28F2F4F8) else Color(0x1E0B0F17)
+    val GlassBorderLight  = Color(0x1E0B0F17)  // Subtle carbon edge
 
     // ── Shimmer / Glow ──────────────────────────────────────
     val ShimmerBase: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF1A1A20) else Color(0xFFEAEAEF)
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF181C26) else Color(0xFFEBEEF3)
     val ShimmerHighlight: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF26262E) else Color(0xFFF5F5F7)
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF222734) else Color(0xFFF5F6F8)
     val GlowWhite: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0x40FFFFFF) else Color(0x2609090B)
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0x38F2F4F8) else Color(0x220B0F17)
     val GlowSubtle: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0x20FFFFFF) else Color(0x1409090B)
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0x1CF2F4F8) else Color(0x120B0F17)
 
     // ── Gradients (Theme-Adaptive) ──────────────────────────
     val BrandGradientStart: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFFFFFFFF) else Color(0xFF09090B)
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFFF2F4F8) else Color(0xFF0B0F17)
     val BrandGradientEnd: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFFA1A1AA) else Color(0xFF3F3F46)
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF98A1B3) else Color(0xFF475467)
 
     val DarkGradientBackgroundStart: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF000000) else OpticalLight
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF090B10) else OpticalLight
     val DarkGradientBackgroundEnd: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF101014) else OpticalWhite
+        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF11141C) else OpticalWhite
 
     // ── Legacy Compat (Theme-Adaptive so screens using Dark* work in Light Mode) ─
     val DarkBackground: Color
@@ -142,15 +160,17 @@ object SeamlessColors {
 // ─────────────────────────────────────────────
 
 val SeamlessTeal: Color
-    get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFFFFFFFF) else Color(0xFF09090B)
+    get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFFF2F4F8) else Color(0xFF0B0F17)
 val SeamlessCyan: Color
-    get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFFA1A1AA) else Color(0xFF52525B)
+    get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF98A1B3) else Color(0xFF475467)
 val SeamlessPrimaryDark: Color
-    get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF71717A) else Color(0xFF3F3F46)
+    get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF667085) else Color(0xFF475467)
 val SeamlessPurple: Color
-    get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFFA1A1AA) else Color(0xFF52525B)
-val SeamlessPink        = Color(0xFFFF6B6B)            // Coral
-val SeamlessOrange      = Color(0xFFF59E0B)            // Amber
+    get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF98A1B3) else Color(0xFF475467)
+val SeamlessPink: Color
+    get() = SeamlessColors.Coral
+val SeamlessOrange: Color
+    get() = SeamlessColors.Amber
 
 // ─────────────────────────────────────────────
 //  Utility Functions

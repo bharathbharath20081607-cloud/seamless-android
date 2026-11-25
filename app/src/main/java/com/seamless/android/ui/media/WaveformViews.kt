@@ -28,7 +28,9 @@ fun ScrollingWaveformRecorder(
     modifier: Modifier = Modifier,
     currentAmplitude: Float,
     samples: SnapshotStateList<Float>,
-    maxSamples: Int = 120
+    maxSamples: Int = 120,
+    fillColor: Color = Color(0xFF10B981),
+    baseColor: Color = Color(0xFF475569)
 ) {
     // Append samples at a fixed cadence while visible
     val latestAmp by rememberUpdatedState(currentAmplitude)
@@ -42,7 +44,7 @@ fun ScrollingWaveformRecorder(
             kotlinx.coroutines.delay(80)
         }
     }
-    WaveformCanvas(modifier = modifier, samples = samples, fillProgress = 1f, baseColor = Color(0xFF444444), fillColor = Color(0xFF00FF7F))
+    WaveformCanvas(modifier = modifier, samples = samples, fillProgress = 1f, baseColor = baseColor, fillColor = fillColor)
 }
 
 @Composable

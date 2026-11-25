@@ -215,10 +215,10 @@ fun OnionContactsScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text("Tor P2P Contacts", color = Color.White, fontWeight = FontWeight.Bold)
+                        Text("Tor P2P Contacts", color = OnionUi.TextPrimary, fontWeight = FontWeight.Bold)
                         Text(
                             getServiceStatusText(serviceState, torStatus, hiddenStatus, serviceError),
-                            color = Color.White.copy(alpha = 0.65f),
+                            color = OnionUi.TextSecondary,
                             fontSize = 12.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -227,7 +227,7 @@ fun OnionContactsScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = OnionUi.TextPrimary)
                     }
                 },
                 actions = {
@@ -235,7 +235,7 @@ fun OnionContactsScreen(
                         showShareSheet = true
                         onShareMyContact()
                     }) {
-                        Icon(Icons.Default.Share, "Share my contact", tint = OnionUi.Accent)
+                        Icon(Icons.Default.Share, "Share my contact", tint = OnionUi.TextPrimary)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = OnionUi.CanvasRaised)
@@ -246,8 +246,8 @@ fun OnionContactsScreen(
                 onClick = {
                     if (selectedTab == 1) showCreateGroup = true else showAddDialog = true
                 },
-                containerColor = OnionUi.Accent,
-                contentColor = Color.Black
+                containerColor = OnionUi.PrimaryStart,
+                contentColor = OnionUi.OnPrimary
             ) {
                 Icon(Icons.Default.Add, contentDescription = if (selectedTab == 1) "Create group" else "Add contact")
             }
@@ -321,7 +321,7 @@ fun OnionContactsScreen(
                                         "Keep Tor alive in background"
                                     },
                                     style = androidx.compose.material3.MaterialTheme.typography.labelLarge,
-                                    color = Color.White
+                                    color = OnionUi.TextPrimary
                                 )
                                 Text(
                                     text = if (!notifHealthy) {
@@ -330,7 +330,7 @@ fun OnionContactsScreen(
                                         "Disable battery restrictions to receive Tor messages & calls reliably."
                                     },
                                     style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                                    color = Color.White.copy(alpha = 0.72f)
+                                    color = OnionUi.TextSecondary
                                 )
                             }
                             IconButton(
@@ -340,7 +340,7 @@ fun OnionContactsScreen(
                                 Icon(
                                     imageVector = Icons.Default.Close,
                                     contentDescription = "Dismiss",
-                                    tint = Color.White.copy(alpha = 0.6f),
+                                    tint = OnionUi.TextSecondary,
                                     modifier = Modifier.size(16.dp)
                                 )
                             }
@@ -508,36 +508,43 @@ private fun EmptyContactsView(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(32.dp),
+            .padding(28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Icon(Icons.Default.PersonAdd, null, modifier = Modifier.size(72.dp), tint = OnionUi.Accent)
-        Spacer(Modifier.height(18.dp))
-        Text("No onion contacts", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Icon(Icons.Default.PersonAdd, null, modifier = Modifier.size(64.dp), tint = OnionUi.Online)
+        Spacer(Modifier.height(16.dp))
+        Text("No onion contacts yet", color = OnionUi.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         Text(
             if (serviceState == TorMessagingService.ServiceState.ERROR) {
                 "Tor is not ready yet. ${errorText?.take(96) ?: "Tap retry after checking network access."}"
             } else {
-                "Share your contact after Tor publishes your onion address, or add someone else's link."
+                "Share your contact once Tor is ready, or add a friend's invite link or QR."
             },
-            color = Color.White.copy(alpha = 0.65f),
-            fontSize = 14.sp
+            color = OnionUi.TextSecondary,
+            fontSize = 14.sp,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
         )
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(20.dp))
         if (serviceState == TorMessagingService.ServiceState.ERROR) {
-            Button(onClick = onRetry, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5B6CFF))) {
+            Button(
+                onClick = onRetry,
+                colors = ButtonDefaults.buttonColors(containerColor = OnionUi.Accent, contentColor = OnionUi.AccentContent)
+            ) {
                 Icon(Icons.Default.HourglassTop, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Retry Tor", color = Color.White)
+                Text("Retry Tor")
             }
             Spacer(Modifier.height(10.dp))
         }
-        Button(onClick = onShareMyContact, colors = ButtonDefaults.buttonColors(containerColor = OnionUi.Accent)) {
+        Button(
+            onClick = onShareMyContact,
+            colors = ButtonDefaults.buttonColors(containerColor = OnionUi.PrimaryStart, contentColor = OnionUi.OnPrimary)
+        ) {
             Icon(Icons.Default.Share, contentDescription = null)
             Spacer(Modifier.width(8.dp))
-            Text("Share My Contact", color = Color.Black)
+            Text("Share My Contact", fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -576,66 +583,107 @@ private fun ContactCard(
             else -> Toast.makeText(context, "Microphone and camera permissions are required for video calls", Toast.LENGTH_SHORT).show()
         }
     }
+    val trust = contact.effectiveTrustState()
+    val hasUnread = lastMessage != null && !lastMessage.isFromMe && lastMessage.readAt == null
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick),
         shape = OnionUi.Corner,
-        colors = CardDefaults.cardColors(containerColor = OnionUi.Surface)
+        colors = CardDefaults.cardColors(containerColor = OnionUi.Surface),
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            if (hasUnread) OnionUi.AccentBlue.copy(alpha = 0.45f) else OnionUi.Hairline
+        )
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(horizontal = 14.dp, vertical = 13.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            OnionAvatar(contact.nickname, isOnline, contact.avatarId)
+            OnionAvatar(contact.nickname, isOnline, contact.avatarId, size = 50.dp)
 
-            Spacer(Modifier.width(16.dp))
+            Spacer(Modifier.width(13.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Text(
                         contact.nickname,
-                        color = Color.White,
-                        fontSize = 18.sp,
+                        color = OnionUi.TextPrimary,
+                        fontSize = 16.5.sp,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
-                    Spacer(Modifier.width(8.dp))
-                    TrustBadge(contact.effectiveTrustState())
+                    Spacer(Modifier.width(5.dp))
+                    TrustBadgeIcon(trust)
+                    Spacer(Modifier.weight(1f))
+                    lastMessage?.let { msg ->
+                        Text(
+                            text = formatChatTime(msg.timestamp),
+                            color = if (hasUnread) OnionUi.AccentBlue else OnionUi.TextMuted,
+                            fontSize = 11.sp,
+                            fontWeight = if (hasUnread) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines = 1
+                        )
+                    }
                 }
                 Spacer(Modifier.height(4.dp))
-                Text(
-                    text = when {
-                        contact.requiresRendezvous() -> "Address pending. Re-scan after Tor is ready."
-                        lastMessage != null -> com.seamless.android.net.TorRichChatCodec.friendlyPreviewText(
-                            lastMessage.text,
-                            lastMessage.attachmentMimeType
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val previewText = when {
+                        contact.requiresRendezvous() -> "Address pending — re-scan when ready"
+                        lastMessage != null -> {
+                            val prefix = if (lastMessage.isFromMe) "You: " else ""
+                            prefix + com.seamless.android.net.TorRichChatCodec.friendlyPreviewText(
+                                lastMessage.text,
+                                lastMessage.attachmentMimeType
+                            )
+                        }
+                        else -> contact.onionAddress.take(18) + "…"
+                    }
+                    Text(
+                        text = previewText,
+                        color = if (hasUnread) OnionUi.TextPrimary else OnionUi.TextSecondary,
+                        fontWeight = if (hasUnread) FontWeight.Medium else FontWeight.Normal,
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (hasUnread) {
+                        Spacer(Modifier.width(6.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(OnionUi.AccentBlue)
                         )
-                        else -> contact.onionAddress.take(18) + "..."
-                    },
-                    color = OnionUi.TextSecondary,
-                    fontSize = 13.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                    }
+                }
             }
 
-            if (!contact.requiresRendezvous() && contact.effectiveTrustState() != TorContactTrustState.BLOCKED) {
-                Spacer(Modifier.width(12.dp))
+            if (!contact.requiresRendezvous() && trust != TorContactTrustState.BLOCKED) {
+                Spacer(Modifier.width(10.dp))
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .size(40.dp)
+                            .size(36.dp)
                             .clip(CircleShape)
-                            .background(Color(0x1E34D399))
-                            .border(1.dp, Color(0x4D34D399), CircleShape)
+                            .background(OnionUi.Online.copy(alpha = 0.13f))
+                            .border(1.dp, OnionUi.Online.copy(alpha = 0.28f), CircleShape)
                             .clickable(role = androidx.compose.ui.semantics.Role.Button) {
                                 callHaptics.toggleOn(view)
                                 val hasMic = ContextCompat.checkSelfPermission(
@@ -652,17 +700,17 @@ private fun ContactCard(
                         Icon(
                             Icons.Rounded.Call,
                             contentDescription = "Voice Call ${contact.nickname}",
-                            tint = Color(0xFF34D399),
-                            modifier = Modifier.size(20.dp)
+                            tint = OnionUi.Online,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .size(40.dp)
+                            .size(36.dp)
                             .clip(CircleShape)
-                            .background(Color(0x1E38BDF8))
-                            .border(1.dp, Color(0x4D38BDF8), CircleShape)
+                            .background(OnionUi.Info.copy(alpha = 0.13f))
+                            .border(1.dp, OnionUi.Info.copy(alpha = 0.28f), CircleShape)
                             .clickable(role = androidx.compose.ui.semantics.Role.Button) {
                                 callHaptics.toggleOn(view)
                                 val hasMic = ContextCompat.checkSelfPermission(
@@ -686,9 +734,9 @@ private fun ContactCard(
                     ) {
                         Icon(
                             Icons.Rounded.Videocam,
-                            contentDescription = "HD Video Call ${contact.nickname}",
-                            tint = Color(0xFF38BDF8),
-                            modifier = Modifier.size(20.dp)
+                            contentDescription = "Video Call ${contact.nickname}",
+                            tint = OnionUi.Info,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
@@ -698,14 +746,27 @@ private fun ContactCard(
 }
 
 @Composable
-private fun TrustBadge(state: TorContactTrustState) {
-    val (text, color, _) = when (state) {
-        TorContactTrustState.VERIFIED -> Triple("Verified", OnionUi.Accent, Icons.Default.VerifiedUser)
-        TorContactTrustState.KEY_CHANGED -> Triple("Key changed", Color(0xFFFF5252), Icons.Default.Report)
-        TorContactTrustState.BLOCKED -> Triple("Blocked", Color(0xFFFF5252), Icons.Default.Report)
-        TorContactTrustState.UNVERIFIED -> Triple("Unverified", Color(0xFFFFC857), Icons.Default.HourglassTop)
+private fun TrustBadgeIcon(state: TorContactTrustState) {
+    when (state) {
+        TorContactTrustState.VERIFIED -> Icon(
+            Icons.Default.VerifiedUser,
+            contentDescription = "Verified",
+            tint = OnionUi.Online,
+            modifier = Modifier.size(15.dp)
+        )
+        TorContactTrustState.KEY_CHANGED, TorContactTrustState.BLOCKED -> Icon(
+            Icons.Default.Report,
+            contentDescription = state.name,
+            tint = OnionUi.Danger,
+            modifier = Modifier.size(15.dp)
+        )
+        TorContactTrustState.UNVERIFIED -> Icon(
+            Icons.Default.HourglassTop,
+            contentDescription = "Unverified",
+            tint = OnionUi.Warning,
+            modifier = Modifier.size(14.dp)
+        )
     }
-    OnionStatusChip(text, color)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -742,7 +803,7 @@ fun ShareContactSheet(onDismiss: () -> Unit) {
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("Share Tor Contact", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text("Share Tor Contact", color = OnionUi.TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(16.dp))
 
             Card(
@@ -783,10 +844,10 @@ fun ShareContactSheet(onDismiss: () -> Unit) {
             Text(
                 when {
                     hasRealOnion -> myContact.onionAddress
-                    publishError != null -> "Tor could not publish your onion address. Retry after checking network/Tor access."
+                    publishError != null -> "Tor could not publish your onion address. Retry after checking network access."
                     else -> "Wait until Tor shows your onion address, then share."
                 },
-                color = Color.White.copy(alpha = 0.72f),
+                color = OnionUi.TextSecondary,
                 fontSize = 13.sp,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
@@ -801,11 +862,11 @@ fun ShareContactSheet(onDismiss: () -> Unit) {
                         clipboard.setPrimaryClip(ClipData.newPlainText("Seamless Tor contact", shareData))
                         Toast.makeText(context, "Contact link copied", Toast.LENGTH_SHORT).show()
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = OnionUi.Accent)
+                    colors = ButtonDefaults.buttonColors(containerColor = OnionUi.Online, contentColor = Color(0xFF04130E))
                 ) {
                     Icon(Icons.Default.ContentCopy, null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Copy", color = Color.Black)
+                    Text("Copy", fontWeight = FontWeight.Bold)
                 }
                 Button(
                     enabled = hasRealOnion,
@@ -815,11 +876,11 @@ fun ShareContactSheet(onDismiss: () -> Unit) {
                             .putExtra(Intent.EXTRA_TEXT, shareData)
                         context.startActivity(Intent.createChooser(intent, "Share contact"))
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00C6FF))
+                    colors = ButtonDefaults.buttonColors(containerColor = OnionUi.SurfacePressed, contentColor = OnionUi.TextPrimary)
                 ) {
                     Icon(Icons.Default.Share, null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Share", color = Color.Black)
+                    Text("Share", fontWeight = FontWeight.SemiBold)
                 }
             }
 
@@ -943,7 +1004,7 @@ private fun QrScannerScreen(
     Dialog(onDismissRequest = onCancel) {
         Surface(shape = OnionUi.Corner, color = OnionUi.Surface) {
             Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Scan Tor Contact", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Text("Scan Tor Contact", color = OnionUi.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 20.sp)
                 Spacer(Modifier.height(12.dp))
                 if (hasCameraPermission && !manualEntry) {
                     Box(Modifier.size(280.dp).clip(OnionUi.Corner).background(Color.Black)) {

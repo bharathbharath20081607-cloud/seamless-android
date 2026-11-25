@@ -51,29 +51,26 @@ fun ForumsScreen(
     var showCreateDialog by remember { mutableStateOf(false) }
     var newForumName by remember { mutableStateOf("") }
 
-    val premiumGradient = Brush.verticalGradient(
-        colors = listOf(Color(0xFF0D0D1A), Color(0xFF1A1A2E), Color(0xFF16213E))
-    )
-
+    OnionPage {
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Text("Forums", color = Color.White, fontWeight = FontWeight.Bold)
+                    Text("Forums", color = OnionUi.TextPrimary, fontWeight = FontWeight.Bold)
                 },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = OnionUi.TextPrimary)
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = OnionUi.CanvasRaised)
             )
         },
         floatingActionButton = {
             FloatingActionButton(
                 onClick = { showCreateDialog = true },
-                containerColor = Color(0xFF6366F1),
-                contentColor = Color.White
+                containerColor = OnionUi.Online,
+                contentColor = Color(0xFF04130E)
             ) {
                 Icon(Icons.Default.Add, contentDescription = "Create Forum")
             }
@@ -83,7 +80,6 @@ fun ForumsScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(premiumGradient)
                 .padding(padding)
         ) {
             if (forums.isEmpty()) {
@@ -97,20 +93,20 @@ fun ForumsScreen(
                     Icon(
                         Icons.Default.Forum,
                         contentDescription = null,
-                        modifier = Modifier.size(80.dp),
-                        tint = Color(0xFF6366F1).copy(alpha = 0.5f)
+                        modifier = Modifier.size(68.dp),
+                        tint = OnionUi.Online.copy(alpha = 0.72f)
                     )
-                    Spacer(modifier = Modifier.height(24.dp))
+                    Spacer(modifier = Modifier.height(20.dp))
                     Text(
                         "No Forums Yet",
-                        color = Color.White,
-                        fontSize = 22.sp,
+                        color = OnionUi.TextPrimary,
+                        fontSize = 20.sp,
                         fontWeight = FontWeight.Bold
                     )
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        "Create a forum for open discussion.\nAny subscriber can invite their contacts.",
-                        color = Color.White.copy(alpha = 0.6f),
+                        "Create a forum for open peer-to-peer discussion.\nAny subscriber can invite their contacts.",
+                        color = OnionUi.TextSecondary,
                         fontSize = 14.sp,
                         textAlign = TextAlign.Center
                     )
@@ -119,7 +115,7 @@ fun ForumsScreen(
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(forums, key = { it.forumId }) { forum ->
                         ForumCard(
@@ -131,24 +127,21 @@ fun ForumsScreen(
             }
         }
     }
+    }
 
     // Create Forum Dialog
     if (showCreateDialog) {
         AlertDialog(
             onDismissRequest = { showCreateDialog = false; newForumName = "" },
-            title = { Text("Create Forum", color = Color.White) },
+            title = { Text("Create Forum", color = OnionUi.TextPrimary, fontWeight = FontWeight.Bold) },
             text = {
                 OutlinedTextField(
                     value = newForumName,
                     onValueChange = { newForumName = it },
-                    label = { Text("Forum name", color = Color.White.copy(alpha = 0.5f)) },
+                    label = { Text("Forum name") },
                     modifier = Modifier.fillMaxWidth(),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White,
-                        focusedBorderColor = Color(0xFF6366F1),
-                        unfocusedBorderColor = Color.White.copy(alpha = 0.3f)
-                    ),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = onionFieldColors(),
                     singleLine = true
                 )
             },
@@ -173,15 +166,15 @@ fun ForumsScreen(
                         }
                     }
                 ) {
-                    Text("Create", color = Color(0xFF6366F1))
+                    Text("Create", color = OnionUi.Online, fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showCreateDialog = false; newForumName = "" }) {
-                    Text("Cancel", color = Color.White.copy(alpha = 0.7f))
+                    Text("Cancel", color = OnionUi.TextSecondary)
                 }
             },
-            containerColor = Color(0xFF1A1A2E)
+            containerColor = OnionUi.Surface
         )
     }
 }
@@ -197,52 +190,35 @@ private fun ForumCard(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick),
-        shape = RoundedCornerShape(16.dp),
+        shape = OnionUi.Corner,
         colors = CardDefaults.cardColors(
-            containerColor = Color(0xFF1E1E2E).copy(alpha = 0.8f)
+            containerColor = OnionUi.Surface
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        border = androidx.compose.foundation.BorderStroke(1.dp, OnionUi.Hairline)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .background(
-                        Brush.linearGradient(
-                            colors = listOf(Color(0xFF6366F1), Color(0xFF8B5CF6))
-                        )
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    Icons.Default.Forum,
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
+            GroupAvatar(forum.name, size = 46.dp)
 
-            Spacer(modifier = Modifier.width(16.dp))
+            Spacer(modifier = Modifier.width(14.dp))
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = forum.name,
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
+                    color = OnionUi.TextPrimary,
+                    fontWeight = FontWeight.Bold,
                     fontSize = 16.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(3.dp))
                 Text(
-                    text = "Created ${dateFormat.format(Date(forum.createdAt))}",
-                    color = Color.White.copy(alpha = 0.5f),
+                    text = "Created ${dateFormat.format(Date(forum.createdAt))} · Peer-to-peer forum",
+                    color = OnionUi.TextSecondary,
                     fontSize = 12.sp
                 )
             }

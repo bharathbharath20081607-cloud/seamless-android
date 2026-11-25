@@ -129,6 +129,7 @@ import com.seamless.android.service.TorForegroundService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 
 private val QuickReactionEmojis = listOf("❤️", "👍", "🔥", "😂", "😮", "🙏")
 
@@ -311,7 +312,8 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                     groupService.visibleGroupId = group.groupId
                     groupService.markRead(group.groupId)
                 }
-                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> if (groupService.visibleGroupId == group.groupId) {
+                Lifecycle.Event.ON_PAUSE -> Unit
+                Lifecycle.Event.ON_STOP -> if (groupService.visibleGroupId == group.groupId) {
                     groupService.visibleGroupId = null
                 }
                 else -> Unit
@@ -417,7 +419,7 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                             Icon(
                                 Icons.Default.Search,
                                 "Search messages",
-                                tint = if (showSearchBar) OnionUi.Online else OnionUi.TextPrimary
+                                tint = if (showSearchBar) OnionUi.AccentBlue else OnionUi.TextPrimary
                             )
                         }
                         if (isLocalAdmin) {
@@ -433,9 +435,13 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                 )
             },
             bottomBar = {
-                Composer(
-                    text = text,
-                    onTextChange = {
+                val replyPreview = replyingTo?.let { target ->
+                    TorRichChatCodec.friendlyPreviewText(target.text, target.attachmentMimeType)
+                }
+                val replyAccent = replyingTo?.let { senderColor(it.senderOnionAddress) } ?: OnionUi.AccentBlue
+                SovereignChatComposer(
+                    value = text,
+                    onValueChange = {
                         if (it.length <= 2_200) {
                             if (text.isBlank() && it.isNotBlank()) {
                                 groupService.speculativeWarmGroupCircuits(group.groupId, includeBulk = false)
@@ -443,11 +449,14 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                             text = it
                         }
                     },
-                    onSend = send,
-                    onOpenSheet = {
-                        groupService.speculativeWarmGroupCircuits(group.groupId, includeBulk = true)
-                        showAttachmentSheet = true
-                    },
+                    placeholder = "Encrypted group message…",
+                    burnPlaceholder = "View-Once group secret…",
+                    canSend = text.isNotBlank(),
+                    mediaEnabled = !isSendingMedia,
+                    isSending = isSendingMedia,
+                    burnOnReadArmed = burnOnReadArmed,
+                    onToggleBurnOnRead = { burnOnReadArmed = !burnOnReadArmed },
+                    isRecordingVoice = isRecordingVoice,
                     onStartVoiceNote = {
                         groupService.speculativeWarmGroupCircuits(group.groupId, includeBulk = true)
                         val hasMic = ContextCompat.checkSelfPermission(
@@ -457,9 +466,6 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                         if (hasMic) isRecordingVoice = true
                         else voicePermLauncher.launch(Manifest.permission.RECORD_AUDIO)
                     },
-                    burnOnReadArmed = burnOnReadArmed,
-                    onToggleBurnOnRead = { burnOnReadArmed = !burnOnReadArmed },
-                    isRecordingVoice = isRecordingVoice,
                     onCancelVoiceNote = { isRecordingVoice = false },
                     onSendVoiceNote = { bytes, durationMs, fileName ->
                         isRecordingVoice = false
@@ -481,9 +487,14 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                             } finally { isSendingMedia = false }
                         }
                     },
-                    mediaEnabled = !isSendingMedia,
-                    isSendingMedia = isSendingMedia,
-                    replyingTo = replyingTo,
+                    onOpenAttachments = {
+                        groupService.speculativeWarmGroupCircuits(group.groupId, includeBulk = true)
+                        showAttachmentSheet = true
+                    },
+                    onSendText = send,
+                    replySenderLabel = replyingTo?.let { if (it.isFromMe) "yourself" else it.senderNickname },
+                    replyPreviewText = replyPreview,
+                    replyAccentColor = replyAccent,
                     onCancelReply = { replyingTo = null }
                 )
             },
@@ -494,6 +505,16 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                 else messages.filter { msg ->
                     val clean = TorRichChatCodec.friendlyPreviewText(msg.text, msg.attachmentMimeType)
                     clean.contains(searchQuery, ignoreCase = true)
+                }
+            }
+            val isAtBottom by androidx.compose.runtime.remember(displayedMessages.size) {
+                androidx.compose.runtime.derivedStateOf {
+                    val lastIdx = displayedMessages.lastIndex
+                    if (lastIdx < 0) true
+                    else {
+                        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: lastIdx
+                        lastVisible >= lastIdx
+                    }
                 }
             }
             Box(Modifier.fillMaxSize().padding(padding)) {
@@ -508,27 +529,37 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                     }
                     if (displayedMessages.isEmpty()) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
-                                GroupAvatar(current.name, size = 76.dp, onlineCount = onlineMemberCount)
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 28.dp)
+                                    .clip(RoundedCornerShape(24.dp))
+                                    .background(OnionUi.Surface)
+                                    .border(1.dp, OnionUi.Hairline, RoundedCornerShape(24.dp))
+                                    .padding(horizontal = 24.dp, vertical = 28.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                GroupAvatar(current.name, size = 72.dp, onlineCount = onlineMemberCount)
                                 Spacer(Modifier.height(16.dp))
                                 Text(
                                     if (searchQuery.isNotBlank()) "No matching messages" else "Say hello to ${current.name}",
                                     color = OnionUi.TextPrimary,
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 19.sp
+                                    fontSize = 18.sp,
+                                    textAlign = TextAlign.Center
                                 )
                                 Spacer(Modifier.height(8.dp))
                                 Text(
-                                    if (searchQuery.isNotBlank()) "Try another keyword in this Chrono-DAG group."
-                                    else "Messages, voice notes, 1 MB files & View-Once capsules are encrypted for each member via Chrono-DAG over Tor.",
+                                    if (searchQuery.isNotBlank()) "Try another keyword in this encrypted group."
+                                    else "Messages, voice notes, files, and View-Once notes are end-to-end encrypted peer-to-peer for every member.",
                                     color = OnionUi.TextSecondary,
                                     textAlign = TextAlign.Center,
-                                    fontSize = 13.sp,
-                                    lineHeight = 19.sp
+                                    fontSize = 13.5.sp,
+                                    lineHeight = 20.sp
                                 )
                                 if (searchQuery.isBlank()) {
-                                    Spacer(Modifier.height(14.dp))
-                                    OnionStatusChip("Chrono-DAG · Epoch #$currentEpoch · Zero servers", OnionUi.Online)
+                                    Spacer(Modifier.height(16.dp))
+                                    OnionStatusChip("Encrypted group · Zero central servers", OnionUi.Online)
                                 }
                             }
                         }
@@ -536,12 +567,13 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                         LazyColumn(
                             state = listState,
                             modifier = Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
-                            item { Spacer(Modifier.height(8.dp)) }
                             items(displayedMessages.size, key = { displayedMessages[it].id }) { index ->
                                 val message = displayedMessages[index]
                                 val previous = displayedMessages.getOrNull(index - 1)
+                                val next = displayedMessages.getOrNull(index + 1)
                                 val showDateHeader = previous == null || !isSameCalendarDay(previous.timestamp, message.timestamp)
                                 if (showDateHeader) {
                                     DateHeaderPill(formatDateHeader(message.timestamp))
@@ -549,13 +581,28 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                                 if (message.senderOnionAddress == TorGroupMessaging.SYSTEM_SENDER) {
                                     SystemEventBanner(message.text)
                                 } else {
-                                    val showName = !message.isFromMe &&
-                                        (previous == null || previous.isFromMe ||
-                                            previous.senderOnionAddress != message.senderOnionAddress || showDateHeader)
+                                    fun sameCluster(neighbor: GroupMessageEntity?): Boolean {
+                                        if (neighbor == null) return false
+                                        if (neighbor.senderOnionAddress == TorGroupMessaging.SYSTEM_SENDER) return false
+                                        if (!isSameCalendarDay(neighbor.timestamp, message.timestamp)) return false
+                                        if (abs(message.timestamp - neighbor.timestamp) > 180_000L) return false
+                                        return neighbor.isFromMe == message.isFromMe &&
+                                            neighbor.senderOnionAddress == message.senderOnionAddress
+                                    }
+                                    val isFirstInCluster = showDateHeader || !sameCluster(previous)
+                                    val isLastInCluster = next == null ||
+                                        !isSameCalendarDay(message.timestamp, next.timestamp) ||
+                                        !sameCluster(next)
+                                    val showName = !message.isFromMe && isFirstInCluster
+                                    if (!showDateHeader && isFirstInCluster) {
+                                        Spacer(Modifier.height(6.dp))
+                                    }
                                     val cleanMsgBody = TorGroupMessaging.parseMessageContent(message.text).body
                                     GroupMessageBubble(
                                         message = message,
                                         showName = showName,
+                                        isFirstInCluster = isFirstInCluster,
+                                        isLastInCluster = isLastInCluster,
                                         isEdited = message.id in editedIds,
                                         isDeleted = message.id in deletedIds ||
                                             cleanMsgBody == TorGroupMessaging.DELETED_MESSAGE_TEXT,
@@ -568,7 +615,7 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                                         onQuotedMessageClick = { targetId ->
                                             val idx = displayedMessages.indexOfFirst { it.id == targetId }
                                             if (idx >= 0) {
-                                                scope.launch { listState.animateScrollToItem(idx + 1) }
+                                                scope.launch { listState.animateScrollToItem(idx) }
                                             }
                                         },
                                         onPhotoClick = { path -> fullscreenPhotoPath = path },
@@ -591,6 +638,20 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                             item { Spacer(Modifier.height(8.dp)) }
                         }
                     }
+                }
+                AnimatedVisibility(
+                    visible = displayedMessages.isNotEmpty() && !isAtBottom,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 16.dp, bottom = 14.dp)
+                ) {
+                    JumpToLatestButton(
+                        onClick = {
+                            if (displayedMessages.isNotEmpty()) {
+                                scope.launch { listState.animateScrollToItem(displayedMessages.lastIndex) }
+                            }
+                        }
+                    )
                 }
                 TorEmojiBurst(emojiEffectToken, emojiEffectText)
             }
@@ -733,7 +794,7 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
             title = { Text("Delete for everyone?", color = OnionUi.TextPrimary) },
             text = {
                 Text(
-                    "This removes the message content across members' devices via a signed Chrono-DAG tombstone.",
+                    "This deletes the message content across all members' devices.",
                     color = OnionUi.TextSecondary
                 )
             },
@@ -774,30 +835,6 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
 }
 
 @Composable
-private fun DateHeaderPill(label: String) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 8.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Surface(
-            shape = RoundedCornerShape(999.dp),
-            color = OnionUi.Surface.copy(alpha = 0.88f),
-            modifier = Modifier.border(1.dp, OnionUi.Hairline, RoundedCornerShape(999.dp))
-        ) {
-            Text(
-                text = label,
-                color = OnionUi.TextSecondary,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-            )
-        }
-    }
-}
-
-@Composable
 private fun SystemEventBanner(text: String) {
     Box(
         modifier = Modifier
@@ -821,211 +858,13 @@ private fun SystemEventBanner(text: String) {
     }
 }
 
-@Composable
-private fun Composer(
-    text: String,
-    onTextChange: (String) -> Unit,
-    onSend: () -> Unit,
-    onOpenSheet: () -> Unit,
-    onStartVoiceNote: () -> Unit,
-    burnOnReadArmed: Boolean,
-    onToggleBurnOnRead: () -> Unit,
-    isRecordingVoice: Boolean,
-    onCancelVoiceNote: () -> Unit,
-    onSendVoiceNote: (bytes: ByteArray, durationMs: Int, fileName: String) -> Unit,
-    mediaEnabled: Boolean,
-    isSendingMedia: Boolean,
-    replyingTo: GroupMessageEntity?,
-    onCancelReply: () -> Unit
-) {
-    val canSend = text.isNotBlank()
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(OnionUi.CanvasRaised)
-            .border(1.dp, OnionUi.Hairline)
-            .navigationBarsPadding()
-    ) {
-        AnimatedVisibility(visible = replyingTo != null) {
-            replyingTo?.let { target ->
-                val cleanBody = remember(target.text, target.attachmentMimeType) {
-                    TorRichChatCodec.friendlyPreviewText(target.text, target.attachmentMimeType)
-                }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 8.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(OnionUi.Surface)
-                        .border(1.dp, OnionUi.Hairline, RoundedCornerShape(12.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .width(3.dp)
-                            .height(30.dp)
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(senderColor(target.senderOnionAddress))
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            text = "Replying to ${if (target.isFromMe) "yourself" else target.senderNickname}",
-                            color = senderColor(target.senderOnionAddress),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = cleanBody,
-                            color = OnionUi.TextSecondary,
-                            fontSize = 12.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    IconButton(onClick = onCancelReply, modifier = Modifier.size(28.dp)) {
-                        Icon(Icons.Default.Close, "Cancel reply", tint = OnionUi.TextSecondary, modifier = Modifier.size(16.dp))
-                    }
-                }
-            }
-        }
-
-        if (isRecordingVoice) {
-            Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
-                SonicWarpRecorderBar(
-                    burnOnReadArmed = burnOnReadArmed,
-                    onCancel = onCancelVoiceNote,
-                    onSendVoiceNote = onSendVoiceNote
-                )
-            }
-        } else {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.Bottom
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(42.dp)
-                        .clip(CircleShape)
-                        .background(OnionUi.SurfacePressed),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (isSendingMedia) {
-                        CircularProgressIndicator(
-                            color = OnionUi.Online,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    } else {
-                        IconButton(onClick = onOpenSheet, enabled = mediaEnabled, modifier = Modifier.size(42.dp)) {
-                            Icon(
-                                Icons.Default.Add,
-                                "Attachments",
-                                tint = if (mediaEnabled) OnionUi.Online else OnionUi.TextMuted,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.width(6.dp))
-                Box(
-                    modifier = Modifier
-                        .size(42.dp)
-                        .clip(CircleShape)
-                        .background(if (burnOnReadArmed) AegisEmberColor.copy(alpha = 0.2f) else OnionUi.SurfacePressed)
-                        .then(
-                            if (burnOnReadArmed) Modifier.border(1.dp, AegisEmberColor.copy(alpha = 0.7f), CircleShape)
-                            else Modifier
-                        )
-                        .clickable { onToggleBurnOnRead() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        Icons.Default.LocalFireDepartment,
-                        "Toggle Burn-On-Read",
-                        tint = if (burnOnReadArmed) AegisEmberColor else OnionUi.TextMuted,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                TextField(
-                    value = text,
-                    onValueChange = onTextChange,
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(24.dp))
-                        .border(
-                            1.dp,
-                            if (burnOnReadArmed) AegisEmberColor.copy(alpha = 0.75f) else OnionUi.Hairline,
-                            RoundedCornerShape(24.dp)
-                        ),
-                    placeholder = {
-                        Text(
-                            if (burnOnReadArmed) "View-Once group secret…" else "Encrypted group message…",
-                            color = if (burnOnReadArmed) AegisEmberColor.copy(alpha = 0.8f) else OnionUi.TextMuted,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    },
-                    maxLines = 5,
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = OnionUi.Surface,
-                        unfocusedContainerColor = OnionUi.Surface,
-                        focusedTextColor = OnionUi.TextPrimary,
-                        unfocusedTextColor = OnionUi.TextPrimary,
-                        cursorColor = OnionUi.TextPrimary,
-                        focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent
-                    )
-                )
-                Spacer(Modifier.width(8.dp))
-                if (canSend) {
-                    Box(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(CircleShape)
-                            .background(if (burnOnReadArmed) AegisEmberColor else OnionUi.Accent)
-                            .clickable(onClick = onSend),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Send,
-                            "Send",
-                            tint = if (burnOnReadArmed) Color.White else OnionUi.Canvas,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(CircleShape)
-                            .background(if (burnOnReadArmed) AegisEmberColor else OnionUi.Online)
-                            .clickable(enabled = mediaEnabled, onClick = onStartVoiceNote),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Default.Mic,
-                            "Record voice note",
-                            tint = Color.Black,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
 @OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 private fun GroupMessageBubble(
     message: GroupMessageEntity,
     showName: Boolean,
+    isFirstInCluster: Boolean = true,
+    isLastInCluster: Boolean = true,
     isEdited: Boolean,
     isDeleted: Boolean,
     isBurned: Boolean,
@@ -1046,15 +885,19 @@ private fun GroupMessageBubble(
         TorRichChatCodec.inferDescriptor(message.text, message.attachmentMimeType, message.attachmentPath)
     }
     val isViewOnce = burnText != null || descriptor?.viewOnce == true || isBurned
-    val primaryTextColor = if (outgoing) Color.White else OnionUi.TextPrimary
-    val secondaryTextColor = if (outgoing) Color.White.copy(alpha = 0.56f) else OnionUi.TextSecondary
-    val quoteBg = if (outgoing) Color.Black.copy(alpha = 0.25f) else OnionUi.SurfacePressed
-    val quotePreviewColor = if (outgoing) Color.White.copy(alpha = 0.72f) else OnionUi.TextSecondary
+    val primaryTextColor = if (outgoing) OnionUi.OutgoingText else OnionUi.IncomingText
+    val secondaryTextColor = if (outgoing) OnionUi.OutgoingSubtle else OnionUi.IncomingSubtle
+    val quoteBg = if (outgoing) Color.Black.copy(alpha = 0.24f) else OnionUi.SurfacePressed
+    val quotePreviewColor = secondaryTextColor
 
+    val topStart = if (!outgoing && !isFirstInCluster) 6.dp else 20.dp
+    val topEnd = if (outgoing && !isFirstInCluster) 6.dp else 20.dp
+    val bottomStart = if (outgoing) 20.dp else if (!isLastInCluster) 6.dp else 4.dp
+    val bottomEnd = if (!outgoing) 20.dp else if (!isLastInCluster) 6.dp else 4.dp
     val shape = RoundedCornerShape(
-        topStart = 22.dp, topEnd = 22.dp,
-        bottomStart = if (outgoing) 22.dp else 5.dp,
-        bottomEnd = if (outgoing) 5.dp else 22.dp
+        topStart = topStart, topEnd = topEnd,
+        bottomStart = bottomStart,
+        bottomEnd = bottomEnd
     )
     val bubbleBrush = if (outgoing) {
         Brush.linearGradient(listOf(OnionUi.OutgoingStart, OnionUi.OutgoingEnd))
@@ -1063,237 +906,273 @@ private fun GroupMessageBubble(
     }
     var appeared by remember(message.id) { mutableStateOf(false) }
     LaunchedEffect(message.id) { appeared = true }
-    val alpha by animateFloatAsState(if (appeared) 1f else 0f, tween(180), label = "group_bubble_alpha")
-    val translateY by animateFloatAsState(if (appeared) 0f else 16f, tween(220), label = "group_bubble_offset")
-    val scale by animateFloatAsState(if (appeared) 1f else 0.96f, tween(220), label = "group_bubble_scale")
+    val alpha by animateFloatAsState(if (appeared) 1f else 0f, tween(160), label = "group_bubble_alpha")
+    val translateY by animateFloatAsState(if (appeared) 0f else 12f, tween(200), label = "group_bubble_offset")
+
+    @Composable
+    fun GroupTimestampCluster() {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (isEdited && !isDeleted && !isBurned) {
+                Text(
+                    "edited · ",
+                    color = secondaryTextColor,
+                    fontSize = 10.sp,
+                    fontStyle = FontStyle.Italic
+                )
+            }
+            Text(
+                formatChatTime(message.timestamp),
+                color = secondaryTextColor,
+                fontSize = 10.5.sp
+            )
+            if (outgoing) {
+                Spacer(Modifier.width(4.dp))
+                DeliveryMark(
+                    state = message.deliveryState,
+                    progress = deliveryProgress,
+                    mutedTint = secondaryTextColor,
+                    onRetryClick = onRetryClick
+                )
+            }
+        }
+    }
+
+    val isShortInlineText = !showName &&
+        !isDeleted &&
+        !isViewOnce &&
+        descriptor == null &&
+        message.attachmentPath == null &&
+        parsed.replyToSender.isNullOrBlank() &&
+        !isExpressiveEmoji(parsed.body) &&
+        parsed.body.length <= 28 &&
+        '\n' !in parsed.body &&
+        (!outgoing || (message.deliveryState != TorGroupMessaging.STATE_FAILED && message.deliveryState != TorGroupMessaging.STATE_PARTIAL))
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 2.dp),
+            .padding(horizontal = 14.dp, vertical = 1.dp),
         horizontalAlignment = if (outgoing) Alignment.End else Alignment.Start
     ) {
-        Column(
+        Box(
             modifier = Modifier
-                .widthIn(min = 96.dp, max = 320.dp)
-                .graphicsLayer { this.alpha = alpha; this.translationY = translateY; scaleX = scale; scaleY = scale }
-                .shadow(if (outgoing) 6.dp else 2.dp, shape, spotColor = Color.Black.copy(alpha = 0.32f))
+                .widthIn(max = 320.dp)
+                .graphicsLayer { this.alpha = alpha; this.translationY = translateY }
+                .shadow(if (outgoing) 4.dp else 1.dp, shape, spotColor = Color.Black.copy(alpha = 0.28f))
                 .clip(shape)
                 .background(bubbleBrush, shape)
-                .border(1.dp, if (outgoing) Color.White.copy(alpha = 0.17f) else OnionUi.Hairline, shape)
+                .border(1.dp, if (outgoing) OnionUi.OutgoingBorder else OnionUi.IncomingBorder, shape)
                 .combinedClickable(
                     onClick = {},
                     onLongClick = { onLongPress() }
                 )
-                .padding(horizontal = 14.dp, vertical = 10.dp)
         ) {
-            if (showName) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier
-                            .size(7.dp)
-                            .clip(CircleShape)
-                            .background(senderColor(message.senderOnionAddress))
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        message.senderNickname,
-                        color = senderColor(message.senderOnionAddress),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-                Spacer(Modifier.height(5.dp))
-            }
-
-            if (!isDeleted && !parsed.replyToSender.isNullOrBlank()) {
-                val replyId = parsed.replyToId
+            if (isShortInlineText) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 6.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(quoteBg)
-                        .then(
-                            if (replyId != null) Modifier.clickable { onQuotedMessageClick(replyId) }
-                            else Modifier
-                        )
-                        .padding(horizontal = 9.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.Bottom
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .width(3.dp)
-                            .height(26.dp)
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(senderColor(parsed.replyToSender))
+                    Text(
+                        parsed.body,
+                        color = primaryTextColor,
+                        fontSize = 15.sp,
+                        lineHeight = 20.sp
                     )
                     Spacer(Modifier.width(8.dp))
-                    Column {
-                        Text(
-                            text = parsed.replyToSender,
-                            color = senderColor(parsed.replyToSender),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        if (!parsed.replyToPreview.isNullOrBlank()) {
+                    Box(Modifier.padding(bottom = 1.dp)) {
+                        GroupTimestampCluster()
+                    }
+                }
+            } else {
+                Column(
+                    modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp)
+                ) {
+                    if (showName) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(senderColor(message.senderOnionAddress))
+                            )
+                            Spacer(Modifier.width(6.dp))
                             Text(
-                                text = parsed.replyToPreview,
-                                color = quotePreviewColor,
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                message.senderNickname,
+                                color = senderColor(message.senderOnionAddress),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
                             )
                         }
-                    }
-                }
-            }
-
-            when {
-                isDeleted -> {
-                    Text(
-                        TorGroupMessaging.DELETED_MESSAGE_TEXT,
-                        color = secondaryTextColor,
-                        fontSize = 14.sp,
-                        fontStyle = FontStyle.Italic
-                    )
-                }
-                isViewOnce -> {
-                    val kindLabel = when {
-                        descriptor?.kind == "voice" -> "Voice Note"
-                        descriptor?.kind == "photo" -> "Photo"
-                        descriptor?.kind == "file" -> "File"
-                        else -> "Secret Note"
-                    }
-                    val attFile = message.attachmentPath?.let { java.io.File(it) }?.takeIf { it.exists() }
-                    val isPreview = attFile?.name?.startsWith("preview_") == true
-                    val ready = burnText != null || (!isPreview && attFile != null)
-                    AegisBurnCapsuleCard(
-                        kindLabel = kindLabel,
-                        isFromMe = outgoing,
-                        isBurned = isBurned,
-                        isReady = ready,
-                        hasShredReceipt = groupShredCount > 0,
-                        groupShredCount = groupShredCount,
-                        onOpenCapsule = onOpenBurnCapsule
-                    )
-                }
-                descriptor?.kind == "voice" -> {
-                    OnionVoiceNoteCard(
-                        filePath = message.attachmentPath,
-                        durationMsHint = descriptor.durationMs,
-                        outgoing = outgoing
-                    )
-                }
-                descriptor?.kind == "file" -> {
-                    OnionDocumentCard(
-                        filePath = message.attachmentPath,
-                        fileName = descriptor.fileName,
-                        totalBytes = descriptor.totalBytes,
-                        mimeType = message.attachmentMimeType,
-                        outgoing = outgoing
-                    )
-                }
-                else -> {
-                    if (message.attachmentPath == null || parsed.body != "Photo") {
-                        Text(
-                            parsed.body,
-                            color = primaryTextColor,
-                            fontSize = if (isExpressiveEmoji(parsed.body)) 30.sp else 15.sp,
-                            lineHeight = if (isExpressiveEmoji(parsed.body)) 36.sp else 21.sp
-                        )
+                        Spacer(Modifier.height(5.dp))
                     }
 
-                    message.attachmentPath?.let { path ->
-                        val decodedState by produceState<Pair<Boolean, ImageBitmap?>>(
-                            initialValue = false to null,
-                            key1 = path
-                        ) {
-                            val bmp = withContext(Dispatchers.IO) {
-                                decodeScaledFileBitmap(path, maxDimensionPx = 640)
-                            }
-                            value = true to bmp
-                        }
-                        val (finished, bitmap) = decodedState
-                        val isStreamingPreview = path.contains("preview_")
-                        if (bitmap != null) {
-                            if (parsed.body != "Photo") Spacer(Modifier.height(8.dp))
-                            Box {
-                                Image(
-                                    bitmap = bitmap,
-                                    contentDescription = "Group photo",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(220.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .then(
-                                            if (!isStreamingPreview) {
-                                                Modifier.clickable { onPhotoClick(path) }
-                                            } else {
-                                                Modifier
-                                            }
-                                        )
+                    if (!isDeleted && !parsed.replyToSender.isNullOrBlank()) {
+                        val replyId = parsed.replyToId
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 6.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(quoteBg)
+                                .then(
+                                    if (replyId != null) Modifier.clickable { onQuotedMessageClick(replyId) }
+                                    else Modifier
                                 )
-                                if (isStreamingPreview) {
+                                .padding(horizontal = 9.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(3.dp)
+                                    .height(26.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(senderColor(parsed.replyToSender))
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = parsed.replyToSender,
+                                    color = senderColor(parsed.replyToSender),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                if (!parsed.replyToPreview.isNullOrBlank()) {
                                     Text(
-                                        text = "⚡ HD streaming…",
-                                        color = OnionUi.Accent,
+                                        text = parsed.replyToPreview,
+                                        color = quotePreviewColor,
                                         fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier
-                                            .align(Alignment.BottomStart)
-                                            .padding(8.dp)
-                                            .clip(RoundedCornerShape(999.dp))
-                                            .background(Color.Black.copy(alpha = 0.62f))
-                                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                             }
-                        } else if (finished) {
-                            if (parsed.body != "Photo") Spacer(Modifier.height(8.dp))
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(quoteBg)
-                                    .padding(horizontal = 12.dp, vertical = 14.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(Icons.Default.Photo, null, tint = secondaryTextColor, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text("Photo unavailable", color = secondaryTextColor, fontSize = 12.sp)
+                        }
+                    }
+
+                    when {
+                        isDeleted -> {
+                            Text(
+                                TorGroupMessaging.DELETED_MESSAGE_TEXT,
+                                color = secondaryTextColor,
+                                fontSize = 14.sp,
+                                fontStyle = FontStyle.Italic
+                            )
+                        }
+                        isViewOnce -> {
+                            val kindLabel = when {
+                                descriptor?.kind == "voice" -> "Voice Note"
+                                descriptor?.kind == "photo" -> "Photo"
+                                descriptor?.kind == "file" -> "File"
+                                else -> "Secret Note"
+                            }
+                            val attFile = message.attachmentPath?.let { java.io.File(it) }?.takeIf { it.exists() }
+                            val isPreview = attFile?.name?.startsWith("preview_") == true
+                            val ready = burnText != null || (!isPreview && attFile != null)
+                            AegisBurnCapsuleCard(
+                                kindLabel = kindLabel,
+                                isFromMe = outgoing,
+                                isBurned = isBurned,
+                                isReady = ready,
+                                hasShredReceipt = groupShredCount > 0,
+                                groupShredCount = groupShredCount,
+                                onOpenCapsule = onOpenBurnCapsule
+                            )
+                        }
+                        descriptor?.kind == "voice" -> {
+                            OnionVoiceNoteCard(
+                                filePath = message.attachmentPath,
+                                durationMsHint = descriptor.durationMs,
+                                outgoing = outgoing
+                            )
+                        }
+                        descriptor?.kind == "file" -> {
+                            OnionDocumentCard(
+                                filePath = message.attachmentPath,
+                                fileName = descriptor.fileName,
+                                totalBytes = descriptor.totalBytes,
+                                mimeType = message.attachmentMimeType,
+                                outgoing = outgoing
+                            )
+                        }
+                        else -> {
+                            if (message.attachmentPath == null || parsed.body != "Photo") {
+                                Text(
+                                    parsed.body,
+                                    color = primaryTextColor,
+                                    fontSize = if (isExpressiveEmoji(parsed.body)) 30.sp else 15.sp,
+                                    lineHeight = if (isExpressiveEmoji(parsed.body)) 36.sp else 21.sp
+                                )
+                            }
+
+                            message.attachmentPath?.let { path ->
+                                val decodedState by produceState<Pair<Boolean, ImageBitmap?>>(
+                                    initialValue = false to null,
+                                    key1 = path
+                                ) {
+                                    val bmp = withContext(Dispatchers.IO) {
+                                        decodeScaledFileBitmap(path, maxDimensionPx = 640)
+                                    }
+                                    value = true to bmp
+                                }
+                                val (finished, bitmap) = decodedState
+                                val isStreamingPreview = path.contains("preview_")
+                                if (bitmap != null) {
+                                    if (parsed.body != "Photo") Spacer(Modifier.height(8.dp))
+                                    Box {
+                                        Image(
+                                            bitmap = bitmap,
+                                            contentDescription = "Group photo",
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(220.dp)
+                                                .clip(RoundedCornerShape(14.dp))
+                                                .then(
+                                                    if (!isStreamingPreview) {
+                                                        Modifier.clickable { onPhotoClick(path) }
+                                                    } else {
+                                                        Modifier
+                                                    }
+                                                )
+                                        )
+                                        if (isStreamingPreview) {
+                                            Text(
+                                                text = "Loading HD…",
+                                                color = Color.White,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                modifier = Modifier
+                                                    .align(Alignment.BottomStart)
+                                                    .padding(8.dp)
+                                                    .clip(RoundedCornerShape(999.dp))
+                                                    .background(Color.Black.copy(alpha = 0.65f))
+                                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                    }
+                                } else if (finished) {
+                                    if (parsed.body != "Photo") Spacer(Modifier.height(8.dp))
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(quoteBg)
+                                            .padding(horizontal = 12.dp, vertical = 14.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(Icons.Default.Photo, null, tint = secondaryTextColor, modifier = Modifier.size(18.dp))
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Photo unavailable", color = secondaryTextColor, fontSize = 12.sp)
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
 
-            Spacer(Modifier.height(if (!isDeleted && !isBurned && isExpressiveEmoji(parsed.body)) 2.dp else 5.dp))
-            Row(
-                modifier = Modifier.align(Alignment.End),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (isEdited && !isDeleted && !isBurned) {
-                    Text(
-                        "edited · ",
-                        color = secondaryTextColor,
-                        fontSize = 10.sp,
-                        fontStyle = FontStyle.Italic
-                    )
-                }
-                Text(
-                    formatChatTime(message.timestamp),
-                    color = secondaryTextColor,
-                    fontSize = 10.sp
-                )
-                if (outgoing) {
-                    Spacer(Modifier.width(5.dp))
-                    DeliveryMark(
-                        state = message.deliveryState,
-                        progress = deliveryProgress,
-                        onRetryClick = onRetryClick
-                    )
+                    Spacer(Modifier.height(if (!isDeleted && !isBurned && isExpressiveEmoji(parsed.body)) 2.dp else 4.dp))
+                    Box(modifier = Modifier.align(Alignment.End)) {
+                        GroupTimestampCluster()
+                    }
                 }
             }
         }
@@ -1341,14 +1220,15 @@ private fun GroupMessageBubble(
 private fun DeliveryMark(
     state: String,
     progress: Pair<Int, Int>?,
+    mutedTint: Color,
     onRetryClick: () -> Unit
 ) {
     val (icon, tint) = when (state) {
-        TorGroupMessaging.STATE_DELIVERED -> Icons.Default.DoneAll to OnionUi.Online
-        TorGroupMessaging.STATE_SENT -> Icons.Default.Done to Color.White.copy(alpha = 0.75f)
+        TorGroupMessaging.STATE_DELIVERED -> Icons.Default.DoneAll to Color(0xFF34D399)
+        TorGroupMessaging.STATE_SENT -> Icons.Default.Done to mutedTint
         TorGroupMessaging.STATE_PARTIAL -> Icons.Default.WarningAmber to OnionUi.Warning
         TorGroupMessaging.STATE_FAILED -> Icons.Default.ErrorOutline to OnionUi.Danger
-        else -> Icons.Default.Schedule to Color.White.copy(alpha = 0.55f)
+        else -> Icons.Default.Schedule to mutedTint
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
         if (progress != null && progress.second > 0 && state != TorGroupMessaging.STATE_DELIVERED) {

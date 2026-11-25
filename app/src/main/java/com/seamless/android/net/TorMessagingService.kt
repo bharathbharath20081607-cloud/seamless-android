@@ -3095,11 +3095,11 @@ class TorMessagingService private constructor(private val context: Context) {
                 syncEngine.markAsReceived(messageId.toString())
                 sendMessageAck(effectiveSenderOnion, messageId)
                 Log.i(TAG, "Message $messageId persisted to database")
-                if (!visibleChatContacts.contains(contact.id)) {
+                if (!visibleChatContacts.contains(contact.id) &&
+                    !com.seamless.android.util.AppForegroundTracker.isAppInForeground(context)
+                ) {
                     val previewText = TorRichChatCodec.friendlyPreviewText(chatMessage.text)
                     messageNotifier.showIncoming(contact, previewText)
-                } else {
-                    messageNotifier.playForegroundChime()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Failed to persist message: ${e.message}")
@@ -3366,10 +3366,10 @@ class TorMessagingService private constructor(private val context: Context) {
                             attachmentMimeType = "image/webp"
                         )
                         previewShownTransfers.add(meta.transferId.toString())
-                        if (!visibleChatContacts.contains(contact.id)) {
+                        if (!visibleChatContacts.contains(contact.id) &&
+                            !com.seamless.android.util.AppForegroundTracker.isAppInForeground(context)
+                        ) {
                             messageNotifier.showIncoming(contact, "📷 Photo", isPhoto = true)
-                        } else {
-                            messageNotifier.playForegroundChime()
                         }
                     }
                 }
@@ -3511,16 +3511,15 @@ class TorMessagingService private constructor(private val context: Context) {
             ?.takeIf { it != frame.messageId }
             ?.let { sendMessageAck(senderOnion, it) }
         val previewLabel = TorRichChatCodec.friendlyPreviewText(rowText, completed.mimeType)
-        if (!hadPreview) {
-            if (!visibleChatContacts.contains(contact.id)) {
-                messageNotifier.showIncoming(
-                    contact,
-                    previewLabel,
-                    isPhoto = !completed.viewOnce && kind == "photo" && completed.fileName.isBlank()
-                )
-            } else {
-                messageNotifier.playForegroundChime()
-            }
+        if (!hadPreview &&
+            !visibleChatContacts.contains(contact.id) &&
+            !com.seamless.android.util.AppForegroundTracker.isAppInForeground(context)
+        ) {
+            messageNotifier.showIncoming(
+                contact,
+                previewLabel,
+                isPhoto = !completed.viewOnce && kind == "photo" && completed.fileName.isBlank()
+            )
         }
         messageListener?.onMessageReceived(
             contact,

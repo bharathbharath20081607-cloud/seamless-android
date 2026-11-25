@@ -7,8 +7,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,25 +61,25 @@ fun MessageBubble(
     )
 
     val backgroundModifier = if (isSelf) {
-        // ── SENT BUBBLE (Authoritative Elevated Titanium-Slate / Obsidian) ──
+        // ── SENT BUBBLE (Precision Sapphire — Apple/Google/Signal Figure-Ground Hierarchy) ──
         Modifier
             .shadow(
                 elevation = if (isDark) 3.dp else 4.dp,
                 shape = bubbleShape,
-                spotColor = Color.Black.copy(alpha = if (isDark) 0.45f else 0.22f),
-                ambientColor = Color.Black.copy(alpha = 0.18f)
+                spotColor = Color.Black.copy(alpha = if (isDark) 0.45f else 0.20f),
+                ambientColor = Color.Black.copy(alpha = 0.16f)
             )
             .background(
                 brush = Brush.verticalGradient(
                     colors = if (isDark) {
                         listOf(
-                            Color(0xFF2A2D3D),
-                            Color(0xFF1D1F2B)
+                            Color(0xFF163568),
+                            Color(0xFF10274F)
                         )
                     } else {
                         listOf(
-                            Color(0xFF202028),
-                            Color(0xFF121218)
+                            Color(0xFF1D58D8),
+                            Color(0xFF1746B0)
                         )
                     }
                 ),
@@ -88,38 +90,38 @@ fun MessageBubble(
                 brush = Brush.verticalGradient(
                     colors = if (isDark) {
                         listOf(
-                            Color.White.copy(alpha = 0.26f),
-                            Color.White.copy(alpha = 0.07f)
+                            Color(0xFF60A5FA).copy(alpha = 0.26f),
+                            Color(0xFF60A5FA).copy(alpha = 0.06f)
                         )
                     } else {
                         listOf(
-                            Color.White.copy(alpha = 0.20f),
-                            Color.Black.copy(alpha = 0.15f)
+                            Color.White.copy(alpha = 0.24f),
+                            Color(0xFF1E3A8A).copy(alpha = 0.18f)
                         )
                     }
                 ),
                 shape = bubbleShape
             )
     } else {
-        // ── RECEIVED BUBBLE (Machined Obsidian Glass / Pure Optical Alabaster) ──
+        // ── RECEIVED BUBBLE (Machined Space Graphite / Pure Studio White) ──
         Modifier
             .shadow(
                 elevation = if (isDark) 1.dp else 2.dp,
                 shape = bubbleShape,
-                spotColor = Color.Black.copy(alpha = if (isDark) 0.25f else 0.10f),
-                ambientColor = Color.Black.copy(alpha = 0.08f)
+                spotColor = Color.Black.copy(alpha = if (isDark) 0.25f else 0.09f),
+                ambientColor = Color.Black.copy(alpha = 0.07f)
             )
             .background(
                 brush = Brush.verticalGradient(
                     colors = if (isDark) {
                         listOf(
-                            Color(0xFF15151C),
-                            Color(0xFF0E0E13)
+                            Color(0xFF181C26),
+                            Color(0xFF131720)
                         )
                     } else {
                         listOf(
                             Color(0xFFFFFFFF),
-                            Color(0xFFF6F6FA)
+                            Color(0xFFF8FAFC)
                         )
                     }
                 ),
@@ -130,18 +132,24 @@ fun MessageBubble(
                 brush = Brush.verticalGradient(
                     colors = if (isDark) {
                         listOf(
-                            Color.White.copy(alpha = 0.12f),
-                            Color.White.copy(alpha = 0.03f)
+                            Color(0xFFF2F4F8).copy(alpha = 0.10f),
+                            Color(0xFFF2F4F8).copy(alpha = 0.03f)
                         )
                     } else {
                         listOf(
-                            Color.Black.copy(alpha = 0.09f),
-                            Color.Black.copy(alpha = 0.05f)
+                            Color(0xFF0B0F17).copy(alpha = 0.09f),
+                            Color(0xFF0B0F17).copy(alpha = 0.05f)
                         )
                     }
                 ),
                 shape = bubbleShape
             )
+    }
+
+    val bubbleContentColor = if (isSelf) {
+        Color(0xFFF5F8FF)
+    } else {
+        colorScheme.onSurface
     }
 
     Box(
@@ -167,7 +175,9 @@ fun MessageBubble(
                 bottom = 8.dp
             )
     ) {
-        content()
+        CompositionLocalProvider(LocalContentColor provides bubbleContentColor) {
+            content()
+        }
     }
 }
 

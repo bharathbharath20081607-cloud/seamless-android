@@ -20,82 +20,82 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 
-// Obsidian & Optical Light — Achromatic Premium Design System
+// Space Graphite Titanium & Studio Optical — Apple HIG & M3 HCT Precision System
 private val DarkColorScheme = darkColorScheme(
-    primary = Color.White,                          // Optical White accent
-    onPrimary = Color.Black,
+    primary = SeamlessColors.TextPrimaryDark,       // Optical Platinum accent (anti-halation)
+    onPrimary = SeamlessColors.Obsidian,
     primaryContainer = SeamlessColors.ObsidianContainer,
     onPrimaryContainer = SeamlessColors.TextPrimaryDark,
 
-    secondary = SeamlessColors.TextSecondaryDark,   // Zinc-400
-    onSecondary = Color.Black,
+    secondary = SeamlessColors.TextSecondaryDark,   // Cool Slate
+    onSecondary = SeamlessColors.Obsidian,
     secondaryContainer = SeamlessColors.ObsidianContainer,
     onSecondaryContainer = SeamlessColors.TextPrimaryDark,
 
-    tertiary = SeamlessColors.TextTertiaryDark,     // Zinc-500
-    onTertiary = Color.White,
+    tertiary = SeamlessColors.TextTertiaryDark,     // Graphite
+    onTertiary = SeamlessColors.TextPrimaryDark,
     tertiaryContainer = SeamlessColors.ObsidianBright,
     onTertiaryContainer = SeamlessColors.TextPrimaryDark,
 
-    error = SeamlessColors.Error,
+    error = Color(0xFFF9544B),                      // Precision System Red (anti-chromostereopsis)
     onError = Color.White,
-    errorContainer = Color(0xFF3B0A0A),
-    onErrorContainer = SeamlessColors.Coral,
+    errorContainer = Color(0xFF351314),
+    onErrorContainer = Color(0xFFFCA5A5),
 
-    background = SeamlessColors.Obsidian,           // True black (#000000)
-    onBackground = SeamlessColors.TextPrimaryDark,  // Calibrated Alabaster (#F4F4F6) prevents OLED halation
+    background = SeamlessColors.Obsidian,           // Space Graphite (#090B10) prevents OLED smear
+    onBackground = SeamlessColors.TextPrimaryDark,  // Optical Platinum (#F2F4F8, APCA Lc -93.2)
 
-    surface = SeamlessColors.ObsidianElevated,      // #101014
+    surface = SeamlessColors.ObsidianElevated,      // #11141C
     onSurface = SeamlessColors.TextPrimaryDark,
-    surfaceVariant = SeamlessColors.ObsidianContainer,  // #1A1A20
+    surfaceVariant = SeamlessColors.ObsidianContainer,  // #181C26
     onSurfaceVariant = SeamlessColors.TextSecondaryDark,
 
     outline = SeamlessColors.ObsidianBorder,
-    outlineVariant = Color(0xFF3A3A44),
+    outlineVariant = Color(0xFF343C50),
 
     surfaceContainerLowest = SeamlessColors.Obsidian,
     surfaceContainerLow = SeamlessColors.ObsidianElevated,
     surfaceContainer = SeamlessColors.ObsidianContainer,
     surfaceContainerHigh = SeamlessColors.ObsidianBright,
-    surfaceContainerHighest = Color(0xFF30303A),
+    surfaceContainerHighest = Color(0xFF282E3E),
 
-    scrim = Color.Black,
+    scrim = Color(0xFF040508),
     inverseSurface = SeamlessColors.OpticalWhite,
     inverseOnSurface = SeamlessColors.TextPrimaryLight,
-    inversePrimary = Color.Black
+    inversePrimary = SeamlessColors.Obsidian
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = Color(0xFF09090B),                     // Near-black accent on light
-    onPrimary = Color.White,
+    primary = SeamlessColors.TextPrimaryLight,      // Deep Carbon Ink on light
+    onPrimary = SeamlessColors.OpticalWhite,
     primaryContainer = SeamlessColors.OpticalContainer,
-    onPrimaryContainer = Color(0xFF09090B),
+    onPrimaryContainer = SeamlessColors.TextPrimaryLight,
 
-    secondary = SeamlessColors.TextSecondaryLight,   // Zinc-600
-    onSecondary = Color.White,
+    secondary = SeamlessColors.TextSecondaryLight,  // Slate Ink
+    onSecondary = SeamlessColors.OpticalWhite,
     secondaryContainer = SeamlessColors.OpticalContainer,
-    onSecondaryContainer = Color(0xFF09090B),
+    onSecondaryContainer = SeamlessColors.TextPrimaryLight,
 
-    tertiary = SeamlessColors.TextTertiaryLight,     // Zinc-500
-    onTertiary = Color.White,
-    tertiaryContainer = Color(0xFFE0E0E8),
-    onTertiaryContainer = Color(0xFF09090B),
+    tertiary = SeamlessColors.TextTertiaryLight,    // Graphite Ink
+    onTertiary = SeamlessColors.OpticalWhite,
+    tertiaryContainer = Color(0xFFE2E6EE),
+    onTertiaryContainer = SeamlessColors.TextPrimaryLight,
 
-    background = SeamlessColors.OpticalLight,        // #F5F5F7
+    background = SeamlessColors.OpticalLight,       // Studio Optical Neutral (#F5F6F8)
     onBackground = SeamlessColors.TextPrimaryLight,
 
-    surface = SeamlessColors.OpticalWhite,
+    surface = SeamlessColors.OpticalWhite,          // Pure Optical White
     onSurface = SeamlessColors.TextPrimaryLight,
     surfaceVariant = SeamlessColors.OpticalContainer,
     onSurfaceVariant = SeamlessColors.TextSecondaryLight,
 
     surfaceContainerLowest = SeamlessColors.OpticalWhite,
-    surfaceContainerLow = Color(0xFFF0F0F4),
+    surfaceContainerLow = Color(0xFFF0F2F6),
     surfaceContainer = SeamlessColors.OpticalContainer,
-    surfaceContainerHigh = Color(0xFFE2E2EA),
+    surfaceContainerHigh = Color(0xFFE4E8F0),
     surfaceContainerHighest = SeamlessColors.OpticalMuted,
 
-    error = SeamlessColors.Error,
+    error = Color(0xFFDC2626),
     onError = Color.White,
     errorContainer = Color(0xFFFEE2E2),
     onErrorContainer = Color(0xFF991B1B),
@@ -103,10 +103,10 @@ private val LightColorScheme = lightColorScheme(
     outline = SeamlessColors.OpticalBorder,
     outlineVariant = SeamlessColors.OpticalMuted,
 
-    scrim = Color.Black,
+    scrim = Color(0xFF090B10),
     inverseSurface = SeamlessColors.ObsidianElevated,
-    inverseOnSurface = Color.White,
-    inversePrimary = Color.White
+    inverseOnSurface = SeamlessColors.TextPrimaryDark,
+    inversePrimary = SeamlessColors.TextPrimaryDark
 )
 
 @Composable

@@ -22,6 +22,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.seamless.android.ui.theme.ThemePreferenceManager
@@ -30,58 +31,102 @@ internal object OnionUi {
     private val isDark: Boolean
         get() = ThemePreferenceManager.isCurrentlyDark
 
+    // Anti-halation Space Graphite Titanium (Dark) & Studio Optical Neutral (Light) canvas
     val Canvas: Color
-        get() = if (isDark) Color(0xFF000000) else Color(0xFFF5F5F7)
+        get() = if (isDark) Color(0xFF090B10) else Color(0xFFF5F6F8)
 
     val CanvasRaised: Color
-        get() = if (isDark) Color(0xFF09090D) else Color(0xFFFFFFFF)
+        get() = if (isDark) Color(0xFF11141C) else Color(0xFFFFFFFF)
 
     val Surface: Color
-        get() = if (isDark) Color(0xFF121218) else Color(0xFFFFFFFF)
+        get() = if (isDark) Color(0xFF181C26) else Color(0xFFFFFFFF)
 
     val SurfacePressed: Color
-        get() = if (isDark) Color(0xFF1A1A23) else Color(0xFFEEEEF3)
+        get() = if (isDark) Color(0xFF222734) else Color(0xFFEBEEF3)
 
     val Outline: Color
-        get() = if (isDark) Color(0xFF282832) else Color(0xFFE4E4E9)
+        get() = if (isDark) Color(0xFF2D3446) else Color(0xFFDCE1EA)
 
     val TextPrimary: Color
-        get() = if (isDark) Color(0xFFF4F4F6) else Color(0xFF09090B)
+        get() = if (isDark) Color(0xFFF2F4F8) else Color(0xFF0B0F17)
 
     val Accent: Color
-        get() = if (isDark) Color(0xFFFFFFFF) else Color(0xFF09090B)
+        get() = if (isDark) Color(0xFFF2F4F8) else Color(0xFF0B0F17)
+
+    val AccentContent: Color
+        get() = if (isDark) Color(0xFF090B10) else Color(0xFFFFFFFF)
 
     val AccentStrong: Color
-        get() = if (isDark) Color(0xFF2B2B36) else Color(0xFFE4E4EC)
+        get() = if (isDark) Color(0xFF252B3B) else Color(0xFFE2E6EE)
 
-    // Unified Flagship Titanium-Slate / Obsidian Outgoing Bubble Gradient
+    // Precision System Cobalt Primary CTA Tokens (HCT T52 / APCA Lc > 80 with White Ink)
+    val PrimaryStart: Color
+        get() = if (isDark) Color(0xFF2B6EF6) else Color(0xFF1D58D8)
+
+    val PrimaryEnd: Color
+        get() = if (isDark) Color(0xFF1D58D8) else Color(0xFF1746B0)
+
+    val PrimaryRim: Color
+        get() = if (isDark) Color(0xFF93C5FD).copy(alpha = 0.32f) else Color.White.copy(alpha = 0.28f)
+
+    val OnPrimary: Color = Color(0xFFFFFFFF)
+
+    val AccentBlue: Color
+        get() = if (isDark) Color(0xFF60A5FA) else Color(0xFF1D58D8)
+
+    // Pre-attentive Figure-Ground Outgoing ("Me") Deep Precision Sapphire gradient
     val OutgoingStart: Color
-        get() = if (isDark) Color(0xFF2A2D3D) else Color(0xFF202028)
+        get() = if (isDark) Color(0xFF163568) else Color(0xFF1D58D8)
 
     val OutgoingEnd: Color
-        get() = if (isDark) Color(0xFF1D1F2B) else Color(0xFF121218)
+        get() = if (isDark) Color(0xFF10274F) else Color(0xFF1746B0)
 
-    // Unified Machined Obsidian / Optical Alabaster Incoming Bubble Gradient
+    val OutgoingBorder: Color
+        get() = if (isDark) Color(0xFF60A5FA).copy(alpha = 0.24f) else Color(0xFF1E3A8A).copy(alpha = 0.20f)
+
+    val OutgoingText: Color = Color(0xFFF5F8FF)
+
+    val OutgoingSubtle: Color = Color(0xFFD6E4FF).copy(alpha = 0.76f)
+
+    // Elevated Machined Graphite (Dark) / Studio Optical White (Light) Incoming ("Peer") gradient
     val IncomingStart: Color
-        get() = if (isDark) Color(0xFF171820) else Color(0xFFFFFFFF)
+        get() = if (isDark) Color(0xFF181C26) else Color(0xFFFFFFFF)
 
     val IncomingEnd: Color
-        get() = if (isDark) Color(0xFF101117) else Color(0xFFF6F6FA)
+        get() = if (isDark) Color(0xFF131720) else Color(0xFFF8FAFC)
 
-    val Online = Color(0xFF10B981)
-    val Warning = Color(0xFFF59E0B)
-    val Danger = Color(0xFFEF4444)
+    val IncomingBorder: Color
+        get() = if (isDark) Color(0xFFF2F4F8).copy(alpha = 0.09f) else Color(0xFF0B0F17).copy(alpha = 0.08f)
+
+    val IncomingText: Color
+        get() = TextPrimary
+
+    val IncomingSubtle: Color
+        get() = TextSecondary
+
+    // Apple HIG & Material 3 HCT System Semantics (Zero V4 Chromostereopsis)
+    val Online: Color
+        get() = if (isDark) Color(0xFF2ED158) else Color(0xFF15803D) // Precision System Emerald
+    val Warning: Color
+        get() = if (isDark) Color(0xFFFBBF24) else Color(0xFFB45309) // Precision System Amber
+    val Danger: Color
+        get() = if (isDark) Color(0xFFF9544B) else Color(0xFFDC2626) // Precision System Red
+    val Info: Color
+        get() = if (isDark) Color(0xFF38BDF8) else Color(0xFF0284C7) // Precision System Sky
+    val Indigo: Color
+        get() = if (isDark) Color(0xFF818CF8) else Color(0xFF4F46E5) // Fovea-lifted System Indigo
+    val Ember: Color
+        get() = if (isDark) Color(0xFFFF7A2F) else Color(0xFFC2410C) // Ephemeral System Flame Orange
 
     val TextSecondary: Color
-        get() = if (isDark) Color(0xFFA1A1AA) else Color(0xFF52525B)
+        get() = if (isDark) Color(0xFF98A1B3) else Color(0xFF475467)
 
-    val TextMuted: Color
-        get() = if (isDark) Color(0xFF71717A) else Color(0xFF71717A)
+    val TextMuted: Color = Color(0xFF667085)
 
     val Corner = RoundedCornerShape(18.dp)
 
     val Hairline: Color
-        get() = if (isDark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.08f)
+        get() = if (isDark) Color(0xFFF2F4F8).copy(alpha = 0.10f) else Color(0xFF0B0F17).copy(alpha = 0.08f)
 }
 
 @Composable
@@ -93,9 +138,9 @@ internal fun OnionPage(content: @Composable () -> Unit) {
             .background(
                 Brush.verticalGradient(
                     if (isDark) {
-                        listOf(OnionUi.Canvas, Color(0xFF07070B), OnionUi.Canvas)
+                        listOf(OnionUi.Canvas, Color(0xFF0D1018), OnionUi.Canvas)
                     } else {
-                        listOf(Color(0xFFF8F8FA), OnionUi.Canvas, Color(0xFFEEEEF3))
+                        listOf(Color(0xFFFAFBFD), OnionUi.Canvas, Color(0xFFEDF0F5))
                     }
                 )
             )
@@ -119,12 +164,12 @@ internal fun OnionStatusChip(
         contentColor = color
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(Modifier.size(7.dp).clip(CircleShape).background(color))
-            Spacer(Modifier.width(6.dp))
-            Text(label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Box(Modifier.size(6.dp).clip(CircleShape).background(color))
+            Spacer(Modifier.width(5.dp))
+            Text(label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -134,49 +179,57 @@ internal fun OnionAvatar(
     label: String,
     online: Boolean,
     avatarId: String = "aurora",
+    size: Dp = 52.dp,
     modifier: Modifier = Modifier
 ) {
     val (start, end, mark) = when (avatarId) {
-        "ember" -> Triple(Color(0xFFFF7A59), Color(0xFF8D2D37), "✦")
-        "tide" -> Triple(Color(0xFF35B7FF), Color(0xFF1F4E8C), "◌")
-        "orchid" -> Triple(Color(0xFFCC7BFF), Color(0xFF643B88), "✧")
-        "mint" -> Triple(Color(0xFF3DDC97), Color(0xFF176B55), "◇")
-        "copper" -> Triple(Color(0xFFE6A15A), Color(0xFF7E4630), "●")
-        else -> Triple(Color(0xFF7D8CFF), Color(0xFF3C467D), "✦")
+        "ember" -> Triple(Color(0xFFFF7A2F), Color(0xFF9A3412), "✦")
+        "tide" -> Triple(Color(0xFF0EA5E9), Color(0xFF0369A1), "◌")
+        "orchid" -> Triple(Color(0xFF8B5CF6), Color(0xFF4C1D95), "✧")
+        "mint" -> Triple(Color(0xFF10B981), Color(0xFF065F46), "◇")
+        "copper" -> Triple(Color(0xFF6366F1), Color(0xFF312E81), "●")
+        else -> Triple(Color(0xFF2B6EF6), Color(0xFF1E3A8A), "✦")
     }
+    val dotSize = (size.value * 0.27f).coerceIn(11f, 15f).dp
     Box(modifier = modifier, contentAlignment = Alignment.BottomEnd) {
         Box(
             modifier = Modifier
-                .size(52.dp)
+                .size(size)
                 .clip(CircleShape)
                 .background(Brush.linearGradient(listOf(start, end)))
-                .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape),
+                .border(
+                    width = 1.dp,
+                    brush = Brush.verticalGradient(
+                        listOf(Color.White.copy(alpha = 0.28f), Color.White.copy(alpha = 0.06f))
+                    ),
+                    shape = CircleShape
+                ),
             contentAlignment = Alignment.Center
         ) {
-            Box(contentAlignment = Alignment.Center) {
-                Text(
-                    label.trim().firstOrNull()?.uppercaseChar()?.toString() ?: mark,
-                    color = Color.White,
-                    fontWeight = FontWeight.Black,
-                    fontSize = 20.sp
-                )
-                Text(
-                    mark,
-                    color = Color.White.copy(alpha = 0.55f),
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 31.sp,
-                    modifier = Modifier.align(Alignment.TopEnd)
-                )
-            }
+            Text(
+                mark,
+                color = Color.White.copy(alpha = 0.24f),
+                fontWeight = FontWeight.Bold,
+                fontSize = (size.value * 0.56f).sp,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(end = size * 0.10f, top = size * 0.04f)
+            )
+            Text(
+                label.trim().firstOrNull()?.uppercaseChar()?.toString() ?: mark,
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                fontSize = (size.value * 0.38f).sp
+            )
         }
         Box(
             modifier = Modifier
-                .size(14.dp)
+                .size(dotSize)
                 .clip(CircleShape)
                 .background(OnionUi.Canvas)
                 .padding(2.dp)
                 .clip(CircleShape)
-                .background(if (online) OnionUi.Online else OnionUi.TextSecondary)
+                .background(if (online) OnionUi.Online else OnionUi.TextMuted)
         )
     }
 }

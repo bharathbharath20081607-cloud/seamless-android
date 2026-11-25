@@ -1610,12 +1610,10 @@ class TorGroupMessaging private constructor(context: Context) {
         val inserted = groupDao.insertGroupMessageIfAbsent(
             GroupMessageEntity(messageId, groupId, sender.onionAddress, sender.nickname, "Photo", safeTimestamp, false, STATE_DELIVERED, previewPath, "image/webp")
         )
-        if (inserted != -1L) {
-            if (visibleGroupId != groupId) {
-                notifier.showGroupEvent(groupId, group.name, "${sender.nickname}: 📷 Photo", senderName = sender.nickname)
-            } else {
-                notifier.playForegroundChime()
-            }
+        if (inserted != -1L && visibleGroupId != groupId &&
+            !com.seamless.android.util.AppForegroundTracker.isAppInForeground(appContext)
+        ) {
+            notifier.showGroupEvent(groupId, group.name, "${sender.nickname}: 📷 Photo", senderName = sender.nickname)
         }
         return true
     }
@@ -1701,11 +1699,11 @@ class TorGroupMessaging private constructor(context: Context) {
             }
             return true
         }
-        if (visibleGroupId != groupId) {
+        if (visibleGroupId != groupId &&
+            !com.seamless.android.util.AppForegroundTracker.isAppInForeground(appContext)
+        ) {
             val label = TorRichChatCodec.friendlyPreviewText(rowText, normalizedMime)
             notifier.showGroupEvent(groupId, group.name, "${sender.nickname}: $label", senderName = sender.nickname)
-        } else {
-            notifier.playForegroundChime()
         }
         return true
     }
@@ -2654,7 +2652,9 @@ class TorGroupMessaging private constructor(context: Context) {
         purgeExpiredMessages(event.groupId)
         if (inserted != -1L) {
             maybeGossipSignedGroupEvent(senderCanon, event.groupId, event.dagEvent, event.relayHops)
-            if (visibleGroupId != event.groupId) {
+            if (visibleGroupId != event.groupId &&
+                !com.seamless.android.util.AppForegroundTracker.isAppInForeground(appContext)
+            ) {
                 val cleanPreview = TorRichChatCodec.friendlyPreviewText(formattedText).take(140)
                 notifier.showGroupEvent(
                     event.groupId,
@@ -2662,8 +2662,6 @@ class TorGroupMessaging private constructor(context: Context) {
                     "${sender.nickname}: $cleanPreview",
                     senderName = sender.nickname
                 )
-            } else {
-                notifier.playForegroundChime()
             }
         }
         return InboundResult.HANDLED
@@ -2912,7 +2910,9 @@ class TorGroupMessaging private constructor(context: Context) {
                         deliveryState = STATE_DELIVERED
                     )
                 )
-                if (inserted != -1L && visibleGroupId != group.groupId) {
+                if (inserted != -1L && visibleGroupId != group.groupId &&
+                    !com.seamless.android.util.AppForegroundTracker.isAppInForeground(appContext)
+                ) {
                     val cleanPreview = TorRichChatCodec.friendlyPreviewText(formatted).take(140)
                     notifier.showGroupEvent(group.groupId, group.name, "$authorName: $cleanPreview", senderName = authorName)
                 }

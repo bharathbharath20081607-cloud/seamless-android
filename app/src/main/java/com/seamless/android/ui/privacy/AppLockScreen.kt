@@ -185,9 +185,9 @@ fun AppLockScreen(
 
     val gradient = Brush.verticalGradient(
         colors = listOf(
-            Color(0xFF0D0D1A),
-            Color(0xFF1A1A2E),
-            Color(0xFF16213E)
+            Color(0xFF07090E),
+            Color(0xFF0C1219),
+            Color(0xFF07090E)
         )
     )
 
@@ -204,11 +204,11 @@ fun AppLockScreen(
         ) {
             Box(
                 modifier = Modifier
-                    .size(100.dp)
+                    .size(96.dp)
                     .clip(CircleShape)
                     .background(
                         Brush.linearGradient(
-                            colors = listOf(Color(0xFF6366F1), Color(0xFF8B5CF6))
+                            colors = listOf(Color(0xFF113D33), Color(0xFF0B2922))
                         )
                     ),
                 contentAlignment = Alignment.Center
@@ -216,25 +216,25 @@ fun AppLockScreen(
                 Icon(
                     Icons.Default.Lock,
                     contentDescription = null,
-                    modifier = Modifier.size(48.dp),
-                    tint = Color.White
+                    modifier = Modifier.size(44.dp),
+                    tint = Color(0xFF34D399)
                 )
             }
 
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(30.dp))
 
             Text(
                 "Seamless is Locked",
-                color = Color.White,
+                color = Color(0xFFF2F4F8),
                 fontSize = 24.sp,
                 fontWeight = FontWeight.Bold
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             Text(
                 "Your messages are protected.\nAuthenticate to continue.",
-                color = Color.White.copy(alpha = 0.6f),
+                color = Color(0xFF94A3B8),
                 fontSize = 14.sp,
                 textAlign = TextAlign.Center
             )
@@ -243,21 +243,21 @@ fun AppLockScreen(
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     authError!!,
-                    color = Color(0xFFFF5555),
+                    color = Color(0xFFEF4444),
                     fontSize = 13.sp,
                     textAlign = TextAlign.Center
                 )
             }
 
-            Spacer(modifier = Modifier.height(40.dp))
+            Spacer(modifier = Modifier.height(36.dp))
 
             Button(
                 onClick = { authenticate() },
                 enabled = !isAuthenticating,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF00D4AA)
+                    containerColor = Color(0xFF10B981)
                 ),
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(999.dp),
                 modifier = Modifier
                     .fillMaxWidth(0.75f)
                     .height(52.dp)
@@ -266,12 +266,12 @@ fun AppLockScreen(
                     Icons.Default.Fingerprint,
                     contentDescription = null,
                     modifier = Modifier.size(24.dp),
-                    tint = Color.Black
+                    tint = Color(0xFF04130E)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    if (isAuthenticating) "Authenticating..." else "Unlock",
-                    color = Color.Black,
+                    if (isAuthenticating) "Authenticating…" else "Unlock",
+                    color = Color(0xFF04130E),
                     fontWeight = FontWeight.Bold,
                     fontSize = 16.sp
                 )
@@ -281,8 +281,8 @@ fun AppLockScreen(
 
             OutlinedButton(
                 onClick = { launchDeviceCredentialFallback() },
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.35f)),
-                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.22f)),
+                shape = RoundedCornerShape(999.dp),
                 modifier = Modifier
                     .fillMaxWidth(0.75f)
                     .height(48.dp)
@@ -290,13 +290,13 @@ fun AppLockScreen(
                 Icon(
                     Icons.Default.Dialpad,
                     contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                    tint = Color.White
+                    modifier = Modifier.size(19.dp),
+                    tint = Color(0xFFF2F4F8)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     "Unlock with PIN / Pattern",
-                    color = Color.White,
+                    color = Color(0xFFF2F4F8),
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 14.sp
                 )
