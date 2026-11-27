@@ -13,10 +13,17 @@ import com.seamless.android.service.CallForegroundService
 class CallNotificationActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         val appContext = context.applicationContext
+        val groupCallManager = com.seamless.android.call.GroupCallManager.getInstance(appContext)
         val callManager = SeamlessCallManager.getInstance(appContext)
         when (intent?.action) {
-            CallForegroundService.ACTION_DECLINE_CALL -> callManager.declineIncomingCall()
-            CallForegroundService.ACTION_END_CALL -> callManager.endCall("Call ended", notifyPeer = true)
+            CallForegroundService.ACTION_DECLINE_CALL -> {
+                if (groupCallManager.hasActiveCall()) groupCallManager.declineIncomingGroupCall()
+                else callManager.declineIncomingCall()
+            }
+            CallForegroundService.ACTION_END_CALL -> {
+                if (groupCallManager.hasActiveCall()) groupCallManager.leaveCall()
+                else callManager.endCall("Call ended", notifyPeer = true)
+            }
         }
     }
 }

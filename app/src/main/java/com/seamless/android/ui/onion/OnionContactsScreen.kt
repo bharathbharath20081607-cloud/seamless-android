@@ -151,6 +151,8 @@ fun OnionContactsScreen(
     val connectedPeers by messagingService.connectedPeersFlow.collectAsState()
     val hiddenStatus by hiddenServiceManager.statusFlow.collectAsState()
     val recentMessages by messageRepository.getRecentConversations().collectAsState(initial = emptyList())
+    val activeGroupRooms by com.seamless.android.call.GroupCallManager.getInstance(context)
+        .activeRoomsByGroupFlow.collectAsState()
 
     var selectedTab by remember(initialTab) { mutableStateOf(initialTab) }
     var showShareSheet by remember { mutableStateOf(false) }
@@ -270,7 +272,29 @@ fun OnionContactsScreen(
                             selectedTab = index
                             onTabChanged(index)
                         },
-                        text = { Text(label) },
+                        text = {
+                            if (index == 1 && activeGroupRooms.isNotEmpty()) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(label)
+                                    Spacer(Modifier.width(6.dp))
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(CircleShape)
+                                            .background(OnionUi.Online.copy(alpha = 0.20f))
+                                            .padding(horizontal = 6.dp, vertical = 1.dp)
+                                    ) {
+                                        Text(
+                                            "${activeGroupRooms.size} Live",
+                                            color = OnionUi.Online,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            } else {
+                                Text(label)
+                            }
+                        },
                         icon = {
                             Icon(
                                 when (index) {

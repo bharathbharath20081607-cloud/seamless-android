@@ -12,8 +12,12 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 import kotlin.math.min
 import kotlin.math.pow
 
@@ -38,9 +42,12 @@ class OnionMessageQueue private constructor(private val context: Context) {
         private const val TAG = "OnionMessageQueue"
         private const val QUEUE_FILE = "onion_message_queue.json"
         private const val DELIVERY_STATUS_FILE = "delivery_status.json"
+        private const val ENCRYPTED_SNAPSHOT_FILE = "onion_queue_v2.enc"
         private const val QUEUE_PREFS = "onion_message_queue_secure"
         private const val QUEUE_DATA_KEY = "queue_data"
         private const val DELIVERY_DATA_KEY = "delivery_data"
+        private const val QUEUE_FILE_AES_KEY = "queue_file_aes_key"
+        private const val SNAPSHOT_VERSION: Byte = 1
         
         // Retry configuration
         const val BASE_RETRY_DELAY_MS = 2_500L        // 2.5 seconds fast initial retry
@@ -63,11 +70,11 @@ class OnionMessageQueue private constructor(private val context: Context) {
         // preferences is expensive. Writes are coalesced into one snapshot
         // per debounce window instead of one per state transition.
         const val SAVE_DEBOUNCE_MS = 250L
-        // File chunks are ordered over the Tor stream; a 40-cell window (~160 KB
-        // of 4 KB frames) keeps the circuit saturated while slicing 12 frames per
-        // dispatch pass so text, control, and call frames never wait behind an image burst.
-        const val ATTACHMENT_WINDOW_SIZE = 96
-        const val ATTACHMENT_DISPATCH_SLICE = 32
+        // High-throughput bulk transfer window sized for up to 50 MB documents while
+        // still letting small control, chat, and call frames interleave cleanly.
+        const val ATTACHMENT_WINDOW_SIZE = 192
+        const val ATTACHMENT_DISPATCH_SLICE = 64
+        private const val COMPACT_DELIVERED_THRESHOLD = 128
         
         // Cleanup
         const val MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000L  // 7 days
@@ -104,6 +111,27 @@ class OnionMessageQueue private constructor(private val context: Context) {
     
     // Message queues per recipient
     private val queues = ConcurrentHashMap<String, MutableList<QueuedMessage>>()
+    // O(1) index from frame messageId -> QueuedMessage (protected by mutex)
+    private val messageById = HashMap<String, QueuedMessage>()
+    private var deliveredAttachmentChunksSinceCompact = 0
+
+    // Live outgoing attachment progress tracking: uiMessageId -> counters
+    data class OutgoingAttachmentStats(
+        val sentUnits: Int,
+        val ackedUnits: Int,
+        val totalUnits: Int
+    )
+
+    private data class OutgoingTracker(
+        val totalUnits: Int,
+        val sentIds: HashSet<String> = HashSet(),
+        val ackedIds: HashSet<String> = HashSet()
+    )
+
+    private val outgoingTrackers = ConcurrentHashMap<String, OutgoingTracker>()
+    private val _outgoingAttachmentProgressFlow = MutableStateFlow<Map<String, OutgoingAttachmentStats>>(emptyMap())
+    val outgoingAttachmentProgressFlow: StateFlow<Map<String, OutgoingAttachmentStats>> =
+        _outgoingAttachmentProgressFlow.asStateFlow()
     
     // Delivery status tracking
     private val deliveryStatus = ConcurrentHashMap<String, DeliveryInfo>()
@@ -121,6 +149,17 @@ class OnionMessageQueue private constructor(private val context: Context) {
         loadFromDisk()
         startCleanupLoop()
     }
+
+    data class LazyFileFrameSpec(
+        val frameTypeCode: Byte,
+        val sequence: Long,
+        val timestamp: Long,
+        val transferId: String,
+        val sourcePath: String,
+        val indexOrBlock: Int,
+        val chunkStride: Int,
+        val totalBytes: Int
+    )
     
     /**
      * Queued message data structure
@@ -140,14 +179,54 @@ class OnionMessageQueue private constructor(private val context: Context) {
         var retryCount: Int = 0,
         var nextRetryAt: Long = 0L,
         val createdAt: Long = System.currentTimeMillis(),
-        var lastAttemptAt: Long = 0L
+        var lastAttemptAt: Long = 0L,
+        val lazyFileSpec: LazyFileFrameSpec? = null
     ) {
+        fun materializeFrameData(attachmentTransfer: TorAttachmentTransfer): ByteArray {
+            if (frameData.isNotEmpty()) return frameData
+            val spec = lazyFileSpec ?: error("Missing frame data and lazy file spec for $id")
+            val transferUuid = UUID.fromString(spec.transferId)
+            val sourceFile = File(spec.sourcePath)
+            val payload = when (spec.frameTypeCode) {
+                OnionMessageProtocol.FrameType.FILE_CHUNK.code ->
+                    attachmentTransfer.readChunkPayloadFromFile(
+                        sourceFile = sourceFile,
+                        transferId = transferUuid,
+                        index = spec.indexOrBlock,
+                        stride = spec.chunkStride,
+                        totalBytes = spec.totalBytes
+                    )
+                OnionMessageProtocol.FrameType.FILE_PARITY.code ->
+                    attachmentTransfer.readParityPayloadFromFile(
+                        sourceFile = sourceFile,
+                        transferId = transferUuid,
+                        blockIndex = spec.indexOrBlock,
+                        stride = spec.chunkStride,
+                        totalBytes = spec.totalBytes
+                    )
+                else -> error("Unsupported lazy frame type: ${spec.frameTypeCode}")
+            }
+            val type = OnionMessageProtocol.FrameType.fromCode(spec.frameTypeCode)
+                ?: error("Unknown lazy frame type: ${spec.frameTypeCode}")
+            return OnionMessageProtocol.OnionFrame(
+                messageId = UUID.fromString(id),
+                sequence = spec.sequence,
+                timestamp = spec.timestamp,
+                frameType = type,
+                payload = payload
+            ).encode()
+        }
+
         // For JSON serialization
         fun toSerializable(): SerializableQueuedMessage {
             return SerializableQueuedMessage(
                 id = id,
                 recipientOnion = recipientOnion,
-                frameDataBase64 = android.util.Base64.encodeToString(frameData, android.util.Base64.NO_WRAP),
+                frameDataBase64 = if (frameData.isNotEmpty()) {
+                    android.util.Base64.encodeToString(frameData, android.util.Base64.NO_WRAP)
+                } else {
+                    ""
+                },
                 mailboxPayloadBase64 = mailboxPayload?.let {
                     android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP)
                 },
@@ -158,7 +237,8 @@ class OnionMessageQueue private constructor(private val context: Context) {
                 retryCount = retryCount,
                 nextRetryAt = nextRetryAt,
                 createdAt = createdAt,
-                lastAttemptAt = lastAttemptAt
+                lastAttemptAt = lastAttemptAt,
+                lazyFileSpec = lazyFileSpec
             )
         }
         
@@ -174,7 +254,7 @@ class OnionMessageQueue private constructor(private val context: Context) {
     data class SerializableQueuedMessage(
         val id: String,
         val recipientOnion: String,
-        val frameDataBase64: String,
+        val frameDataBase64: String = "",
         val mailboxPayloadBase64: String? = null,
         // Nullable so queues written before this format upgrade can still load.
         val uiMessageId: String? = null,
@@ -184,13 +264,18 @@ class OnionMessageQueue private constructor(private val context: Context) {
         val retryCount: Int,
         val nextRetryAt: Long,
         val createdAt: Long,
-        val lastAttemptAt: Long
+        val lastAttemptAt: Long,
+        val lazyFileSpec: LazyFileFrameSpec? = null
     ) {
         fun toQueuedMessage(): QueuedMessage {
             return QueuedMessage(
                 id = id,
                 recipientOnion = recipientOnion,
-                frameData = android.util.Base64.decode(frameDataBase64, android.util.Base64.NO_WRAP),
+                frameData = if (frameDataBase64.isNotEmpty()) {
+                    android.util.Base64.decode(frameDataBase64, android.util.Base64.NO_WRAP)
+                } else {
+                    ByteArray(0)
+                },
                 mailboxPayload = mailboxPayloadBase64?.let {
                     android.util.Base64.decode(it, android.util.Base64.NO_WRAP)
                 },
@@ -201,7 +286,8 @@ class OnionMessageQueue private constructor(private val context: Context) {
                 retryCount = retryCount,
                 nextRetryAt = nextRetryAt,
                 createdAt = createdAt,
-                lastAttemptAt = lastAttemptAt
+                lastAttemptAt = lastAttemptAt,
+                lazyFileSpec = lazyFileSpec
             )
         }
     }
@@ -250,6 +336,7 @@ class OnionMessageQueue private constructor(private val context: Context) {
         
         val queue = queues.getOrPut(recipientOnion) { mutableListOf() }
         queue.add(message)
+        messageById[message.id] = message
         
         // Track delivery status
         deliveryStatus[message.id] = DeliveryInfo(
@@ -268,10 +355,12 @@ class OnionMessageQueue private constructor(private val context: Context) {
     }
 
     data class BatchFrameSpec(
-        val frame: OnionMessageProtocol.OnionFrame,
+        val frame: OnionMessageProtocol.OnionFrame? = null,
         val mailboxPayload: ByteArray? = null,
-        val uiMessageId: String = frame.messageId.toString(),
-        val completesUiMessage: Boolean = true
+        val uiMessageId: String = frame?.messageId?.toString().orEmpty(),
+        val completesUiMessage: Boolean = true,
+        val lazyId: UUID? = null,
+        val lazySpec: LazyFileFrameSpec? = null
     )
 
     suspend fun enqueueBatch(
@@ -282,25 +371,47 @@ class OnionMessageQueue private constructor(private val context: Context) {
         val now = System.currentTimeMillis()
         val queue = queues.getOrPut(recipientOnion) { mutableListOf() }
         val ids = ArrayList<String>(specs.size)
+        val trackedByUi = HashMap<String, Int>()
         for (spec in specs) {
-            val id = spec.frame.messageId.toString()
-            queue.add(
-                QueuedMessage(
-                    id = id,
-                    recipientOnion = recipientOnion,
-                    frameData = spec.frame.encode(),
-                    mailboxPayload = spec.mailboxPayload,
-                    uiMessageId = spec.uiMessageId,
-                    completesUiMessage = spec.completesUiMessage,
-                    state = OnionMessageProtocol.DeliveryState.PENDING,
-                    nextRetryAt = now
-                )
+            val resolvedFrame = spec.frame
+            val id = resolvedFrame?.messageId?.toString()
+                ?: spec.lazyId?.toString()
+                ?: UUID.randomUUID().toString()
+            val encodedBytes = resolvedFrame?.encode() ?: ByteArray(0)
+            val uiId = spec.uiMessageId.ifBlank { id }
+            val qm = QueuedMessage(
+                id = id,
+                recipientOnion = recipientOnion,
+                frameData = encodedBytes,
+                mailboxPayload = spec.mailboxPayload,
+                uiMessageId = uiId,
+                completesUiMessage = spec.completesUiMessage,
+                state = OnionMessageProtocol.DeliveryState.PENDING,
+                nextRetryAt = now,
+                lazyFileSpec = spec.lazySpec
             )
+            queue.add(qm)
+            messageById[id] = qm
             deliveryStatus[id] = DeliveryInfo(
                 messageId = id,
                 state = OnionMessageProtocol.DeliveryState.PENDING
             )
+            if (isAttachmentFrame(qm)) {
+                trackedByUi[uiId] = (trackedByUi[uiId] ?: 0) + 1
+            }
             ids.add(id)
+        }
+        if (trackedByUi.isNotEmpty()) {
+            trackedByUi.forEach { (uiId, count) ->
+                val prev = outgoingTrackers[uiId]
+                val updated = if (prev == null) {
+                    OutgoingTracker(totalUnits = count)
+                } else {
+                    prev.copy(totalUnits = prev.totalUnits + count)
+                }
+                outgoingTrackers[uiId] = updated
+            }
+            publishOutgoingProgress()
         }
         saveToDisk()
         Log.d(TAG, "📬 Batch-enqueued ${ids.size} frames for $recipientOnion")
@@ -325,11 +436,19 @@ class OnionMessageQueue private constructor(private val context: Context) {
     suspend fun markSentBatch(messageIds: Collection<String>) = mutex.withLock {
         if (messageIds.isEmpty()) return@withLock
         val now = System.currentTimeMillis()
+        var trackerChanged = false
         for (messageId in messageIds) {
             updateMessageState(messageId, OnionMessageProtocol.DeliveryState.SENT)
-            findMessage(messageId)?.lastAttemptAt = now
+            val msg = findMessage(messageId)
+            msg?.lastAttemptAt = now
             deliveryStatus[messageId]?.sentAt = now
+            if (msg != null) {
+                outgoingTrackers[msg.uiMessageId]?.let { tracker ->
+                    if (tracker.sentIds.add(messageId)) trackerChanged = true
+                }
+            }
         }
+        if (trackerChanged) publishOutgoingProgress()
         saveToDisk()
     }
 
@@ -398,29 +517,65 @@ class OnionMessageQueue private constructor(private val context: Context) {
      * Mark a message as delivered (ACK received)
      */
     suspend fun markDelivered(messageId: String) = mutex.withLock {
+        val msg = findMessage(messageId)
         updateMessageState(messageId, OnionMessageProtocol.DeliveryState.DELIVERED)
         deliveryStatus[messageId]?.deliveredAt = System.currentTimeMillis()
-        
-        // Remove from queue
-        removeFromQueue(messageId)
+        if (msg != null) {
+            outgoingTrackers[msg.uiMessageId]?.let { tracker ->
+                if (tracker.ackedIds.add(messageId)) {
+                    publishOutgoingProgress()
+                }
+            }
+        }
+        if (msg != null && !msg.completesUiMessage && isAttachmentFrame(msg)) {
+            if (++deliveredAttachmentChunksSinceCompact >= COMPACT_DELIVERED_THRESHOLD) {
+                deliveredAttachmentChunksSinceCompact = 0
+                compactDeliveredAttachmentChunksLocked()
+            }
+        } else {
+            removeFromQueue(messageId)
+        }
         saveToDisk()
         
         Log.i(TAG, "✅ Message $messageId delivered")
+    }
+
+    private fun compactDeliveredAttachmentChunksLocked() {
+        for (queue in queues.values) {
+            val iter = queue.iterator()
+            while (iter.hasNext()) {
+                val item = iter.next()
+                if (item.state == OnionMessageProtocol.DeliveryState.DELIVERED &&
+                    !item.completesUiMessage &&
+                    isAttachmentFrame(item)
+                ) {
+                    iter.remove()
+                    messageById.remove(item.id)
+                }
+            }
+        }
     }
 
     /** Removes all transport frames once the final frame of one attachment is ACKed. */
     suspend fun markAttachmentDelivered(uiMessageId: String) = mutex.withLock {
         var removed = false
         for (queue in queues.values) {
-            val matching = queue.filter { it.uiMessageId == uiMessageId }
-            if (matching.isNotEmpty()) {
-                queue.removeAll(matching.toSet())
-                matching.forEach { deliveryStatus[it.id]?.apply {
-                    state = OnionMessageProtocol.DeliveryState.DELIVERED
-                    deliveredAt = System.currentTimeMillis()
-                } }
-                removed = true
+            val iter = queue.iterator()
+            while (iter.hasNext()) {
+                val item = iter.next()
+                if (item.uiMessageId == uiMessageId) {
+                    iter.remove()
+                    messageById.remove(item.id)
+                    deliveryStatus[item.id]?.apply {
+                        state = OnionMessageProtocol.DeliveryState.DELIVERED
+                        deliveredAt = System.currentTimeMillis()
+                    }
+                    removed = true
+                }
             }
+        }
+        if (outgoingTrackers.remove(uiMessageId) != null) {
+            publishOutgoingProgress()
         }
         if (removed) saveToDisk()
     }
@@ -661,7 +816,20 @@ class OnionMessageQueue private constructor(private val context: Context) {
             .toList()
     }
 
+    private fun publishOutgoingProgress() {
+        _outgoingAttachmentProgressFlow.value = outgoingTrackers.mapValues { (_, tracker) ->
+            OutgoingAttachmentStats(
+                sentUnits = tracker.sentIds.size,
+                ackedUnits = tracker.ackedIds.size,
+                totalUnits = tracker.totalUnits
+            )
+        }
+    }
+
     private fun frameType(message: QueuedMessage): OnionMessageProtocol.FrameType? {
+        message.lazyFileSpec?.let { spec ->
+            OnionMessageProtocol.FrameType.fromCode(spec.frameTypeCode)?.let { return it }
+        }
         val data = message.frameData
         return if (data.size >= OnionMessageProtocol.HEADER_SIZE) {
             OnionMessageProtocol.FrameType.fromCode(data[33])
@@ -670,13 +838,7 @@ class OnionMessageQueue private constructor(private val context: Context) {
         }
     }
 
-    private fun findMessage(messageId: String): QueuedMessage? {
-        for (queue in queues.values) {
-            val message = queue.find { it.id == messageId }
-            if (message != null) return message
-        }
-        return null
-    }
+    private fun findMessage(messageId: String): QueuedMessage? = messageById[messageId]
 
     private fun ackRetryDelay(retryCount: Int, isBulkChunk: Boolean = false): Long {
         val baseDelay = if (isBulkChunk) ATTACHMENT_ACK_RETRY_DELAY_MS else ACK_RETRY_DELAY_MS
@@ -706,9 +868,8 @@ class OnionMessageQueue private constructor(private val context: Context) {
         now - message.createdAt >= MESSAGE_TTL_MS
     
     private fun removeFromQueue(messageId: String) {
-        for (queue in queues.values) {
-            queue.removeIf { it.id == messageId }
-        }
+        val removed = messageById.remove(messageId) ?: return
+        queues[removed.recipientOnion]?.remove(removed)
     }
     
     private suspend fun emitUpdate(messageId: String, state: OnionMessageProtocol.DeliveryState) {
@@ -786,11 +947,18 @@ class OnionMessageQueue private constructor(private val context: Context) {
                 expired || it.state == OnionMessageProtocol.DeliveryState.FAILED
             }
             removed += toRemove.size
+            toRemove.forEach { messageById.remove(it.id) }
             queue.removeAll(toRemove.toSet())
         }
         
         // Remove empty queues
         queues.entries.removeIf { it.value.isEmpty() }
+
+        // Drop completed/expired UI trackers no longer present in any queue
+        val activeUiIds = queues.values.flatten().mapTo(HashSet()) { it.uiMessageId }
+        if (outgoingTrackers.keys.removeAll { it !in activeUiIds }) {
+            publishOutgoingProgress()
+        }
 
         // Cleanup old delivery status entries (never delete entries for still-pending queued messages)
         val activeIds = queues.values.flatten().mapTo(HashSet()) { it.id }
@@ -815,45 +983,137 @@ class OnionMessageQueue private constructor(private val context: Context) {
     
     // ========== Persistence ==========
     
+    private data class EncryptedQueuePayload(
+        val queues: Map<String, List<SerializableQueuedMessage>> = emptyMap(),
+        val deliveryStatus: Map<String, DeliveryInfo> = emptyMap()
+    )
+
+    private fun getOrCreateSnapshotKey(): ByteArray {
+        val existingB64 = persistencePrefs.getString(QUEUE_FILE_AES_KEY, null)
+        if (!existingB64.isNullOrBlank()) {
+            val decoded = runCatching { android.util.Base64.decode(existingB64, android.util.Base64.NO_WRAP) }.getOrNull()
+            if (decoded != null && decoded.size == 32) return decoded
+        }
+        val key = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        persistencePrefs.edit()
+            .putString(QUEUE_FILE_AES_KEY, android.util.Base64.encodeToString(key, android.util.Base64.NO_WRAP))
+            .commit()
+        return key
+    }
+
+    private fun readEncryptedSnapshotFile(file: File): EncryptedQueuePayload? = runCatching {
+        if (!file.exists() || !file.isFile) return null
+        val raw = file.readBytes()
+        if (raw.size <= 1 + 12 + 16 || raw[0] != SNAPSHOT_VERSION) return null
+        val iv = raw.copyOfRange(1, 13)
+        val ciphertext = raw.copyOfRange(13, raw.size)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(getOrCreateSnapshotKey(), "AES"), GCMParameterSpec(128, iv))
+        val plain = String(cipher.doFinal(ciphertext), Charsets.UTF_8)
+        gson.fromJson(plain, EncryptedQueuePayload::class.java)
+    }.onFailure {
+        Log.w(TAG, "Encrypted queue snapshot unreadable: ${it.message}")
+    }.getOrNull()
+
+    private fun writeEncryptedSnapshotFile(file: File, payloadJson: String) {
+        val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(getOrCreateSnapshotKey(), "AES"), GCMParameterSpec(128, iv))
+        val encrypted = cipher.doFinal(payloadJson.toByteArray(Charsets.UTF_8))
+        val tmp = File(file.parentFile, "${file.name}.tmp")
+        tmp.outputStream().use { out ->
+            out.write(byteArrayOf(SNAPSHOT_VERSION))
+            out.write(iv)
+            out.write(encrypted)
+            out.flush()
+        }
+        if (file.exists()) file.delete()
+        if (!tmp.renameTo(file)) {
+            tmp.copyTo(file, overwrite = true)
+            tmp.delete()
+        }
+    }
+
     private fun loadFromDisk() {
         try {
-            // Migrate legacy files once, then retain all pending frames in
-            // Keystore-backed encrypted preferences. Synchronous loading avoids
-            // a new enqueue overwriting data that has not finished loading yet.
+            val snapshotFile = File(context.filesDir, ENCRYPTED_SNAPSHOT_FILE)
+            val snapshot = readEncryptedSnapshotFile(snapshotFile)
             val legacyQueueFile = File(context.filesDir, QUEUE_FILE)
             val legacyStatusFile = File(context.filesDir, DELIVERY_STATUS_FILE)
-            val queueJson = persistencePrefs.getString(QUEUE_DATA_KEY, null)
-                ?: legacyQueueFile.takeIf { it.exists() }?.readText()
-            val statusJson = persistencePrefs.getString(DELIVERY_DATA_KEY, null)
-                ?: legacyStatusFile.takeIf { it.exists() }?.readText()
 
-            if (!queueJson.isNullOrBlank()) {
-                val type = object : TypeToken<Map<String, List<SerializableQueuedMessage>>>() {}.type
-                val data: Map<String, List<SerializableQueuedMessage>> = gson.fromJson(queueJson, type)
-                queues.clear()
-                data.forEach { (recipient, messages) ->
-                    queues[recipient] = messages.map { it.toQueuedMessage() }.toMutableList()
+            queues.clear()
+            messageById.clear()
+            deliveryStatus.clear()
+            outgoingTrackers.clear()
+
+            if (snapshot != null) {
+                snapshot.queues.forEach { (recipient, messages) ->
+                    val list = messages.map { it.toQueuedMessage() }.toMutableList()
+                    queues[recipient] = list
+                    list.forEach { messageById[it.id] = it }
+                }
+                deliveryStatus.putAll(snapshot.deliveryStatus)
+            } else {
+                val queueJson = persistencePrefs.getString(QUEUE_DATA_KEY, null)
+                    ?: legacyQueueFile.takeIf { it.exists() }?.readText()
+                val statusJson = persistencePrefs.getString(DELIVERY_DATA_KEY, null)
+                    ?: legacyStatusFile.takeIf { it.exists() }?.readText()
+
+                if (!queueJson.isNullOrBlank()) {
+                    val type = object : TypeToken<Map<String, List<SerializableQueuedMessage>>>() {}.type
+                    val data: Map<String, List<SerializableQueuedMessage>> = gson.fromJson(queueJson, type)
+                    data.forEach { (recipient, messages) ->
+                        val list = messages.map { it.toQueuedMessage() }.toMutableList()
+                        queues[recipient] = list
+                        list.forEach { messageById[it.id] = it }
+                    }
+                }
+                if (!statusJson.isNullOrBlank()) {
+                    val type = object : TypeToken<Map<String, DeliveryInfo>>() {}.type
+                    val data: Map<String, DeliveryInfo> = gson.fromJson(statusJson, type)
+                    deliveryStatus.putAll(data)
+                }
+                if (queues.isNotEmpty() || legacyQueueFile.exists() || legacyStatusFile.exists()) {
+                    saveToDisk()
                 }
             }
-            if (!statusJson.isNullOrBlank()) {
-                val type = object : TypeToken<Map<String, DeliveryInfo>>() {}.type
-                val data: Map<String, DeliveryInfo> = gson.fromJson(statusJson, type)
-                deliveryStatus.clear()
-                deliveryStatus.putAll(data)
-            }
-            if (legacyQueueFile.exists() || legacyStatusFile.exists()) saveToDisk()
+            rebuildTrackersFromQueuesLocked()
             Log.d(TAG, "Loaded ${queues.values.sumOf { it.size }} queued messages")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load secure queue: ${e.message}")
         }
     }
+
+    private fun rebuildTrackersFromQueuesLocked() {
+        val trackers = HashMap<String, OutgoingTracker>()
+        queues.values.forEach { list ->
+            list.forEach { msg ->
+                if (isAttachmentFrame(msg)) {
+                    val existing = trackers.getOrPut(msg.uiMessageId) { OutgoingTracker(totalUnits = 0) }
+                    val nextTotal = existing.totalUnits + 1
+                    val updated = if (existing.totalUnits == nextTotal) existing else existing.copy(totalUnits = nextTotal)
+                    if (msg.state == OnionMessageProtocol.DeliveryState.SENT ||
+                        msg.state == OnionMessageProtocol.DeliveryState.SENDING
+                    ) {
+                        updated.sentIds.add(msg.id)
+                    } else if (msg.state == OnionMessageProtocol.DeliveryState.DELIVERED ||
+                        msg.state == OnionMessageProtocol.DeliveryState.READ
+                    ) {
+                        updated.sentIds.add(msg.id)
+                        updated.ackedIds.add(msg.id)
+                    }
+                    trackers[msg.uiMessageId] = updated
+                }
+            }
+        }
+        outgoingTrackers.clear()
+        outgoingTrackers.putAll(trackers)
+        publishOutgoingProgress()
+    }
     
     /**
-     * Requests a durable snapshot of the queue. Every state transition used to
-     * serialise and fsync the *entire* queue (all photo chunks) through
-     * encrypted preferences, which made a single photo cost hundreds of
-     * megabytes of writes while holding the queue lock. Requests are now
-     * coalesced: at most one snapshot per [SAVE_DEBOUNCE_MS].
+     * Requests a durable snapshot of the queue. Requests are coalesced so at most
+     * one AES-256-GCM encrypted file snapshot is written per [SAVE_DEBOUNCE_MS].
      */
     private fun saveToDisk() {
         if (!saveRequested.compareAndSet(false, true)) return
@@ -868,21 +1128,23 @@ class OnionMessageQueue private constructor(private val context: Context) {
         persistMutex.withLock {
             try {
                 // Snapshot under the queue lock so concurrent mutations cannot
-                // produce a torn view; commit outside it so delivery never
-                // waits on disk or encryption.
-                val (queueJson, statusJson) = mutex.withLock {
+                // produce a torn view; encrypt and commit outside it so delivery
+                // never waits on disk or AES-GCM encryption.
+                val snapshotJson = mutex.withLock {
                     val queueData = queues.mapValues { (_, messages) ->
                         messages.map { it.toSerializable() }
                     }
-                    gson.toJson(queueData) to gson.toJson(deliveryStatus.toMap())
+                    gson.toJson(EncryptedQueuePayload(queueData, deliveryStatus.toMap()))
                 }
-                val committed = withContext(Dispatchers.IO) {
-                    persistencePrefs.edit()
-                        .putString(QUEUE_DATA_KEY, queueJson)
-                        .putString(DELIVERY_DATA_KEY, statusJson)
-                        .commit()
+                withContext(Dispatchers.IO) {
+                    writeEncryptedSnapshotFile(File(context.filesDir, ENCRYPTED_SNAPSHOT_FILE), snapshotJson)
+                    if (persistencePrefs.contains(QUEUE_DATA_KEY) || persistencePrefs.contains(DELIVERY_DATA_KEY)) {
+                        persistencePrefs.edit()
+                            .remove(QUEUE_DATA_KEY)
+                            .remove(DELIVERY_DATA_KEY)
+                            .apply()
+                    }
                 }
-                if (!committed) throw IllegalStateException("Secure queue commit failed")
                 File(context.filesDir, QUEUE_FILE).delete()
                 File(context.filesDir, DELIVERY_STATUS_FILE).delete()
             } catch (e: Exception) {
@@ -901,8 +1163,12 @@ class OnionMessageQueue private constructor(private val context: Context) {
      */
     suspend fun clearAll() = mutex.withLock {
         queues.clear()
+        messageById.clear()
         deliveryStatus.clear()
+        outgoingTrackers.clear()
+        publishOutgoingProgress()
         persistencePrefs.edit().clear().commit()
+        File(context.filesDir, ENCRYPTED_SNAPSHOT_FILE).delete()
         File(context.filesDir, QUEUE_FILE).delete()
         File(context.filesDir, DELIVERY_STATUS_FILE).delete()
         Log.i(TAG, "🗑️ Cleared all queued messages")

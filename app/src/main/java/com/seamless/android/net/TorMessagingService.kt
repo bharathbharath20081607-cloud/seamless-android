@@ -67,6 +67,7 @@ class TorMessagingService private constructor(private val context: Context) {
         // Leave room for the encrypted envelope and fixed Tor frame metadata.
         // Enforce this at queue time so an accepted message is always sendable.
         private const val MAX_DIRECT_TEXT_BYTES = 3_700
+        private const val MAX_MAILBOX_ATTACHMENT_BYTES = 2 * 1_024 * 1_024
         private val DIRECT_SEALED_MAGIC = byteArrayOf(0x53, 0x54, 0x44, 0x50) // STDP
         
         @Volatile
@@ -124,6 +125,45 @@ class TorMessagingService private constructor(private val context: Context) {
     val typingPeersFlow: StateFlow<Set<String>> = _typingPeers
         .map { it.keys }
         .stateIn(scope, SharingStarted.Eagerly, emptySet())
+
+    private val outgoingAttachmentMeta = ConcurrentHashMap<String, Pair<String, Int>>() // uiMessageId -> (transferId, totalBytes)
+    private val outgoingAttachmentGroupAlias = ConcurrentHashMap<String, String>()    // transportUiId -> publicGroupMessageId
+
+    val attachmentTransferProgressFlow: StateFlow<Map<String, TorAttachmentTransfer.TransferProgress>> =
+        combine(
+            attachmentTransfer.incomingProgressFlow,
+            messageQueue.outgoingAttachmentProgressFlow
+        ) { incomingMap, outgoingStatsMap ->
+            val merged = LinkedHashMap<String, TorAttachmentTransfer.TransferProgress>(incomingMap.size + outgoingStatsMap.size)
+            merged.putAll(incomingMap)
+            val groupedOutgoing = LinkedHashMap<String, MutableList<Pair<String, OnionMessageQueue.OutgoingAttachmentStats>>>()
+            outgoingStatsMap.forEach { (transportUiId, stats) ->
+                val publicId = outgoingAttachmentGroupAlias[transportUiId] ?: transportUiId
+                groupedOutgoing.getOrPut(publicId) { mutableListOf() }.add(transportUiId to stats)
+            }
+            groupedOutgoing.forEach { (publicId, entries) ->
+                val firstMeta = outgoingAttachmentMeta[publicId]
+                    ?: outgoingAttachmentMeta[entries.first().first]
+                val totalBytes = firstMeta?.second?.toLong() ?: 0L
+                val totalUnits = entries.sumOf { it.second.totalUnits }.coerceAtLeast(1)
+                val doneUnits = entries.sumOf { (_, st) ->
+                    if (st.ackedUnits > 0) st.ackedUnits else st.sentUnits
+                }.coerceIn(0, totalUnits)
+                val transferredBytes = if (totalBytes > 0L) {
+                    ((doneUnits.toLong() * totalBytes) / totalUnits).coerceIn(0L, totalBytes)
+                } else 0L
+                merged[publicId] = TorAttachmentTransfer.TransferProgress(
+                    transferId = firstMeta?.first.orEmpty(),
+                    uiMessageId = publicId,
+                    transferredBytes = transferredBytes,
+                    totalBytes = totalBytes,
+                    doneUnits = doneUnits,
+                    totalUnits = totalUnits,
+                    isOutgoing = true
+                )
+            }
+            merged
+        }.stateIn(scope, SharingStarted.Eagerly, emptyMap())
 
     // 1-to-1 Rich Chat State sidecar (zero Room DB schema migration)
     private val directRichLock = Any()
@@ -884,7 +924,7 @@ class TorMessagingService private constructor(private val context: Context) {
         previewBytes = previewBytes
     )
 
-    /** Send a bounded image, voice note, or document (up to 1 MB) over Fountain-Warp Tor frames. */
+    /** Send a bounded image, voice note, or document (up to 50 MB) over Fountain-Warp Tor frames. */
     suspend fun sendAttachment(
         contactId: String,
         bytes: ByteArray,
@@ -895,7 +935,48 @@ class TorMessagingService private constructor(private val context: Context) {
         groupId: String? = null,
         groupMessageId: String? = null,
         finalChunkMessageId: UUID? = null,
-        previewBytes: ByteArray? = null
+        previewBytes: ByteArray? = null,
+        pageCount: Int = 0
+    ): Result<String> {
+        val transferId = UUID.randomUUID()
+        val stagedPath = try {
+            attachmentTransfer.saveOutgoing(transferId, bytes, mimeType)
+        } catch (e: Exception) {
+            return Result.failure(e)
+        }
+        return sendAttachmentFromFile(
+            contactId = contactId,
+            sourceFile = java.io.File(stagedPath),
+            mimeType = mimeType,
+            fileName = fileName,
+            durationMs = durationMs,
+            pageCount = pageCount,
+            viewOnce = viewOnce,
+            groupId = groupId,
+            groupMessageId = groupMessageId,
+            finalChunkMessageId = finalChunkMessageId,
+            previewBytes = previewBytes,
+            keepSourceFile = true,
+            transferIdOverride = transferId
+        )
+    }
+
+    /** Zero-RAM disk-streaming attachment sender supporting up to 50 MB files over Fountain-Warp Tor frames. */
+    suspend fun sendAttachmentFromFile(
+        contactId: String,
+        sourceFile: java.io.File,
+        mimeType: String,
+        fileName: String = "",
+        durationMs: Int = 0,
+        pageCount: Int = 0,
+        sha256Hex: String = "",
+        viewOnce: Boolean = false,
+        groupId: String? = null,
+        groupMessageId: String? = null,
+        finalChunkMessageId: UUID? = null,
+        previewBytes: ByteArray? = null,
+        keepSourceFile: Boolean = (groupId != null),
+        transferIdOverride: UUID? = null
     ): Result<String> {
         val contact = contactManager.getContact(contactId)
             ?: return Result.failure(IllegalArgumentException("Contact not found"))
@@ -906,25 +987,30 @@ class TorMessagingService private constructor(private val context: Context) {
         }
 
         return try {
-            val transferId = UUID.randomUUID()
+            val transferId = transferIdOverride ?: UUID.randomUUID()
             val attachmentMessageId = UUID.randomUUID()
+            val staged = attachmentTransfer.stageOutgoingFromFile(
+                transferId = transferId,
+                sourceFile = sourceFile,
+                mimeType = mimeType,
+                keepSourceFile = keepSourceFile,
+                sha256HexHint = sha256Hex
+            )
             val meta = attachmentTransfer.createMeta(
                 transferId = transferId,
-                mimeType = mimeType,
-                totalBytes = bytes.size,
+                mimeType = staged.normalizedMime,
+                totalBytes = staged.totalBytes,
                 senderPublicKey = getMyStaticPublicKeyHex(),
                 groupId = groupId,
                 groupMessageId = groupMessageId,
                 previewBytes = if (viewOnce) null else previewBytes,
                 fileName = fileName,
                 durationMs = durationMs,
-                viewOnce = viewOnce
+                viewOnce = viewOnce,
+                pageCount = pageCount,
+                sha256Hex = staged.sha256Hex
             )
-            val localPath = if (groupId == null) {
-                attachmentTransfer.saveOutgoing(transferId, bytes, meta.mimeType)
-            } else {
-                ""
-            }
+            val localPath = if (groupId == null) staged.path else ""
             if (contact.publicKey.isNotBlank()) {
                 circuitManager.ensureBulkConnectionAsync(contact.onionAddress)
             }
@@ -942,22 +1028,33 @@ class TorMessagingService private constructor(private val context: Context) {
                     TorRichChatCodec.AttachmentDescriptor(
                         kind = kind,
                         fileName = meta.fileName,
-                        totalBytes = bytes.size,
+                        totalBytes = staged.totalBytes,
                         durationMs = durationMs,
-                        viewOnce = viewOnce
+                        viewOnce = viewOnce,
+                        pageCount = pageCount,
+                        sha256 = staged.sha256Hex
                     )
                 )
             }
 
-            if (groupId == null) messageRepository.saveSentMessage(
-                messageId = attachmentMessageId.toString(),
-                contact = contact,
-                text = rowText,
-                timestamp = now,
-                deliveryRoute = OnionMessageProtocol.DeliveryRoute.QUEUED,
-                attachmentPath = localPath,
-                attachmentMimeType = meta.mimeType
-            )
+            if (groupId == null) {
+                messageRepository.saveSentMessage(
+                    messageId = attachmentMessageId.toString(),
+                    contact = contact,
+                    text = rowText,
+                    timestamp = now,
+                    deliveryRoute = OnionMessageProtocol.DeliveryRoute.QUEUED,
+                    attachmentPath = localPath,
+                    attachmentMimeType = meta.mimeType
+                )
+            }
+
+            val uiMsgId = attachmentMessageId.toString()
+            outgoingAttachmentMeta[uiMsgId] = transferId.toString() to staged.totalBytes
+            if (groupMessageId != null) {
+                outgoingAttachmentGroupAlias[uiMsgId] = groupMessageId
+                outgoingAttachmentMeta[groupMessageId] = transferId.toString() to staged.totalBytes
+            }
 
             val metaFrame = OnionMessageProtocol.OnionFrame(
                 messageId = UUID.randomUUID(),
@@ -966,77 +1063,84 @@ class TorMessagingService private constructor(private val context: Context) {
                 frameType = OnionMessageProtocol.FrameType.FILE_META,
                 payload = attachmentTransfer.encodeMeta(meta)
             )
-            val chunks = attachmentTransfer.split(bytes)
-            val paritiesByAfterIdx = attachmentTransfer
-                .generateFountainParities(transferId, chunks)
-                .associateBy { it.afterChunkIndex }
-            val batchSpecs = ArrayList<OnionMessageQueue.BatchFrameSpec>(1 + chunks.size + paritiesByAfterIdx.size)
+            val chunkCount = meta.chunkCount
+            val parityBlockCount = chunkCount / TorAttachmentTransfer.FOUNTAIN_BLOCK_SIZE
+            val batchSpecs = ArrayList<OnionMessageQueue.BatchFrameSpec>(1 + chunkCount + parityBlockCount)
             batchSpecs.add(
                 OnionMessageQueue.BatchFrameSpec(
                     frame = metaFrame,
-                    uiMessageId = attachmentMessageId.toString(),
+                    uiMessageId = uiMsgId,
                     completesUiMessage = false
                 )
             )
+
             var completionFrameId = ""
-            chunks.forEachIndexed { index, chunk ->
-                val chunkFrame = OnionMessageProtocol.OnionFrame(
-                    // Every frame needs its own transport identity. The final
-                    // chunk alone completes the single visible attachment message.
-                    messageId = if (index == chunks.lastIndex && finalChunkMessageId != null) {
-                        finalChunkMessageId
-                    } else {
-                        UUID.randomUUID()
-                    },
+            for (index in 0 until chunkCount) {
+                val isLast = index == chunkCount - 1
+                val chunkMsgId = if (isLast && finalChunkMessageId != null) finalChunkMessageId else UUID.randomUUID()
+                val chunkSpec = OnionMessageQueue.LazyFileFrameSpec(
+                    frameTypeCode = OnionMessageProtocol.FrameType.FILE_CHUNK.code,
                     sequence = sequenceManager.nextOutbound(),
                     timestamp = now,
-                    frameType = OnionMessageProtocol.FrameType.FILE_CHUNK,
-                    payload = attachmentTransfer.encodeChunk(transferId, index, chunk)
+                    transferId = transferId.toString(),
+                    sourcePath = staged.path,
+                    indexOrBlock = index,
+                    chunkStride = meta.chunkSize,
+                    totalBytes = staged.totalBytes
                 )
-                val parity = paritiesByAfterIdx[index]
-                if (index == chunks.lastIndex) {
-                    if (parity != null) {
+                val parityBlockIdx = if ((index + 1) % TorAttachmentTransfer.FOUNTAIN_BLOCK_SIZE == 0) {
+                    index / TorAttachmentTransfer.FOUNTAIN_BLOCK_SIZE
+                } else {
+                    -1
+                }
+                val paritySpec = if (parityBlockIdx in 0 until parityBlockCount) {
+                    OnionMessageQueue.LazyFileFrameSpec(
+                        frameTypeCode = OnionMessageProtocol.FrameType.FILE_PARITY.code,
+                        sequence = sequenceManager.nextOutbound(),
+                        timestamp = now,
+                        transferId = transferId.toString(),
+                        sourcePath = staged.path,
+                        indexOrBlock = parityBlockIdx,
+                        chunkStride = meta.chunkSize,
+                        totalBytes = staged.totalBytes
+                    )
+                } else null
+
+                if (isLast) {
+                    if (paritySpec != null) {
                         batchSpecs.add(
                             OnionMessageQueue.BatchFrameSpec(
-                                frame = OnionMessageProtocol.OnionFrame(
-                                    messageId = UUID.randomUUID(),
-                                    sequence = sequenceManager.nextOutbound(),
-                                    timestamp = now,
-                                    frameType = OnionMessageProtocol.FrameType.FILE_PARITY,
-                                    payload = parity.payload
-                                ),
-                                uiMessageId = attachmentMessageId.toString(),
+                                lazyId = UUID.randomUUID(),
+                                lazySpec = paritySpec,
+                                uiMessageId = uiMsgId,
                                 completesUiMessage = false
                             )
                         )
                     }
-                    completionFrameId = chunkFrame.messageId.toString()
+                    completionFrameId = chunkMsgId.toString()
                     batchSpecs.add(
                         OnionMessageQueue.BatchFrameSpec(
-                            frame = chunkFrame,
-                            uiMessageId = attachmentMessageId.toString(),
+                            lazyId = chunkMsgId,
+                            lazySpec = chunkSpec,
+                            uiMessageId = uiMsgId,
                             completesUiMessage = true
                         )
                     )
                 } else {
                     batchSpecs.add(
                         OnionMessageQueue.BatchFrameSpec(
-                            frame = chunkFrame,
-                            uiMessageId = attachmentMessageId.toString(),
+                            lazyId = chunkMsgId,
+                            lazySpec = chunkSpec,
+                            uiMessageId = uiMsgId,
                             completesUiMessage = false
                         )
                     )
-                    if (parity != null) {
+                    if (paritySpec != null) {
                         batchSpecs.add(
                             OnionMessageQueue.BatchFrameSpec(
-                                frame = OnionMessageProtocol.OnionFrame(
-                                    messageId = UUID.randomUUID(),
-                                    sequence = sequenceManager.nextOutbound(),
-                                    timestamp = now,
-                                    frameType = OnionMessageProtocol.FrameType.FILE_PARITY,
-                                    payload = parity.payload
-                                ),
-                                uiMessageId = attachmentMessageId.toString(),
+                                lazyId = UUID.randomUUID(),
+                                lazySpec = paritySpec,
+                                uiMessageId = uiMsgId,
                                 completesUiMessage = false
                             )
                         )
@@ -1045,11 +1149,11 @@ class TorMessagingService private constructor(private val context: Context) {
             }
             val queuedIds = messageQueue.enqueueBatch(contact.onionAddress, batchSpecs)
             val finalChunkId = completionFrameId.ifBlank { queuedIds.lastOrNull() ?: "" }
-            deliveryRoutes[attachmentMessageId.toString()] = TorDeliveryRoute.QUEUED
+            deliveryRoutes[uiMsgId] = TorDeliveryRoute.QUEUED
             dispatchRecipientNow(contact.onionAddress)
             Result.success(finalChunkId)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to queue attachment: ${e.message}")
+            Log.e(TAG, "Failed to queue file attachment: ${e.message}")
             Result.failure(e)
         }
     }
@@ -2264,7 +2368,9 @@ class TorMessagingService private constructor(private val context: Context) {
             peersIntroducedOnConnection.contains(recipientOnion)
         val stuckCandidates = if (introducedActive) {
             messages.filterNot { queued ->
-                OnionMessageProtocol.OnionFrame.decode(queued.frameData)?.frameType ==
+                queued.lazyFileSpec == null &&
+                    queued.frameData.isNotEmpty() &&
+                    OnionMessageProtocol.OnionFrame.decode(queued.frameData)?.frameType ==
                     OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
             }
         } else {
@@ -2345,12 +2451,14 @@ class TorMessagingService private constructor(private val context: Context) {
             peersIntroducedOnConnection.remove(recipientOnion)
         }
         val queuedExchangeFrame = messages.firstNotNullOfOrNull { queued ->
-            OnionMessageProtocol.OnionFrame.decode(queued.frameData)?.takeIf {
+            if (queued.lazyFileSpec != null || queued.frameData.isEmpty()) null
+            else OnionMessageProtocol.OnionFrame.decode(queued.frameData)?.takeIf {
                 it.frameType == OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
             }
         }
         val hasNormalMessages = messages.any { queued ->
-            OnionMessageProtocol.OnionFrame.decode(queued.frameData)?.frameType !=
+            queued.lazyFileSpec != null ||
+                OnionMessageProtocol.OnionFrame.decode(queued.frameData)?.frameType !=
                 OnionMessageProtocol.FrameType.CONTACT_EXCHANGE
         }
         val introducedOnThisConnection = peersIntroducedOnConnection.add(recipientOnion)
@@ -2411,10 +2519,7 @@ class TorMessagingService private constructor(private val context: Context) {
         var idx = 0
         while (idx < messages.size) {
             val firstMsg = messages[idx]
-            val isBulkFrame = firstMsg.frameData.size >= OnionMessageProtocol.HEADER_SIZE &&
-                (firstMsg.frameData[33] == OnionMessageProtocol.FrameType.FILE_CHUNK.code ||
-                    firstMsg.frameData[33] == OnionMessageProtocol.FrameType.FILE_PARITY.code ||
-                    firstMsg.frameData[33] == OnionMessageProtocol.FrameType.SYNC_BATCH.code)
+            val isBulkFrame = isBulkQueuedMessage(firstMsg)
             if (isBulkFrame) {
                 if (isCallActive && !circuitManager.hasActiveBulkConnection(recipientOnion)) {
                     circuitManager.ensureBulkConnectionAsync(recipientOnion)
@@ -2425,10 +2530,7 @@ class TorMessagingService private constructor(private val context: Context) {
                 val slice = ArrayList<OnionMessageQueue.QueuedMessage>(maxSlice)
                 while (idx < messages.size && slice.size < maxSlice) {
                     val m = messages[idx]
-                    val mBulk = m.frameData.size >= OnionMessageProtocol.HEADER_SIZE &&
-                        (m.frameData[33] == OnionMessageProtocol.FrameType.FILE_CHUNK.code ||
-                            m.frameData[33] == OnionMessageProtocol.FrameType.FILE_PARITY.code ||
-                            m.frameData[33] == OnionMessageProtocol.FrameType.SYNC_BATCH.code)
+                    val mBulk = isBulkQueuedMessage(m)
                     if (!mBulk) break
                     slice.add(m)
                     idx++
@@ -2592,7 +2694,7 @@ class TorMessagingService private constructor(private val context: Context) {
         val canonical = canonicalPeerKey(peerOnion)
         var channel = peerBulkChannels[canonical]
         if (channel == null) {
-            val created = Channel<ByteArray>(capacity = 32)
+            val created = Channel<ByteArray>(capacity = 256)
             val existing = peerBulkChannels.putIfAbsent(canonical, created)
             channel = existing ?: created.also { ch ->
                 peerBulkWorkers[canonical] = scope.launch {
@@ -3335,20 +3437,46 @@ class TorMessagingService private constructor(private val context: Context) {
             return false
         }
         val previewBytes = meta.previewBytes
-        if (!meta.viewOnce && previewBytes != null && previewBytes.isNotEmpty()) {
+        val kind = when {
+            meta.mimeType.startsWith("audio/") -> "voice"
+            meta.mimeType.startsWith("image/") -> "photo"
+            else -> "file"
+        }
+        val shouldCreateEarlyCard = !meta.viewOnce && ((previewBytes != null && previewBytes.isNotEmpty()) || kind == "file")
+        if (shouldCreateEarlyCard) {
             val contact = meta.senderPublicKey
                 .takeIf { it.isNotBlank() }
                 ?.let { contactManager.getContactByPublicKey(it) }
                 ?: contactManager.getContactByOnion(senderOnion)
-            val previewPath = attachmentTransfer.savePreview(meta.transferId, previewBytes)
+            val previewPath = previewBytes?.takeIf { it.isNotEmpty() }
+                ?.let { attachmentTransfer.savePreview(meta.transferId, it) }
+                ?: if (kind == "file") attachmentTransfer.saveStreamingPlaceholder(meta.transferId) else null
             if (contact != null && previewPath != null) {
+                val earlyText = if (kind == "photo" && meta.fileName.isBlank()) {
+                    "Photo"
+                } else {
+                    TorRichChatCodec.encodeAttachmentDescriptor(
+                        TorRichChatCodec.AttachmentDescriptor(
+                            kind = kind,
+                            fileName = meta.fileName,
+                            totalBytes = meta.totalBytes,
+                            durationMs = meta.durationMs,
+                            viewOnce = false,
+                            pageCount = meta.pageCount,
+                            sha256 = meta.sha256Hex
+                        )
+                    )
+                }
+                val earlyMime = if (kind == "photo") "image/webp" else meta.mimeType
                 if (meta.groupId != null && meta.groupMessageId != null) {
-                    if (groupMessaging.handleIncomingImagePreview(
+                    if (groupMessaging.handleIncomingAttachmentPreview(
                             sender = contact,
                             groupId = meta.groupId,
                             messageId = meta.groupMessageId,
                             timestamp = frame.timestamp,
-                            previewPath = previewPath
+                            rowText = earlyText,
+                            previewPath = previewPath,
+                            mimeType = earlyMime
                         )
                     ) {
                         previewShownTransfers.add(meta.transferId.toString())
@@ -3360,16 +3488,20 @@ class TorMessagingService private constructor(private val context: Context) {
                         messageRepository.saveReceivedMessage(
                             messageId = frame.messageId.toString(),
                             contact = contact,
-                            text = "Photo",
+                            text = earlyText,
                             timestamp = frame.timestamp,
                             attachmentPath = previewPath,
-                            attachmentMimeType = "image/webp"
+                            attachmentMimeType = earlyMime
                         )
                         previewShownTransfers.add(meta.transferId.toString())
                         if (!visibleChatContacts.contains(contact.id) &&
                             !com.seamless.android.util.AppForegroundTracker.isAppInForeground(context)
                         ) {
-                            messageNotifier.showIncoming(contact, "📷 Photo", isPhoto = true)
+                            messageNotifier.showIncoming(
+                                contact,
+                                TorRichChatCodec.friendlyPreviewText(earlyText, earlyMime),
+                                isPhoto = kind == "photo" && meta.fileName.isBlank()
+                            )
                         }
                     }
                 }
@@ -3447,7 +3579,9 @@ class TorMessagingService private constructor(private val context: Context) {
                 mimeType = completed.mimeType,
                 fileName = completed.fileName,
                 durationMs = completed.durationMs,
-                viewOnce = completed.viewOnce
+                viewOnce = completed.viewOnce,
+                pageCount = completed.pageCount,
+                sha256Hex = completed.sha256Hex
             )
             if (!accepted) { deduplicator.forget(frame.messageId); return false }
             previewShownTransfers.remove(completed.transferId.toString())
@@ -3475,7 +3609,9 @@ class TorMessagingService private constructor(private val context: Context) {
                     fileName = completed.fileName,
                     totalBytes = sizeBytes,
                     durationMs = completed.durationMs,
-                    viewOnce = completed.viewOnce
+                    viewOnce = completed.viewOnce,
+                    pageCount = completed.pageCount,
+                    sha256 = completed.sha256Hex
                 )
             )
         }
@@ -3557,6 +3693,12 @@ class TorMessagingService private constructor(private val context: Context) {
             // A final photo receipt proves the mailbox/direct transfer is
             // complete. Discard its metadata and intermediate chunks together.
             messageQueue.markAttachmentDelivered(queuedMessage.uiMessageId)
+            outgoingAttachmentMeta.remove(queuedMessage.uiMessageId)
+            outgoingAttachmentGroupAlias.remove(queuedMessage.uiMessageId)?.let { publicId ->
+                if (!outgoingAttachmentGroupAlias.containsValue(publicId)) {
+                    outgoingAttachmentMeta.remove(publicId)
+                }
+            }
             try {
                 messageRepository.updateDeliveryState(
                     queuedMessage.uiMessageId,
@@ -3775,19 +3917,32 @@ class TorMessagingService private constructor(private val context: Context) {
         return deliveryRoutes[messageId]
     }
 
+    private fun isBulkQueuedMessage(msg: OnionMessageQueue.QueuedMessage): Boolean {
+        val lazyCode = msg.lazyFileSpec?.frameTypeCode
+        if (lazyCode != null) {
+            return lazyCode == OnionMessageProtocol.FrameType.FILE_CHUNK.code ||
+                lazyCode == OnionMessageProtocol.FrameType.FILE_PARITY.code
+        }
+        return msg.frameData.size >= OnionMessageProtocol.HEADER_SIZE &&
+            (msg.frameData[33] == OnionMessageProtocol.FrameType.FILE_CHUNK.code ||
+                msg.frameData[33] == OnionMessageProtocol.FrameType.FILE_PARITY.code ||
+                msg.frameData[33] == OnionMessageProtocol.FrameType.SYNC_BATCH.code)
+    }
+
     private fun prepareDirectFrameForDelivery(
         recipientOnion: String,
         message: OnionMessageQueue.QueuedMessage
     ): ByteArray {
-        val frame = OnionMessageProtocol.OnionFrame.decode(message.frameData)
-            ?: return message.frameData
+        val rawData = message.materializeFrameData(attachmentTransfer)
+        val frame = OnionMessageProtocol.OnionFrame.decode(rawData)
+            ?: return rawData
 
         if (frame.frameType == OnionMessageProtocol.FrameType.CONTACT_EXCHANGE) {
             return frame.copy(timestamp = System.currentTimeMillis()).encode()
         }
 
         if (isDirectSealedPayload(frame.payload)) {
-            return message.frameData
+            return rawData
         }
 
         // The outer timestamp is an anti-replay transport timestamp, not the
@@ -3805,7 +3960,8 @@ class TorMessagingService private constructor(private val context: Context) {
     ): ByteArray? {
         message.mailboxPayload?.let { return it }
 
-        val frame = OnionMessageProtocol.OnionFrame.decode(message.frameData) ?: return null
+        val rawData = message.materializeFrameData(attachmentTransfer)
+        val frame = OnionMessageProtocol.OnionFrame.decode(rawData) ?: return null
         if (frame.frameType != OnionMessageProtocol.FrameType.CONTACT_EXCHANGE &&
             isDirectSealedPayload(frame.payload)
         ) {
@@ -4483,6 +4639,10 @@ class TorMessagingService private constructor(private val context: Context) {
         message: OnionMessageQueue.QueuedMessage
     ): Boolean {
         if (mailboxFallbackDisabled.contains(message.id)) {
+            return false
+        }
+        val lazyTotal = message.lazyFileSpec?.totalBytes ?: 0
+        if (lazyTotal > MAX_MAILBOX_ATTACHMENT_BYTES) {
             return false
         }
 

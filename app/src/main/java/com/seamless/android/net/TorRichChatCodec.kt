@@ -42,7 +42,14 @@ object TorRichChatCodec {
         val fileName: String = "",
         val totalBytes: Int = 0,
         val durationMs: Int = 0,
-        val viewOnce: Boolean = false
+        val viewOnce: Boolean = false,
+        val pageCount: Int = 0,
+        val sha256: String = ""
+    )
+
+    data class PdfPageCitation(
+        val pageNumber: Int,
+        val note: String = ""
     )
 
     data class DirectControlEvent(
@@ -118,6 +125,11 @@ object TorRichChatCodec {
             if (desc.totalBytes > 0) put("s", desc.totalBytes)
             if (desc.durationMs > 0) put("d", desc.durationMs)
             if (desc.viewOnce) put("v", true)
+            if (desc.pageCount > 0) put("p", desc.pageCount)
+            val cleanSha = desc.sha256.trim().lowercase(Locale.US)
+            if (cleanSha.length == 64 && cleanSha.all { it.isDigit() || it in 'a'..'f' }) {
+                put("h", cleanSha)
+            }
         }
         val b64 = Base64.encodeToString(json.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
         return "$ATT_DESC_PREFIX$b64$MARKER_SUFFIX"
@@ -132,12 +144,19 @@ object TorRichChatCodec {
             val json = JSONObject(jsonStr)
             val kind = json.optString("k", "").takeIf { it in setOf("photo", "voice", "file") }
                 ?: return null
+            val sha = json.optString("h", "")
+                .trim()
+                .lowercase(Locale.US)
+                .takeIf { it.length == 64 && it.all { ch -> ch.isDigit() || ch in 'a'..'f' } }
+                .orEmpty()
             AttachmentDescriptor(
                 kind = kind,
                 fileName = json.optString("n", ""),
                 totalBytes = json.optInt("s", 0).coerceAtLeast(0),
                 durationMs = json.optInt("d", 0).coerceAtLeast(0),
-                viewOnce = json.optBoolean("v", false)
+                viewOnce = json.optBoolean("v", false),
+                pageCount = json.optInt("p", 0).coerceAtLeast(0),
+                sha256 = sha
             )
         }.getOrNull()
     }
@@ -211,7 +230,11 @@ object TorRichChatCodec {
                     val dur = if (desc.durationMs > 0) " (${formatDurationMs(desc.durationMs)})" else ""
                     "🎤 Voice message$dur"
                 }
-                "file" -> "📄 ${desc.fileName.ifBlank { "Document" }}"
+                "file" -> {
+                    val pageSuffix = if (desc.pageCount > 0) " (${desc.pageCount} pages)" else ""
+                    val fallback = if (desc.pageCount > 0) "PDF Document" else "Document"
+                    "📄 ${desc.fileName.ifBlank { fallback }}$pageSuffix"
+                }
                 else -> "📷 Photo"
             }
         }
@@ -220,6 +243,25 @@ object TorRichChatCodec {
         if (lowerMime?.startsWith("image/") == true && (body == "Photo" || body.isBlank())) return "📷 Photo"
         if (lowerMime != null && !lowerMime.startsWith("image/") && body.isBlank()) return "📄 Document"
         return body
+    }
+
+    private val PDF_PAGE_CITATION_REGEX = Regex(
+        """^📄\s*Page\s+(\d{1,5})(?:\s*[—\-:]\s*(.*))?$""",
+        setOf(RegexOption.DOT_MATCHES_ALL)
+    )
+
+    fun formatPdfPageCitation(pageNumber: Int, note: String = ""): String {
+        val safePage = pageNumber.coerceAtLeast(1)
+        val cleanNote = note.trim()
+        return if (cleanNote.isEmpty()) "📄 Page $safePage" else "📄 Page $safePage — $cleanNote"
+    }
+
+    fun parsePdfPageCitation(rawOrCleanBody: String): PdfPageCitation? {
+        val clean = parseReply(rawOrCleanBody).body.trim()
+        val match = PDF_PAGE_CITATION_REGEX.matchEntire(clean) ?: return null
+        val page = match.groupValues[1].toIntOrNull()?.takeIf { it >= 1 } ?: return null
+        val note = match.groupValues.getOrNull(2)?.trim().orEmpty()
+        return PdfPageCitation(pageNumber = page, note = note)
     }
 
     fun formatDurationMs(durationMs: Int): String {

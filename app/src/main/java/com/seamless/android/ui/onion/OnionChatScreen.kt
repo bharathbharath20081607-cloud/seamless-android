@@ -76,6 +76,7 @@ import com.seamless.android.net.OnionContactManager
 import com.seamless.android.net.OnionMessageProtocol
 import com.seamless.android.net.TorManager
 import com.seamless.android.net.TorContactTrustState
+import com.seamless.android.net.TorAttachmentTransfer
 import com.seamless.android.net.TorMessagingService
 import com.seamless.android.net.TorRichChatCodec
 import com.seamless.android.service.TorForegroundService
@@ -123,6 +124,7 @@ fun OnionChatScreen(
     
     // Messages from database
     val messagesFromDb by messageRepository.getMessagesForContact(contact).collectAsState(initial = emptyList())
+    val attachmentProgressMap by messagingService.attachmentTransferProgressFlow.collectAsState()
     val directReactionsMap by messagingService.directReactionsFlow.collectAsState()
     val directEditedIds by messagingService.directEditedIdsFlow.collectAsState()
     val directDeletedIds by messagingService.directDeletedIdsFlow.collectAsState()
@@ -148,6 +150,21 @@ fun OnionChatScreen(
     var showSearchBar by remember(contact.id) { mutableStateOf(false) }
     var searchQuery by remember(contact.id) { mutableStateOf("") }
     var activeBurnTarget by remember(contact.id) { mutableStateOf<TorMessageEntity?>(null) }
+    var pendingPdfStudioDoc by remember(contact.id) { mutableStateOf<PdfDocumentTools.StagedDocument?>(null) }
+    var pendingPdfBurnArmed by remember(contact.id) { mutableStateOf(false) }
+    var activePdfTarget by remember(contact.id) { mutableStateOf<Triple<TorMessageEntity, Int, File>?>(null) }
+
+    fun openPdfMessage(target: TorMessageEntity, initialPageOneBased: Int = 1) {
+        val file = target.attachmentPath
+            ?.takeIf { !TorAttachmentTransfer.isTemporaryAttachmentPath(it) }
+            ?.let(::File)
+            ?.takeIf { it.exists() && it.isFile }
+        if (file == null) {
+            Toast.makeText(context, "PDF is still transferring or unavailable", Toast.LENGTH_SHORT).show()
+            return
+        }
+        activePdfTarget = Triple(target, (initialPageOneBased - 1).coerceAtLeast(0), file)
+    }
     val callManager = remember { com.seamless.android.call.SeamlessCallManager.getInstance(context) }
     val callHaptics = rememberCallHaptics()
     val view = LocalView.current
@@ -265,18 +282,30 @@ fun OnionChatScreen(
         scope.launch {
             isSending = true
             try {
-                val preparedDoc = withContext(Dispatchers.IO) { prepareDocumentForTor(context, uri) }
-                preparedDoc.onFailure { err ->
+                val stagedResult = withContext(Dispatchers.IO) { PdfDocumentTools.stageUriForTor(context, uri) }
+                stagedResult.onFailure { err ->
                     Toast.makeText(context, err.message ?: "Unable to read file", Toast.LENGTH_SHORT).show()
-                }.onSuccess { doc ->
-                    messagingService.sendAttachment(
-                        contactId = contact.id,
-                        bytes = doc.bytes,
-                        mimeType = doc.mimeType,
-                        fileName = doc.fileName,
-                        viewOnce = useViewOnce
-                    ).onFailure { error ->
-                        Toast.makeText(context, "Failed to queue file: ${error.message}", Toast.LENGTH_SHORT).show()
+                }.onSuccess { staged ->
+                    if (staged.isPdf && !staged.isPasswordProtected && staged.pageCount > 0) {
+                        pendingPdfBurnArmed = useViewOnce
+                        pendingPdfStudioDoc = staged
+                    } else {
+                        try {
+                            messagingService.sendAttachmentFromFile(
+                                contactId = contact.id,
+                                sourceFile = staged.file,
+                                mimeType = staged.mimeType,
+                                fileName = staged.fileName,
+                                pageCount = staged.pageCount,
+                                sha256Hex = staged.sha256Hex,
+                                viewOnce = useViewOnce,
+                                previewBytes = if (useViewOnce) null else staged.coverPreviewBytes
+                            ).onFailure { error ->
+                                Toast.makeText(context, "Failed to queue file: ${error.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        } finally {
+                            runCatching { staged.file.delete() }
+                        }
                     }
                 }
             } finally {
@@ -412,6 +441,11 @@ fun OnionChatScreen(
 
     androidx.activity.compose.BackHandler {
         when {
+            activePdfTarget != null -> activePdfTarget = null
+            pendingPdfStudioDoc != null -> {
+                pendingPdfStudioDoc?.let { runCatching { it.file.delete() } }
+                pendingPdfStudioDoc = null
+            }
             activeBurnTarget != null -> activeBurnTarget = null
             isRecordingVoice -> isRecordingVoice = false
             editingMessage != null -> editingMessage = null
@@ -857,6 +891,7 @@ fun OnionChatScreen(
                                     isBurned = isMsgBurned,
                                     hasShredReceipt = message.id in directShredReceipts,
                                     reactions = directReactionsMap[message.id].orEmpty(),
+                                    transferProgress = attachmentProgressMap[message.id],
                                     onLongPress = { actionTargetMessage = message },
                                     onQuotedMessageClick = { targetId ->
                                         val idx = displayedMessages.indexOfFirst { it.id == targetId }
@@ -867,7 +902,14 @@ fun OnionChatScreen(
                                         emojiEffectToken++
                                         scope.launch { messagingService.sendDirectReaction(contact.id, message.id, emoji) }
                                     },
-                                    onOpenBurnCapsule = { activeBurnTarget = message }
+                                    onOpenBurnCapsule = { activeBurnTarget = message },
+                                    onOpenPdf = { openPdfMessage(message, 1) },
+                                    onOpenReplyPdfPage = { replyId, pageOneBased ->
+                                        val target = messagesFromDb.firstOrNull { it.id == replyId }
+                                        if (target != null) {
+                                            openPdfMessage(target, pageOneBased)
+                                        }
+                                    }
                                 )
                             }
                         }
@@ -1078,6 +1120,83 @@ fun OnionChatScreen(
             onDismiss = { activeBurnTarget = null }
         )
     }
+
+    pendingPdfStudioDoc?.let { stagedDoc ->
+        PdfPreSendStudioSheet(
+            staged = stagedDoc,
+            initialBurnOnRead = pendingPdfBurnArmed,
+            onDismiss = {
+                runCatching { stagedDoc.file.delete() }
+                pendingPdfStudioDoc = null
+            },
+            onSendConfirmed = { selectedPages, redactionsByPage, preset, useViewOnce ->
+                pendingPdfStudioDoc = null
+                scope.launch {
+                    isSending = true
+                    try {
+                        val builtResult = PdfDocumentTools.buildProcessedPdf(
+                            context = context,
+                            source = stagedDoc,
+                            selectedPages = selectedPages,
+                            redactionsByPage = redactionsByPage,
+                            preset = preset
+                        )
+                        builtResult.onFailure { err ->
+                            Toast.makeText(context, err.message ?: "Unable to prepare PDF", Toast.LENGTH_SHORT).show()
+                        }.onSuccess { finalDoc ->
+                            try {
+                                messagingService.sendAttachmentFromFile(
+                                    contactId = contact.id,
+                                    sourceFile = finalDoc.file,
+                                    mimeType = finalDoc.mimeType,
+                                    fileName = finalDoc.fileName,
+                                    pageCount = finalDoc.pageCount,
+                                    sha256Hex = finalDoc.sha256Hex,
+                                    viewOnce = useViewOnce,
+                                    previewBytes = if (useViewOnce) null else finalDoc.coverPreviewBytes
+                                ).onFailure { error ->
+                                    Toast.makeText(context, "Failed to queue PDF: ${error.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            } finally {
+                                if (finalDoc.file != stagedDoc.file) {
+                                    runCatching { finalDoc.file.delete() }
+                                }
+                            }
+                        }
+                    } finally {
+                        runCatching { stagedDoc.file.delete() }
+                        isSending = false
+                    }
+                }
+            }
+        )
+    }
+
+    activePdfTarget?.let { (sourceMsg, initialPageIdx, pdfFile) ->
+        val desc = remember(sourceMsg.text, sourceMsg.attachmentMimeType, sourceMsg.attachmentPath) {
+            TorRichChatCodec.inferDescriptor(sourceMsg.text, sourceMsg.attachmentMimeType, sourceMsg.attachmentPath)
+        }
+        val safeName = desc?.fileName?.ifBlank { pdfFile.name } ?: pdfFile.name
+        AegisPdfViewerDialog(
+            file = pdfFile,
+            fileName = safeName,
+            sha256Hex = desc?.sha256.orEmpty(),
+            initialPage = initialPageIdx,
+            isSecureMode = false,
+            onQuotePage = { oneBasedPage ->
+                replyingTo = sourceMsg
+                messageText = "${TorRichChatCodec.formatPdfPageCitation(oneBasedPage)} — "
+            },
+            onExport = {
+                scope.launch {
+                    saveAttachmentToDownloads(context, pdfFile, safeName, "application/pdf")
+                        .onSuccess { dest -> Toast.makeText(context, "Saved to $dest", Toast.LENGTH_SHORT).show() }
+                        .onFailure { Toast.makeText(context, it.message ?: "Save failed", Toast.LENGTH_SHORT).show() }
+                }
+            },
+            onDismiss = { activePdfTarget = null }
+        )
+    }
 }
 
 @Composable
@@ -1188,10 +1307,13 @@ private fun TorMessageBubble(
     isBurned: Boolean,
     hasShredReceipt: Boolean,
     reactions: Map<String, String>,
+    transferProgress: TorAttachmentTransfer.TransferProgress? = null,
     onLongPress: () -> Unit,
     onQuotedMessageClick: (String) -> Unit,
     onReactionClick: (String) -> Unit,
-    onOpenBurnCapsule: () -> Unit
+    onOpenBurnCapsule: () -> Unit,
+    onOpenPdf: () -> Unit = {},
+    onOpenReplyPdfPage: (replyToId: String, pageOneBased: Int) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1429,7 +1551,11 @@ private fun TorMessageBubble(
                                 fileName = descriptor.fileName,
                                 totalBytes = descriptor.totalBytes,
                                 mimeType = message.attachmentMimeType,
-                                outgoing = message.isFromMe
+                                outgoing = message.isFromMe,
+                                pageCount = descriptor.pageCount,
+                                sha256Hex = descriptor.sha256,
+                                transferProgress = transferProgress,
+                                onOpenPdf = onOpenPdf
                             )
                         }
                         bitmap != null -> {
@@ -1478,22 +1604,65 @@ private fun TorMessageBubble(
                                 fontSize = if (isExpressiveEmoji(parsed.body)) 30.sp else 15.sp,
                                 lineHeight = if (isExpressiveEmoji(parsed.body)) 36.sp else 21.sp
                             )
+                            val pdfCitation = remember(parsed.body) { TorRichChatCodec.parsePdfPageCitation(parsed.body) }
+                            val replyTargetId = parsed.replyToId
+                            if (pdfCitation != null && !replyTargetId.isNullOrBlank()) {
+                                Spacer(Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(999.dp))
+                                        .background(if (message.isFromMe) Color.White.copy(alpha = 0.16f) else OnionUi.AccentBlue.copy(alpha = 0.14f))
+                                        .clickable { onOpenReplyPdfPage(replyTargetId, pdfCitation.pageNumber) }
+                                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        Icons.Default.Description,
+                                        null,
+                                        tint = if (message.isFromMe) Color(0xFF93C5FD) else OnionUi.AccentBlue,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Spacer(Modifier.width(5.dp))
+                                    Text(
+                                        "Open Page ${pdfCitation.pageNumber}",
+                                        color = if (message.isFromMe) Color(0xFFDBEAFE) else OnionUi.AccentBlue,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
                         }
                     }
 
-                    if (isPhotoOrAttachmentPending) {
+                    if (isPhotoOrAttachmentPending && descriptor?.kind != "file") {
                         Spacer(Modifier.height(6.dp))
-                        LinearProgressIndicator(
-                            modifier = Modifier.fillMaxWidth().height(3.dp).clip(CircleShape),
-                            color = if (message.isFromMe) Color.White else OnionUi.Online,
-                            trackColor = primaryTextColor.copy(alpha = 0.16f)
-                        )
-                        Text(
-                            "Sending encrypted attachment…",
-                            color = secondaryTextColor,
-                            fontSize = 11.sp,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
+                        val frac = transferProgress?.fraction
+                        if (frac != null) {
+                            LinearProgressIndicator(
+                                progress = { frac },
+                                modifier = Modifier.fillMaxWidth().height(3.dp).clip(CircleShape),
+                                color = if (message.isFromMe) Color.White else OnionUi.Online,
+                                trackColor = primaryTextColor.copy(alpha = 0.16f)
+                            )
+                            Text(
+                                "Sending encrypted stream… ${(frac * 100f).toInt()}%",
+                                color = secondaryTextColor,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        } else {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth().height(3.dp).clip(CircleShape),
+                                color = if (message.isFromMe) Color.White else OnionUi.Online,
+                                trackColor = primaryTextColor.copy(alpha = 0.16f)
+                            )
+                            Text(
+                                "Sending encrypted attachment…",
+                                color = secondaryTextColor,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(if (!isDeleted && isExpressiveEmoji(parsed.body)) 1.dp else 4.dp))

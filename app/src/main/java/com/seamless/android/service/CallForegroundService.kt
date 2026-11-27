@@ -22,6 +22,9 @@ import com.seamless.android.R
 import com.seamless.android.call.CallSessionInfo
 import com.seamless.android.call.CallState
 import com.seamless.android.call.CallTransportMode
+import com.seamless.android.call.GroupCallManager
+import com.seamless.android.call.GroupCallSessionInfo
+import com.seamless.android.call.GroupCallState
 import com.seamless.android.call.SeamlessCallManager
 import com.seamless.android.receiver.CallNotificationActionReceiver
 import kotlinx.coroutines.CoroutineScope
@@ -30,17 +33,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * Android 14-16 compliant foreground service for P2P + Tor voice and video calls.
- *
- * - Uses native NotificationCompat.CallStyle with SystemUI chronometer (zero 1 Hz notification spam)
- * - Routes Decline/Hang Up through CallNotificationActionReceiver (BroadcastReceiver)
- * - Checks NotificationManager.canUseFullScreenIntent() on API 34+
- * - Declares phoneCall|microphone|camera|remoteMessaging FGS types according to granted permissions
- * - Periodically renews CPU WakeLock so calls over 1 hour never drop CPU
+ * Android 14-16 compliant foreground service for both 1-to-1 and Group P2P + Tor voice/video calls.
  */
 class CallForegroundService : Service() {
 
@@ -84,12 +82,14 @@ class CallForegroundService : Service() {
 
     private data class NotificationKey(
         val callId: String,
-        val state: CallState,
-        val transport: CallTransportMode,
+        val isGroup: Boolean,
+        val stateName: String,
+        val transportName: String,
         val isVideo: Boolean,
         val isLocalVideo: Boolean,
         val isMuted: Boolean,
-        val peerName: String
+        val peerName: String,
+        val participantCount: Int
     )
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -103,57 +103,97 @@ class CallForegroundService : Service() {
         createChannel()
         acquireWakeLock()
         startWakeLockRenewal()
-        promoteToForeground(buildCallNotification(SeamlessCallManager.getInstance(applicationContext).sessionFlow.value))
 
         val callManager = SeamlessCallManager.getInstance(applicationContext)
-        var lastState: CallState? = null
+        val groupManager = GroupCallManager.getInstance(applicationContext)
+        promoteForCurrentState(callManager.sessionFlow.value, groupManager.sessionFlow.value)
+
+        var lastRingingId: String? = null
         var lastNotifKey: NotificationKey? = null
         stateCollectorJob = scope.launch {
-            callManager.sessionFlow.collect { session ->
-                if (session == null || session.state == CallState.IDLE) {
-                    stopSelf()
-                } else {
-                    if (session.state == CallState.INCOMING_RINGING && session.state != lastState) {
+            combine(callManager.sessionFlow, groupManager.sessionFlow) { s1, s2 -> s1 to s2 }
+                .collect { (single, group) ->
+                    val singleAlive = single != null && single.state != CallState.IDLE
+                    val groupAlive = group != null && group.state != GroupCallState.IDLE
+                    if (!singleAlive && !groupAlive) {
+                        stopSelf()
+                        return@collect
+                    }
+
+                    val ringId = when {
+                        groupAlive && group!!.state == GroupCallState.INCOMING_RINGING -> "g:${group.callId}"
+                        singleAlive && single!!.state == CallState.INCOMING_RINGING -> "s:${single.callId}"
+                        else -> null
+                    }
+                    if (ringId != null && ringId != lastRingingId) {
                         wakeScreenForIncomingCall()
                     }
-                    val currentKey = NotificationKey(
-                        callId = session.callId,
-                        state = session.state,
-                        transport = session.transportMode,
-                        isVideo = session.isVideoCall,
-                        isLocalVideo = session.isLocalVideoEnabled,
-                        isMuted = session.isMuted,
-                        peerName = session.peerNickname
-                    )
-                    val stateChanged = session.state != lastState
-                    val mediaFgsChanged = lastNotifKey?.isLocalVideo != currentKey.isLocalVideo
-                    if (stateChanged || mediaFgsChanged || currentKey != lastNotifKey) {
-                        val notification = buildCallNotification(session)
-                        if (stateChanged && session.state == CallState.ACTIVE || mediaFgsChanged) {
-                            promoteToForeground(notification, session)
+                    lastRingingId = ringId
+
+                    val key = if (groupAlive && group != null) {
+                        NotificationKey(
+                            callId = group.callId,
+                            isGroup = true,
+                            stateName = group.state.name,
+                            transportName = group.topologyMode.name,
+                            isVideo = group.isLocalVideoEnabled || group.participants.any { it.isVideoEnabled },
+                            isLocalVideo = group.isLocalVideoEnabled,
+                            isMuted = group.isMuted,
+                            peerName = group.groupName,
+                            participantCount = group.participants.size
+                        )
+                    } else if (single != null) {
+                        NotificationKey(
+                            callId = single.callId,
+                            isGroup = false,
+                            stateName = single.state.name,
+                            transportName = single.transportMode.name,
+                            isVideo = single.isVideoCall,
+                            isLocalVideo = single.isLocalVideoEnabled,
+                            isMuted = single.isMuted,
+                            peerName = single.peerNickname,
+                            participantCount = 2
+                        )
+                    } else null
+
+                    if (key != null && key != lastNotifKey) {
+                        val fgsChanged = lastNotifKey?.isLocalVideo != key.isLocalVideo ||
+                            lastNotifKey?.stateName != key.stateName
+                        lastNotifKey = key
+                        if (fgsChanged) {
+                            promoteForCurrentState(single, group)
                         } else {
+                            val notification = if (groupAlive && group != null) {
+                                buildGroupCallNotification(group)
+                            } else {
+                                buildCallNotification(single)
+                            }
                             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                             nm.notify(NOTIFICATION_ID, notification)
                         }
-                        lastNotifKey = currentKey
-                        lastState = session.state
                     }
                 }
-            }
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val callManager = SeamlessCallManager.getInstance(applicationContext)
-        val session = callManager.sessionFlow.value
+        val groupManager = GroupCallManager.getInstance(applicationContext)
         when (intent?.action) {
             ACTION_ACCEPT_CALL -> {
-                promoteToForeground(buildCallNotification(session), session)
-                callManager.acceptIncomingCall()
+                promoteForCurrentState(callManager.sessionFlow.value, groupManager.sessionFlow.value)
+                if (groupManager.hasActiveCall()) groupManager.acceptIncomingGroupCall()
+                else callManager.acceptIncomingCall()
             }
-            ACTION_DECLINE_CALL -> callManager.declineIncomingCall()
-            ACTION_END_CALL -> callManager.endCall("Call ended", notifyPeer = true)
-            else -> promoteToForeground(buildCallNotification(session), session)
+            ACTION_DECLINE_CALL -> {
+                if (groupManager.hasActiveCall()) groupManager.declineIncomingGroupCall()
+                else callManager.declineIncomingCall()
+            }
+            ACTION_END_CALL -> {
+                if (groupManager.hasActiveCall()) groupManager.leaveCall()
+                else callManager.endCall("Call ended", notifyPeer = true)
+            }
+            else -> promoteForCurrentState(callManager.sessionFlow.value, groupManager.sessionFlow.value)
         }
         return START_NOT_STICKY
     }
@@ -168,14 +208,34 @@ class CallForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun promoteForCurrentState(single: CallSessionInfo?, group: GroupCallSessionInfo?) {
+        val groupAlive = group != null && group.state != GroupCallState.IDLE
+        val notification = if (groupAlive && group != null) {
+            buildGroupCallNotification(group)
+        } else {
+            buildCallNotification(single)
+        }
+        val isActiveOrDialing = if (groupAlive && group != null) {
+            group.state == GroupCallState.ACTIVE || group.state == GroupCallState.JOINING
+        } else {
+            single?.state == CallState.ACTIVE ||
+                single?.state == CallState.OUTGOING_DIALING ||
+                single?.state == CallState.OUTGOING_RINGING
+        }
+        val wantsCam = if (groupAlive && group != null) {
+            group.isLocalVideoEnabled || group.participants.any { it.isVideoEnabled }
+        } else {
+            single?.isLocalVideoEnabled == true || single?.isVideoCall == true
+        }
+        promoteToForeground(notification, isActiveOrDialing, wantsCam)
+    }
+
     private fun promoteToForeground(
         notification: Notification,
-        session: CallSessionInfo? = SeamlessCallManager.getInstance(applicationContext).sessionFlow.value
+        isActiveOrDialing: Boolean,
+        wantsCam: Boolean
     ) {
         try {
-            val isActiveOrDialing = session?.state == CallState.ACTIVE ||
-                session?.state == CallState.OUTGOING_DIALING ||
-                session?.state == CallState.OUTGOING_RINGING
             val hasMicPerm = ContextCompat.checkSelfPermission(
                 this,
                 Manifest.permission.RECORD_AUDIO
@@ -184,7 +244,6 @@ class CallForegroundService : Service() {
                 this,
                 Manifest.permission.CAMERA
             ) == PackageManager.PERMISSION_GRANTED
-            val wantsCam = session?.isLocalVideoEnabled == true || session?.isVideoCall == true
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 var fgsType = ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL or
@@ -206,11 +265,7 @@ class CallForegroundService : Service() {
                 }
                 startForeground(NOTIFICATION_ID, notification, fgsType)
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
-                )
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL)
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
@@ -228,6 +283,101 @@ class CallForegroundService : Service() {
                 }
             }
         }
+    }
+
+    private fun buildGroupCallNotification(session: GroupCallSessionInfo): Notification {
+        val openAppIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val contentPendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            openAppIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val title = session.groupName.ifBlank { "Group Call" }
+        val count = session.participants.size.coerceAtLeast(1)
+        val subtitle = when (session.state) {
+            GroupCallState.INCOMING_RINGING -> session.statusMessage.ifBlank { "Incoming Encrypted Group Call" }
+            GroupCallState.JOINING -> "Joining encrypted group room..."
+            GroupCallState.ACTIVE -> "$count in call · ${if (session.forceTorOnly) "Tor Only" else "Encrypted"}${if (session.isMuted) " • Muted" else ""}"
+            GroupCallState.ENDED -> session.statusMessage.ifBlank { "Group call ended" }
+            else -> "End-to-End Encrypted Group Call"
+        }
+
+        val callerPerson = Person.Builder()
+            .setName(title)
+            .setImportant(true)
+            .build()
+
+        val isVideo = session.isLocalVideoEnabled || session.participants.any { it.isVideoEnabled }
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(subtitle)
+            .setContentIntent(contentPendingIntent)
+            .setOngoing(true)
+            .setOnlyAlertOnce(session.state != GroupCallState.INCOMING_RINGING)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+
+        if (session.state == GroupCallState.ACTIVE && session.connectedAtMs != null) {
+            builder.setUsesChronometer(true)
+            builder.setWhen(session.connectedAtMs)
+        }
+
+        if (session.state == GroupCallState.INCOMING_RINGING) {
+            builder.setPriority(NotificationCompat.PRIORITY_MAX)
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val canFsi = Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE || nm.canUseFullScreenIntent()
+            if (canFsi) {
+                builder.setFullScreenIntent(contentPendingIntent, true)
+            }
+            val acceptActivityIntent = Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(EXTRA_CALL_ACTION, ACTION_ACCEPT_CALL)
+            }
+            val acceptPi = PendingIntent.getActivity(
+                this,
+                11,
+                acceptActivityIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val declineIntent = Intent(this, CallNotificationActionReceiver::class.java).apply {
+                action = ACTION_DECLINE_CALL
+            }
+            val declinePi = PendingIntent.getBroadcast(
+                this,
+                12,
+                declineIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.setStyle(
+                NotificationCompat.CallStyle.forIncomingCall(callerPerson, declinePi, acceptPi)
+                    .setIsVideo(isVideo)
+            )
+        } else {
+            val endIntent = Intent(this, CallNotificationActionReceiver::class.java).apply {
+                action = ACTION_END_CALL
+            }
+            val endPi = PendingIntent.getBroadcast(
+                this,
+                13,
+                endIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.setStyle(
+                NotificationCompat.CallStyle.forOngoingCall(callerPerson, endPi)
+                    .setIsVideo(isVideo)
+            )
+        }
+        return builder.build()
     }
 
     private fun buildCallNotification(session: CallSessionInfo?): Notification {
@@ -392,15 +542,11 @@ class CallForegroundService : Service() {
 
     private fun releaseWakeLock() {
         try {
-            cpuWakeLock?.let {
-                if (it.isHeld) it.release()
-            }
+            cpuWakeLock?.let { if (it.isHeld) it.release() }
         } catch (_: Exception) {}
         cpuWakeLock = null
         try {
-            screenWakeLock?.let {
-                if (it.isHeld) it.release()
-            }
+            screenWakeLock?.let { if (it.isHeld) it.release() }
         } catch (_: Exception) {}
         screenWakeLock = null
     }

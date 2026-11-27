@@ -1,6 +1,11 @@
 @file:Suppress("RedundantSuppression", "UNUSED_SUPPRESSION", "DEPRECATION", "unused", "UnusedSymbol", "UnusedImport", "UNUSED_PARAMETER", "UNUSED_VARIABLE", "UNUSED_ANONYMOUS_PARAMETER", "UNUSED_EXPRESSION", "UNUSED_VALUE", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE", "VARIABLE_WITH_REDUNDANT_INITIALIZER", "VariableNeverRead", "AssignedValueIsNeverRead", "CanBeVal", "VarCouldBeVal", "CanBeParameter", "MemberVisibilityCanBePrivate", "SameParameterValue", "RedundantVisibilityModifier", "RedundantModalityModifier", "RedundantUnitReturnType", "RedundantExplicitType", "RedundantNullableReturnType", "RedundantSuspendModifier", "RedundantSamConstructor", "RedundantLambdaArrow", "RedundantIf", "RedundantElseInIf", "ConstantConditionIf", "KotlinConstantConditions", "SENSELESS_COMPARISON", "USELESS_IS_CHECK", "USELESS_CAST", "USELESS_ELVIS", "UnnecessaryVariable", "UnnecessaryParentheses", "UNNECESSARY_SAFE_CALL", "UNNECESSARY_NOT_NULL_ASSERTION", "UNCHECKED_CAST", "NAME_SHADOWING", "CascadeIf", "LiftReturnOrAssignment", "ReplaceWithOperatorAssignment", "ConvertTwoComparisonsToRangeCheck", "SimplifiableCallChain", "UsePropertyAccessSyntax", "RemoveExplicitTypeArguments", "RemoveRedundantQualifierName", "RemoveCurlyBracesFromTemplate", "RemoveEmptyClassBody", "RemoveSingleExpressionStringTemplate", "ReplaceSizeZeroCheckWithIsEmpty", "ReplaceSizeCheckWithIsNotEmpty", "ReplaceIsEmptyWithIfEmpty", "ReplaceGetOrSet", "ReplacePutWithAssignment", "ReplaceJavaStaticMethodWithKotlinAnalog", "ReplaceCallWithBinaryOperator", "MoveVariableDeclarationIntoWhen", "MoveLambdaOutsideParentheses", "JoinDeclarationAndAssignment", "FoldInitializerAndIfToElvis", "ConvertToStringTemplate", "LoopToCallChain", "MapGetWithNotNullAssertionOperator", "NestedLambdaShadowedImplicitParameter", "LocalVariableName", "PrivatePropertyName", "FunctionName", "PropertyName", "ConstPropertyName", "ObjectPropertyName", "ClassName", "EnumEntryName", "SpellCheckingInspection", "GrazieInspection", "MissingPermission", "NotificationPermission", "NewApi", "InlinedApi", "WrongConstant", "HardwareIds", "ScopedStorage", "UnspecifiedRegisterReceiverFlag", "MutableImplicitPendingIntent", "CustomX509TrustManager", "TrustAllX509TrustManager", "BadHostnameVerifier", "WakelockTimeout", "Wakelock", "Recycle", "Range", "ServiceCast", "StaticFieldLeak", "DefaultLocale", "SimpleDateFormat", "ObsoleteSdkInt", "UseKtx", "ApplySharedPref", "AutoboxingStateCreation", "AutoboxingStateValueProperty", "FrequentlyChangedStateReadInComposition", "RememberReturnType", "MutableCollectionMutableState", "ProduceStateDoesNotAssignValue", "UnrememberedMutableState", "UseOfNonLambdaOffsetOverload", "ModifierParameter", "ModifierFactoryUnreferencedReceiver", "ConfigurationScreenWidthHeight", "UnnecessaryArrayInit", "UnnecessaryComposedModifier", "SuspiciousIndentation", "ImplicitSamInstance", "SwitchIntDef", "BatteryLife", "VectorPath", "ContentDescription", "HardcodedText", "SetTextI18n", "UnsafeOptInUsageError", "UnsafeOptInUsageWarning", "RestrictedApi")
 package com.seamless.android.ui.onion
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,11 +27,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Videocam
+import androidx.core.content.ContextCompat
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -292,6 +300,28 @@ internal fun GroupRow(group: PrivateGroupEntity, onClick: () -> Unit) {
         .collectAsState(initial = 0)
     val members by remember(group.groupId) { dao.getMembersForGroup(group.groupId) }
         .collectAsState(initial = emptyList())
+    val groupCallManager = remember { com.seamless.android.call.GroupCallManager.getInstance(context) }
+    val activeRooms by groupCallManager.activeRoomsByGroupFlow.collectAsState()
+    val liveSession by groupCallManager.sessionFlow.collectAsState()
+    val roomBanner = activeRooms[group.groupId]
+    val inCallHere = liveSession?.groupId == group.groupId &&
+        liveSession?.state == com.seamless.android.call.GroupCallState.ACTIVE
+    val hasLiveCall = roomBanner != null || inCallHere
+
+    val callPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        val hasMic = grants[Manifest.permission.RECORD_AUDIO] == true ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (hasMic) {
+            val isVid = roomBanner?.isVideo == true
+            val hasCam = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+            groupCallManager.startOrJoinGroupCall(group.groupId, isVideo = isVid && hasCam)
+            onClick()
+        } else {
+            Toast.makeText(context, "Microphone permission is required for group calls", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     val onlineCount = remember(members, connectedPeers) {
         members.count { member ->
@@ -306,8 +336,16 @@ internal fun GroupRow(group: PrivateGroupEntity, onClick: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .clip(OnionUi.Corner)
-            .background(OnionUi.Surface)
-            .border(1.dp, if (unread > 0) OnionUi.Online.copy(alpha = 0.35f) else OnionUi.Hairline, OnionUi.Corner)
+            .background(if (hasLiveCall) OnionUi.Online.copy(alpha = 0.08f) else OnionUi.Surface)
+            .border(
+                1.dp,
+                when {
+                    hasLiveCall -> OnionUi.Online.copy(alpha = 0.55f)
+                    unread > 0 -> OnionUi.Online.copy(alpha = 0.35f)
+                    else -> OnionUi.Hairline
+                },
+                OnionUi.Corner
+            )
             .clickable(onClick = onClick)
             .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -323,14 +361,32 @@ internal fun GroupRow(group: PrivateGroupEntity, onClick: () -> Unit) {
                     fontSize = 17.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f, fill = false)
                 )
+                if (hasLiveCall) {
+                    Spacer(Modifier.width(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(OnionUi.Online.copy(alpha = 0.20f))
+                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                    ) {
+                        val liveCount = (if (inCallHere) liveSession?.participants?.size else roomBanner?.participantCount) ?: 1
+                        Text(
+                            "LIVE · $liveCount",
+                            color = OnionUi.Online,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
+                Spacer(Modifier.weight(1f))
                 if (group.isCreatedByMe) {
                     Spacer(Modifier.width(6.dp))
                     Icon(
                         Icons.Default.Star,
                         contentDescription = "Creator",
-                        tint = Color(0xFFFFD166),
+                        tint = OnionUi.AccentBlue,
                         modifier = Modifier.size(14.dp)
                     )
                 }
@@ -373,7 +429,53 @@ internal fun GroupRow(group: PrivateGroupEntity, onClick: () -> Unit) {
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                if (unread > 0) {
+                if (hasLiveCall) {
+                    Spacer(Modifier.width(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(OnionUi.Online)
+                            .clickable {
+                                val hasMic = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.RECORD_AUDIO
+                                ) == PackageManager.PERMISSION_GRANTED
+                                val isVid = roomBanner?.isVideo == true
+                                val hasCam = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.CAMERA
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (hasMic && (!isVid || hasCam)) {
+                                    groupCallManager.startOrJoinGroupCall(group.groupId, isVideo = isVid)
+                                    onClick()
+                                } else {
+                                    val req = buildList {
+                                        if (!hasMic) add(Manifest.permission.RECORD_AUDIO)
+                                        if (isVid && !hasCam) add(Manifest.permission.CAMERA)
+                                    }.toTypedArray()
+                                    callPermLauncher.launch(req)
+                                }
+                            }
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                if (roomBanner?.isVideo == true) Icons.Default.Videocam else Icons.Default.Call,
+                                null,
+                                tint = Color(0xFF05130C),
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                if (inCallHere) "Return" else "Join",
+                                color = Color(0xFF05130C),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                    }
+                } else if (unread > 0) {
                     Spacer(Modifier.width(8.dp))
                     Box(
                         modifier = Modifier

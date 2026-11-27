@@ -707,6 +707,10 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
         scope.launch {
             callMutex.withLock {
+                if (GroupCallManager.getInstance(context).hasActiveCall()) {
+                    Log.w(TAG, "Cannot start 1-to-1 call while a group call is active")
+                    return@withLock
+                }
                 val existing = _sessionFlow.value
                 if (existing != null && existing.state != CallState.IDLE && existing.state != CallState.ENDED) {
                     Log.w(TAG, "Cannot start call: another call is already in state ${existing.state}")
@@ -1287,6 +1291,11 @@ class SeamlessCallManager private constructor(private val context: Context) {
             return
         }
 
+        if (json.optString("scope") == GroupCallManager.SCOPE_GROUP_CALL) {
+            GroupCallManager.getInstance(context).onIncomingGroupCallSignal(senderOnion, json)
+            return
+        }
+
         val type = json.optString("type")
         val callId = json.optString("callId")
         if (type.isBlank() || callId.isBlank()) return
@@ -1323,6 +1332,20 @@ class SeamlessCallManager private constructor(private val context: Context) {
                                 contact.effectiveTrustState() == TorContactTrustState.KEY_CHANGED)
                         ) {
                             Log.w(TAG, "Blocked incoming call OFFER from untrusted/blocked contact")
+                            return@withLock
+                        }
+
+                        if (GroupCallManager.getInstance(context).hasActiveCall()) {
+                            val messaging = TorMessagingService.getInstance(context)
+                            val myInfo = messaging.getMyContactInfo()
+                            val busyPayload = buildSignalJson(
+                                type = "BUSY",
+                                callId = callId,
+                                senderOnion = myInfo.onionAddress,
+                                senderNickname = myInfo.nickname,
+                                senderPubKey = myInfo.publicKey
+                            )
+                            launch { messaging.sendCallSignalFrame(canonicalSender, busyPayload) }
                             return@withLock
                         }
 
@@ -1846,6 +1869,13 @@ class SeamlessCallManager private constructor(private val context: Context) {
         timestampMs: Long,
         payload: ByteArray
     ) {
+        if (payload.isNotEmpty() &&
+            (payload[0] == com.seamless.android.crypto.AegisGroupCallCrypto.GROUP_SFRAME_AUDIO_MAGIC ||
+                payload[0] == com.seamless.android.crypto.AegisGroupCallCrypto.GROUP_SFRAME_AUDIO_FEC_MAGIC)
+        ) {
+            GroupCallManager.getInstance(context).onIncomingGroupCallAudio(senderOnion, sequence, timestampMs, payload)
+            return
+        }
         val current = _sessionFlow.value ?: return
         if (current.state != CallState.ACTIVE || payload.size < 1 + 16 + DIRECT_UDP_NONCE_BYTES + 16) return
         val canonicalSender = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(senderOnion)
@@ -1905,6 +1935,12 @@ class SeamlessCallManager private constructor(private val context: Context) {
         timestampMs: Long,
         payload: ByteArray
     ) {
+        if (payload.isNotEmpty() &&
+            payload[0] == com.seamless.android.crypto.AegisGroupCallCrypto.GROUP_SFRAME_VIDEO_MAGIC
+        ) {
+            GroupCallManager.getInstance(context).onIncomingGroupCallVideo(senderOnion, sequence, timestampMs, payload)
+            return
+        }
         val current = _sessionFlow.value ?: return
         if (current.state != CallState.ACTIVE || payload.size < 1 + 16 + DIRECT_UDP_NONCE_BYTES + 16) return
         val canonicalSender = OnionContactManager.OnionContact.canonicalizeOnionEndpoint(senderOnion)

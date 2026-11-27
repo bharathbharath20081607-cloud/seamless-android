@@ -409,7 +409,7 @@ object OnionMessageProtocol {
     /**
      * Deduplication helper - tracks seen message IDs
      */
-    class MessageDeduplicator(private val maxSize: Int = 5000) {
+    class MessageDeduplicator(private val maxSize: Int = 32_768) {
         private val seenMessages = LinkedHashMap<UUID, Long>(maxSize, 0.75f, true)
         private var checkCounter = 0
         private var lastPrunedAt = 0L

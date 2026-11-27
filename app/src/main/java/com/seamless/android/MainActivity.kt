@@ -195,6 +195,7 @@ class MainActivity : OrientationAwareActivity() {
 
                     // Global P2P + Tor Encrypted Voice Call Overlay (incoming & active calls, works over lockscreen)
                     com.seamless.android.ui.call.SeamlessCallOverlay()
+                    com.seamless.android.ui.call.SeamlessGroupCallOverlay()
                 }
             }
         }
@@ -202,15 +203,24 @@ class MainActivity : OrientationAwareActivity() {
         handleCallActionIntent(intent)
 
         lifecycleScope.launch {
-            com.seamless.android.call.SeamlessCallManager.getInstance(applicationContext).sessionFlow.collect { session ->
-                val hasCall = session != null &&
+            kotlinx.coroutines.flow.combine(
+                com.seamless.android.call.SeamlessCallManager.getInstance(applicationContext).sessionFlow,
+                com.seamless.android.call.GroupCallManager.getInstance(applicationContext).sessionFlow
+            ) { singleSession, groupSession -> singleSession to groupSession }.collect { (session, groupSession) ->
+                val hasSingle = session != null &&
                     session.state != com.seamless.android.call.CallState.IDLE &&
                     session.state != com.seamless.android.call.CallState.ENDED
-                // Only expose the activity over lockscreen while call UI is FULL-SCREEN (never when minimized -> hides private chats!)
-                val showOverLockscreen = hasCall && !session!!.isMinimized
+                val hasGroup = groupSession != null &&
+                    groupSession.state != com.seamless.android.call.GroupCallState.IDLE &&
+                    groupSession.state != com.seamless.android.call.GroupCallState.ENDED
+                val hasCall = hasSingle || hasGroup
+                val showOverLockscreen = (hasSingle && !session!!.isMinimized) ||
+                    (hasGroup && !groupSession!!.isMinimized)
+                val incomingRinging = (hasSingle && session!!.state == com.seamless.android.call.CallState.INCOMING_RINGING) ||
+                    (hasGroup && groupSession!!.state == com.seamless.android.call.GroupCallState.INCOMING_RINGING)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                     setShowWhenLocked(showOverLockscreen)
-                    setTurnScreenOn(hasCall && session!!.state == com.seamless.android.call.CallState.INCOMING_RINGING)
+                    setTurnScreenOn(incomingRinging)
                 } else {
                     @Suppress("DEPRECATION")
                     if (showOverLockscreen) {
@@ -219,7 +229,7 @@ class MainActivity : OrientationAwareActivity() {
                         window.clearFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED)
                     }
                     @Suppress("DEPRECATION")
-                    if (hasCall && session!!.state == com.seamless.android.call.CallState.INCOMING_RINGING) {
+                    if (incomingRinging) {
                         window.addFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
                     } else {
                         window.clearFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
@@ -861,7 +871,12 @@ class MainActivity : OrientationAwareActivity() {
         val action = intent.getStringExtra(com.seamless.android.service.CallForegroundService.EXTRA_CALL_ACTION)
         if (action == com.seamless.android.service.CallForegroundService.ACTION_ACCEPT_CALL) {
             intent.removeExtra(com.seamless.android.service.CallForegroundService.EXTRA_CALL_ACTION)
-            com.seamless.android.call.SeamlessCallManager.getInstance(applicationContext).acceptIncomingCall()
+            val groupCall = com.seamless.android.call.GroupCallManager.getInstance(applicationContext)
+            if (groupCall.hasActiveCall()) {
+                groupCall.acceptIncomingGroupCall()
+            } else {
+                com.seamless.android.call.SeamlessCallManager.getInstance(applicationContext).acceptIncomingCall()
+            }
         }
     }
     

@@ -454,9 +454,75 @@ class TorGroupMessaging private constructor(context: Context) {
         return canonical(group.creatorOnionAddress) == meOnion || chronoDag.isAdmin(groupId, meOnion)
     }
 
+    data class GroupCallMemberInfo(
+        val onionAddress: String,
+        val nickname: String,
+        val publicKey: String,
+        val pinnedSigningPubKey: String? = null
+    )
+
     fun currentEpoch(groupId: String): Long = chronoDag.getEpoch(groupId)
 
     fun currentDisappearingTtlMs(groupId: String): Long = chronoDag.getDisappearingTtlMs(groupId)
+
+    suspend fun getGroupName(groupId: String): String? = groupDao.getGroup(groupId)?.name
+
+    suspend fun getVerifiedCallMembers(groupId: String): List<GroupCallMemberInfo> {
+        val group = groupDao.getGroup(groupId) ?: return emptyList()
+        val me = contacts.getMyContactInfo()
+        val myCanon = canonical(me.onionAddress)
+        return groupDao.getMembersForGroupNow(groupId).map { member ->
+            val canon = canonical(member.memberOnionAddress)
+            val contact = contacts.getContactByOnion(canon)
+            val pubKey = when {
+                canon == myCanon -> me.publicKey
+                contact != null -> contact.publicKey
+                else -> ""
+            }
+            val pinnedSig = if (canon == myCanon) {
+                localSigningPublicKeyHex
+            } else {
+                chronoDag.getPinnedSigningKey(groupId, canon)
+            }
+            GroupCallMemberInfo(
+                onionAddress = canon,
+                nickname = contact?.nickname ?: member.memberNickname,
+                publicKey = pubKey,
+                pinnedSigningPubKey = pinnedSig
+            )
+        }
+    }
+
+    suspend fun isVerifiedGroupMemberForCall(groupId: String, onionAddress: String): Boolean {
+        val clean = canonical(onionAddress)
+        if (clean.isBlank()) return false
+        if (groupDao.getGroup(groupId) == null) return false
+        val contact = contacts.getContactByOnion(clean)
+        if (contact != null && !contact.isEligibleForGroupMessaging()) return false
+        return isGroupMember(groupId, clean)
+    }
+
+    fun signGroupCallPayload(
+        groupId: String,
+        callId: String,
+        epoch: Int,
+        senderOnion: String,
+        senderTag4: Int,
+        rootSeed: ByteArray
+    ): Pair<String, String> = com.seamless.android.crypto.AegisGroupCallCrypto.signSenderKeyAnnouncement(
+        ed25519PrivateKey = localSigningPrivateKey,
+        groupId = groupId,
+        callId = callId,
+        epoch = epoch,
+        senderOnion = senderOnion,
+        senderTag4 = senderTag4,
+        rootSeed = rootSeed
+    )
+
+    suspend fun recordGroupCallTimelineEvent(groupId: String, text: String) {
+        if (groupDao.getGroup(groupId) == null) return
+        insertSystemBanner(groupId, text)
+    }
 
     /** Chrono-Sense speculative circuit & bulk-lane prewarming for active group members. */
     fun speculativeWarmGroupCircuits(groupId: String, includeBulk: Boolean = false) {
@@ -680,6 +746,7 @@ class TorGroupMessaging private constructor(context: Context) {
         members.filter { canonical(it.memberOnionAddress) != myCanonical }
             .forEach { queue(it.memberOnionAddress, event) }
         insertSystemBanner(groupId, "${removed.memberNickname} was removed (Epoch #$nextEpoch)")
+        com.seamless.android.call.GroupCallManager.getInstance(appContext).onGroupMembershipChanged(groupId)
     }
 
     /** Admin-only: promotes an existing member to admin so the group has no single point of failure. */
@@ -1277,7 +1344,7 @@ class TorGroupMessaging private constructor(context: Context) {
         groupDao.updateGroupMessageState(messageId, if (alreadyAcked.isNotEmpty()) STATE_SENT else STATE_QUEUED)
         val attachmentPath = existing.attachmentPath
         if (!attachmentPath.isNullOrBlank()) {
-            val bytes = File(attachmentPath).takeIf { it.exists() }?.readBytes()
+            val sourceFile = File(attachmentPath).takeIf { it.exists() && it.isFile }
                 ?: error("Attachment file no longer available")
             val mime = existing.attachmentMimeType ?: "image/jpeg"
             val desc = TorRichChatCodec.parseAttachmentDescriptor(existing.text)
@@ -1293,16 +1360,19 @@ class TorGroupMessaging private constructor(context: Context) {
                 plannedChunkIds.map { (contact, chunkId) ->
                     async {
                         val sentId = TorMessagingService.getInstance(appContext)
-                            .sendAttachment(
+                            .sendAttachmentFromFile(
                                 contactId = contact.id,
-                                bytes = bytes,
+                                sourceFile = sourceFile,
                                 mimeType = mime,
                                 fileName = desc?.fileName.orEmpty(),
                                 durationMs = desc?.durationMs ?: 0,
+                                pageCount = desc?.pageCount ?: 0,
+                                sha256Hex = desc?.sha256.orEmpty(),
                                 viewOnce = desc?.viewOnce ?: false,
                                 groupId = group.groupId,
                                 groupMessageId = messageId,
-                                finalChunkMessageId = chunkId
+                                finalChunkMessageId = chunkId,
+                                keepSourceFile = true
                             )
                             .getOrNull()
                         Triple(canonical(contact.onionAddress), chunkId.toString(), sentId)
@@ -1460,6 +1530,36 @@ class TorGroupMessaging private constructor(context: Context) {
         fileName: String = "",
         durationMs: Int = 0,
         viewOnce: Boolean = false,
+        previewBytes: ByteArray? = null,
+        pageCount: Int = 0
+    ): Result<String> {
+        val tempFile = File.createTempFile("grp_att_", ".tmp", appContext.cacheDir)
+        return try {
+            tempFile.writeBytes(bytes)
+            sendGroupAttachmentFromFile(
+                groupId = groupId,
+                sourceFile = tempFile,
+                mimeType = mimeType,
+                fileName = fileName,
+                durationMs = durationMs,
+                pageCount = pageCount,
+                viewOnce = viewOnce,
+                previewBytes = previewBytes
+            )
+        } finally {
+            runCatching { tempFile.delete() }
+        }
+    }
+
+    suspend fun sendGroupAttachmentFromFile(
+        groupId: String,
+        sourceFile: File,
+        mimeType: String,
+        fileName: String = "",
+        durationMs: Int = 0,
+        pageCount: Int = 0,
+        sha256Hex: String = "",
+        viewOnce: Boolean = false,
         previewBytes: ByteArray? = null
     ): Result<String> = runCatching {
         val group = requireNotNull(groupDao.getGroup(groupId)) { "Group not found" }
@@ -1467,6 +1567,11 @@ class TorGroupMessaging private constructor(context: Context) {
         ensureLocalMembership(group, me)
         require(isGroupMember(groupId, me.onionAddress)) { "You are no longer a member of this group" }
         purgeExpiredMessages(groupId)
+        require(sourceFile.exists() && sourceFile.isFile) { "Attachment file is missing" }
+        val fileLen = sourceFile.length()
+        require(fileLen in 1L..TorAttachmentTransfer.MAX_ATTACHMENT_BYTES.toLong()) {
+            "File exceeds the 50 MB encrypted Tor limit"
+        }
 
         val normalizedMime = TorAttachmentTransfer.normalizeSupportedMimeType(mimeType)
         val cleanName = TorAttachmentTransfer.sanitizeFileName(fileName)
@@ -1485,14 +1590,35 @@ class TorGroupMessaging private constructor(context: Context) {
             "application/pdf" -> "pdf"
             "text/plain" -> "txt"
             "text/csv" -> "csv"
+            "text/markdown" -> "md"
+            "application/rtf" -> "rtf"
             "application/json" -> "json"
             "application/zip", "application/x-zip-compressed" -> "zip"
+            "application/epub+zip" -> "epub"
             "application/vnd.android.package-archive" -> "apk"
             "application/msword" -> "doc"
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> "docx"
+            "application/vnd.ms-excel" -> "xls"
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" -> "xlsx"
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation" -> "pptx"
             else -> "bin"
         }
-        val local = File(dir, "$id.$ext").apply { writeBytes(bytes) }
+        val local = File(dir, "$id.$ext")
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val buf = ByteArray(32_768)
+        sourceFile.inputStream().use { input ->
+            local.outputStream().use { output ->
+                while (true) {
+                    val read = input.read(buf)
+                    if (read <= 0) break
+                    output.write(buf, 0, read)
+                    digest.update(buf, 0, read)
+                }
+            }
+        }
+        val resolvedSha = sha256Hex.trim().lowercase()
+            .takeIf { it.length == 64 }
+            ?: digest.digest().joinToString("") { "%02x".format(it) }
         val kind = when {
             normalizedMime.startsWith("audio/") -> "voice"
             normalizedMime.startsWith("image/") -> "photo"
@@ -1505,9 +1631,11 @@ class TorGroupMessaging private constructor(context: Context) {
                 TorRichChatCodec.AttachmentDescriptor(
                     kind = kind,
                     fileName = cleanName,
-                    totalBytes = bytes.size,
+                    totalBytes = fileLen.toInt(),
                     durationMs = durationMs,
-                    viewOnce = viewOnce
+                    viewOnce = viewOnce,
+                    pageCount = pageCount,
+                    sha256 = resolvedSha
                 )
             )
         }
@@ -1556,17 +1684,20 @@ class TorGroupMessaging private constructor(context: Context) {
             plannedChunkIds.map { (contact, chunkId) ->
                 async {
                     val sentId = TorMessagingService.getInstance(appContext)
-                        .sendAttachment(
+                        .sendAttachmentFromFile(
                             contactId = contact.id,
-                            bytes = bytes,
+                            sourceFile = local,
                             mimeType = normalizedMime,
                             fileName = cleanName,
                             durationMs = durationMs,
+                            pageCount = pageCount,
+                            sha256Hex = resolvedSha,
                             viewOnce = viewOnce,
                             groupId = groupId,
                             groupMessageId = id,
                             finalChunkMessageId = chunkId,
-                            previewBytes = if (viewOnce) null else previewBytes
+                            previewBytes = if (viewOnce) null else previewBytes,
+                            keepSourceFile = true
                         )
                         .getOrNull()
                     Triple(canonical(contact.onionAddress), chunkId.toString(), sentId)
@@ -1597,6 +1728,24 @@ class TorGroupMessaging private constructor(context: Context) {
         messageId: String,
         timestamp: Long,
         previewPath: String
+    ): Boolean = handleIncomingAttachmentPreview(
+        sender = sender,
+        groupId = groupId,
+        messageId = messageId,
+        timestamp = timestamp,
+        rowText = "Photo",
+        previewPath = previewPath,
+        mimeType = "image/webp"
+    )
+
+    suspend fun handleIncomingAttachmentPreview(
+        sender: OnionContactManager.OnionContact,
+        groupId: String,
+        messageId: String,
+        timestamp: Long,
+        rowText: String,
+        previewPath: String,
+        mimeType: String
     ): Boolean {
         if (!sender.isEligibleForGroupMessaging() || chronoDag.isGroupTombstoned(groupId)) {
             return false
@@ -1608,12 +1757,13 @@ class TorGroupMessaging private constructor(context: Context) {
         val now = System.currentTimeMillis()
         val safeTimestamp = minOf(timestamp, now).coerceAtLeast(0L)
         val inserted = groupDao.insertGroupMessageIfAbsent(
-            GroupMessageEntity(messageId, groupId, sender.onionAddress, sender.nickname, "Photo", safeTimestamp, false, STATE_DELIVERED, previewPath, "image/webp")
+            GroupMessageEntity(messageId, groupId, sender.onionAddress, sender.nickname, rowText, safeTimestamp, false, STATE_DELIVERED, previewPath, mimeType)
         )
         if (inserted != -1L && visibleGroupId != groupId &&
             !com.seamless.android.util.AppForegroundTracker.isAppInForeground(appContext)
         ) {
-            notifier.showGroupEvent(groupId, group.name, "${sender.nickname}: 📷 Photo", senderName = sender.nickname)
+            val label = TorRichChatCodec.friendlyPreviewText(rowText, mimeType)
+            notifier.showGroupEvent(groupId, group.name, "${sender.nickname}: $label", senderName = sender.nickname)
         }
         return true
     }
@@ -1643,7 +1793,9 @@ class TorGroupMessaging private constructor(context: Context) {
         mimeType: String,
         fileName: String = "",
         durationMs: Int = 0,
-        viewOnce: Boolean = false
+        viewOnce: Boolean = false,
+        pageCount: Int = 0,
+        sha256Hex: String = ""
     ): Boolean {
         if (!sender.isEligibleForGroupMessaging() || chronoDag.isGroupTombstoned(groupId)) {
             runCatching { File(path).delete() }
@@ -1673,7 +1825,9 @@ class TorGroupMessaging private constructor(context: Context) {
                     fileName = fileName,
                     totalBytes = sizeBytes,
                     durationMs = durationMs,
-                    viewOnce = viewOnce
+                    viewOnce = viewOnce,
+                    pageCount = pageCount,
+                    sha256 = sha256Hex
                 )
             )
         }
@@ -1685,7 +1839,7 @@ class TorGroupMessaging private constructor(context: Context) {
         if (inserted == -1L) {
             val existing = groupDao.getGroupMessage(messageId)
             if (existing != null && existing.attachmentPath != path) {
-                val wasPreview = existing.attachmentPath?.contains("preview_") == true
+                val wasPreview = TorAttachmentTransfer.isTemporaryAttachmentPath(existing.attachmentPath)
                 if (wasPreview) {
                     val oldPreview = existing.attachmentPath
                     groupDao.updateGroupMessageAttachment(messageId, path, normalizedMime)
@@ -2345,6 +2499,7 @@ class TorGroupMessaging private constructor(context: Context) {
                     persistDagStateLocked()
                 }
                 insertSystemBanner(event.groupId, "${removed.memberNickname} was removed (Epoch #$newEpoch)")
+                com.seamless.android.call.GroupCallManager.getInstance(appContext).onGroupMembershipChanged(event.groupId)
             }
         }
         return InboundResult.HANDLED
@@ -2385,6 +2540,7 @@ class TorGroupMessaging private constructor(context: Context) {
                     ?.memberNickname ?: promoted.take(12)
                 insertSystemBanner(event.groupId, "$successorName is now a group admin")
             }
+            com.seamless.android.call.GroupCallManager.getInstance(appContext).onGroupMembershipChanged(event.groupId)
         }
         return InboundResult.HANDLED
     }

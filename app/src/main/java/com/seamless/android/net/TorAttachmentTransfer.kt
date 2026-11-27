@@ -6,9 +6,15 @@ import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import android.util.Base64
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import java.io.File
+import java.io.InputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
+import java.security.MessageDigest
 import java.util.BitSet
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -22,16 +28,14 @@ class TorAttachmentTransfer(private val context: Context) {
 
     companion object {
         private const val TAG = "TorAttachmentTransfer"
-        // Direct onion circuits are high-latency. A bounded half-megabyte image
-        // keeps reliable ACKed transfers practical without turning a chat into a
-        // long-lived bulk transfer.
-        const val MAX_IMAGE_BYTES = 512 * 1_024
-        const val MAX_ATTACHMENT_BYTES = 1_024 * 1_024
+        const val MAX_IMAGE_BYTES = 8 * 1_024 * 1_024
+        const val MAX_ATTACHMENT_BYTES = 50 * 1_024 * 1_024
         const val CHUNK_BYTES = 3_840
-        const val MAX_PREVIEW_BYTES = 1_200
+        const val MAX_PREVIEW_BYTES = 2_600
         const val FOUNTAIN_BLOCK_SIZE = 8
         private const val RECEIPT_TTL_MS = 7 * 24 * 60 * 60 * 1000L
-        private const val META_VERSION: Byte = 5
+        private const val META_VERSION: Byte = 6
+        private const val META_VERSION_V5: Byte = 5
         private const val META_VERSION_V4: Byte = 4
         private const val META_VERSION_V3: Byte = 3
         private const val PREVIOUS_META_VERSION: Byte = 2
@@ -47,15 +51,54 @@ class TorAttachmentTransfer(private val context: Context) {
             "application/pdf",
             "text/plain",
             "text/csv",
+            "text/markdown",
+            "application/rtf",
             "application/json",
             "application/zip",
             "application/x-zip-compressed",
+            "application/epub+zip",
             "application/vnd.android.package-archive",
             "application/msword",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.ms-excel",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             "application/octet-stream"
         )
         private val HEX_PUBLIC_KEY = Regex("^[0-9a-fA-F]{64}$")
+
+        fun isTemporaryAttachmentPath(path: String?): Boolean {
+            if (path.isNullOrBlank()) return false
+            val name = File(path).name
+            return name.startsWith("preview_") || name.startsWith("streaming_")
+        }
+
+        private fun computeFileSha256Hex(file: File): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            val buf = ByteArray(32_768)
+            file.inputStream().use { input ->
+                while (true) {
+                    val read = input.read(buf)
+                    if (read <= 0) break
+                    digest.update(buf, 0, read)
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
+        }
+
+        private fun hexToBytes(hex: String): ByteArray {
+            val clean = hex.trim()
+            if (clean.length != 64 || !clean.matches(HEX_PUBLIC_KEY)) return ByteArray(0)
+            val out = ByteArray(32)
+            var i = 0
+            while (i < 64) {
+                val hi = Character.digit(clean[i], 16)
+                val lo = Character.digit(clean[i + 1], 16)
+                out[i / 2] = ((hi shl 4) or lo).toByte()
+                i += 2
+            }
+            return out
+        }
 
         fun normalizeSupportedMimeType(rawMime: String): String {
             val clean = rawMime.trim().lowercase().substringBefore(';').trim()
@@ -90,7 +133,9 @@ class TorAttachmentTransfer(private val context: Context) {
         val previewBytes: ByteArray? = null,
         val fileName: String = "",
         val durationMs: Int = 0,
-        val viewOnce: Boolean = false
+        val viewOnce: Boolean = false,
+        val pageCount: Int = 0,
+        val sha256Hex: String = ""
     )
 
     data class CompletedAttachment(
@@ -104,8 +149,30 @@ class TorAttachmentTransfer(private val context: Context) {
         val groupMessageId: String? = null,
         val fileName: String = "",
         val durationMs: Int = 0,
-        val viewOnce: Boolean = false
+        val viewOnce: Boolean = false,
+        val pageCount: Int = 0,
+        val sha256Hex: String = ""
     )
+
+    data class StagedOutgoingFile(
+        val path: String,
+        val totalBytes: Int,
+        val sha256Hex: String,
+        val normalizedMime: String
+    )
+
+    data class TransferProgress(
+        val transferId: String,
+        val uiMessageId: String,
+        val transferredBytes: Long,
+        val totalBytes: Long,
+        val doneUnits: Int,
+        val totalUnits: Int,
+        val isOutgoing: Boolean
+    ) {
+        val fraction: Float
+            get() = if (totalBytes > 0L) (transferredBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f) else 0f
+    }
 
     sealed class ChunkResult {
         object Rejected : ChunkResult()
@@ -137,6 +204,8 @@ class TorAttachmentTransfer(private val context: Context) {
     private val completedIncoming = ConcurrentHashMap<String, CompletedAttachment>()
     private val transferSenders = ConcurrentHashMap<UUID, String>()
     private val recentCompletedReceipts = ConcurrentHashMap<String, Long>()
+    private val _incomingProgressFlow = MutableStateFlow<Map<String, TransferProgress>>(emptyMap())
+    val incomingProgressFlow: StateFlow<Map<String, TransferProgress>> = _incomingProgressFlow.asStateFlow()
     private val attachmentDirectory = File(context.filesDir, "tor_attachments").apply { mkdirs() }
     @Suppress("DEPRECATION")
     private val transferPrefs by lazy {
@@ -162,9 +231,11 @@ class TorAttachmentTransfer(private val context: Context) {
         previewBytes: ByteArray? = null,
         fileName: String = "",
         durationMs: Int = 0,
-        viewOnce: Boolean = false
+        viewOnce: Boolean = false,
+        pageCount: Int = 0,
+        sha256Hex: String = ""
     ): Meta {
-        require(totalBytes in 1..MAX_ATTACHMENT_BYTES) { "Attachment must be at most 1 MB" }
+        require(totalBytes in 1..MAX_ATTACHMENT_BYTES) { "Attachment must be at most 50 MB" }
         val normalizedMimeType = normalizeSupportedMimeType(mimeType.ifBlank { "application/octet-stream" })
         require(senderPublicKey.isBlank() || senderPublicKey.matches(HEX_PUBLIC_KEY)) {
             "Invalid sender identity"
@@ -172,6 +243,7 @@ class TorAttachmentTransfer(private val context: Context) {
         require((groupId == null) == (groupMessageId == null)) { "Incomplete group attachment context" }
         val safeFileName = sanitizeFileName(fileName)
         val safePreview = if (viewOnce) null else previewBytes?.takeIf { it.size in 1..MAX_PREVIEW_BYTES }
+        val safeSha = sha256Hex.trim().lowercase().takeIf { it.matches(HEX_PUBLIC_KEY) }.orEmpty()
         return Meta(
             transferId = transferId,
             mimeType = normalizedMimeType,
@@ -184,7 +256,9 @@ class TorAttachmentTransfer(private val context: Context) {
             previewBytes = safePreview,
             fileName = safeFileName,
             durationMs = durationMs.coerceAtLeast(0),
-            viewOnce = viewOnce
+            viewOnce = viewOnce,
+            pageCount = pageCount.coerceAtLeast(0),
+            sha256Hex = safeSha
         )
     }
 
@@ -193,22 +267,23 @@ class TorAttachmentTransfer(private val context: Context) {
         val senderKey = meta.senderPublicKey.toByteArray(Charsets.UTF_8)
         val group = meta.groupId.orEmpty().toByteArray(Charsets.UTF_8)
         val groupMessage = meta.groupMessageId.orEmpty().toByteArray(Charsets.UTF_8)
-        val preview = if (meta.viewOnce) {
-            ByteArray(0)
-        } else {
-            meta.previewBytes?.takeIf { it.size <= MAX_PREVIEW_BYTES } ?: ByteArray(0)
-        }
         val stride = meta.chunkSize.coerceIn(512, 3_900)
         val rawNameBytes = sanitizeFileName(meta.fileName).toByteArray(Charsets.UTF_8)
         val fileNameBytes = if (rawNameBytes.size > 180) rawNameBytes.copyOf(180) else rawNameBytes
+        val shaBytes = hexToBytes(meta.sha256Hex)
         require(mime.size <= 255) { "Invalid MIME type" }
         require(senderKey.size <= 255) { "Invalid sender identity" }
         require(group.size <= 64 && groupMessage.size <= 64) { "Invalid group attachment context" }
-        return ByteBuffer.allocate(
-            1 + 16 + 1 + mime.size + 4 + 4 + 1 + senderKey.size +
-                1 + group.size + 1 + groupMessage.size + 2 + 2 + preview.size +
-                1 + fileNameBytes.size + 4 + 1
-        )
+        val baseSize = 1 + 16 + 1 + mime.size + 4 + 4 + 1 + senderKey.size +
+            1 + group.size + 1 + groupMessage.size + 2 + 2 +
+            1 + fileNameBytes.size + 4 + 1 + 4 + 1 + shaBytes.size
+        val previewBudget = (3_900 - baseSize).coerceIn(0, MAX_PREVIEW_BYTES)
+        val preview = if (meta.viewOnce) {
+            ByteArray(0)
+        } else {
+            meta.previewBytes?.takeIf { it.size <= previewBudget } ?: ByteArray(0)
+        }
+        return ByteBuffer.allocate(baseSize + preview.size)
             .put(META_VERSION)
             .putLong(meta.transferId.mostSignificantBits)
             .putLong(meta.transferId.leastSignificantBits)
@@ -227,6 +302,9 @@ class TorAttachmentTransfer(private val context: Context) {
             .put(fileNameBytes)
             .putInt(meta.durationMs.coerceAtLeast(0))
             .put(if (meta.viewOnce) 1.toByte() else 0.toByte())
+            .putInt(meta.pageCount.coerceAtLeast(0))
+            .put(shaBytes.size.toByte())
+            .put(shaBytes)
             .array()
     }
 
@@ -234,6 +312,7 @@ class TorAttachmentTransfer(private val context: Context) {
         val buffer = ByteBuffer.wrap(data)
         val version = buffer.get()
         if (version != META_VERSION &&
+            version != META_VERSION_V5 &&
             version != META_VERSION_V4 &&
             version != META_VERSION_V3 &&
             version != PREVIOUS_META_VERSION &&
@@ -275,7 +354,9 @@ class TorAttachmentTransfer(private val context: Context) {
         var fileName = ""
         var durationMs = 0
         var viewOnce = false
-        if (version == META_VERSION) {
+        var pageCount = 0
+        var sha256Hex = ""
+        if (version >= META_VERSION_V5) {
             if (buffer.remaining() < 1 + 4 + 1) return null
             fileName = sanitizeFileName(readSmallString(buffer))
             if (buffer.remaining() < 5) return null
@@ -283,6 +364,17 @@ class TorAttachmentTransfer(private val context: Context) {
             viewOnce = buffer.get().toInt() != 0
             if (viewOnce) {
                 previewBytes = null
+            }
+        }
+        if (version >= META_VERSION) {
+            if (buffer.remaining() < 5) return null
+            pageCount = buffer.int.coerceAtLeast(0)
+            val shaLen = buffer.get().toInt() and 0xFF
+            if (shaLen != 0 && shaLen != 32) return null
+            if (shaLen > buffer.remaining()) return null
+            if (shaLen == 32) {
+                val shaBytes = ByteArray(32).also { buffer.get(it) }
+                sha256Hex = shaBytes.joinToString("") { "%02x".format(it) }
             }
         }
         if (chunkCount != (totalBytes + chunkStride - 1) / chunkStride) return null
@@ -301,7 +393,9 @@ class TorAttachmentTransfer(private val context: Context) {
             previewBytes = previewBytes,
             fileName = fileName,
             durationMs = durationMs,
-            viewOnce = viewOnce
+            viewOnce = viewOnce,
+            pageCount = pageCount,
+            sha256Hex = sha256Hex
         )
     }.getOrNull()
 
@@ -357,6 +451,25 @@ class TorAttachmentTransfer(private val context: Context) {
             .ifBlank { sender.trim().lowercase() }
     }
 
+    private fun emitIncomingProgress(transfer: IncomingTransfer) {
+        val uiId = transfer.meta.groupMessageId ?: transfer.messageId.toString()
+        val approxBytes = minOf(
+            transfer.meta.totalBytes.toLong(),
+            transfer.receivedCount.toLong() * transfer.meta.chunkSize.toLong()
+        )
+        _incomingProgressFlow.update { current ->
+            current + (uiId to TransferProgress(
+                transferId = transfer.meta.transferId.toString(),
+                uiMessageId = uiId,
+                transferredBytes = approxBytes,
+                totalBytes = transfer.meta.totalBytes.toLong(),
+                doneUnits = transfer.receivedCount,
+                totalUnits = transfer.meta.chunkCount,
+                isOutgoing = false
+            ))
+        }
+    }
+
     fun beginIncoming(sender: String, messageId: UUID, timestamp: Long, meta: Meta): Boolean = runCatching {
         val normSender = canonicalSender(sender)
         val key = transferKey(normSender, meta.transferId)
@@ -371,6 +484,7 @@ class TorAttachmentTransfer(private val context: Context) {
         if (!file.exists() || file.length() != meta.totalBytes.toLong()) {
             RandomAccessFile(file, "rw").use { it.setLength(meta.totalBytes.toLong()) }
         }
+        emitIncomingProgress(transfer)
         persistIncoming(transfer, synchronous = true) && persistTransferSender(meta.transferId, meta.senderPublicKey)
     }.onFailure { Log.w(TAG, "Could not prepare incoming attachment: ${it.message}") }.getOrDefault(false)
 
@@ -513,6 +627,9 @@ class TorAttachmentTransfer(private val context: Context) {
             transfer.received.set(index)
             transfer.receivedCount++
             val isFinalChunk = transfer.receivedCount == transfer.meta.chunkCount
+            if (isFinalChunk || transfer.receivedCount == 1 || transfer.receivedCount % 4 == 0) {
+                emitIncomingProgress(transfer)
+            }
             if (isFinalChunk) {
                 transfer.dirtyChunksSincePersist = 0
                 if (!persistIncoming(transfer, synchronous = true)) {
@@ -530,6 +647,19 @@ class TorAttachmentTransfer(private val context: Context) {
         runCatching { transfer.raf?.close() }
         transfer.raf = null
         val temp = tempFile(normSender, transferId)
+        val expectedSha = transfer.meta.sha256Hex
+        if (expectedSha.length == 64) {
+            val actualSha = computeFileSha256Hex(temp)
+            if (!actualSha.equals(expectedSha, ignoreCase = true)) {
+                Log.e(TAG, "❌ SHA-256 verification failed for $transferId (expected=${expectedSha.take(12)}, actual=${actualSha.take(12)})")
+                incoming.remove(transferKey(normSender, transferId))
+                incomingMetaByTransferId.remove(transferId)
+                _incomingProgressFlow.update { it - (transfer.meta.groupMessageId ?: transfer.messageId.toString()) }
+                runCatching { temp.delete() }
+                transferPrefs.edit().remove(transferPrefsKey(normSender, transferId)).apply()
+                return ChunkResult.Rejected
+            }
+        }
         if (finalFile.exists()) {
             finalFile.delete()
         }
@@ -593,6 +723,7 @@ class TorAttachmentTransfer(private val context: Context) {
                 }
                 incomingMetaByTransferId.remove(transfer.meta.transferId)
                 transferSenders.remove(transfer.meta.transferId)
+                _incomingProgressFlow.update { it - (transfer.meta.groupMessageId ?: transfer.messageId.toString()) }
                 runCatching { tempFile(transfer.sender, transfer.meta.transferId).delete() }
             }
         }
@@ -611,9 +742,14 @@ class TorAttachmentTransfer(private val context: Context) {
         val normSender = canonicalSender(sender)
         val key = transferKey(normSender, transferId)
         val now = System.currentTimeMillis()
-        completedIncoming.remove(key)
-        incomingMetaByTransferId.remove(transferId)
+        completedIncoming.remove(key)?.let { done ->
+            _incomingProgressFlow.update { it - (done.groupMessageId ?: done.messageId.toString()) }
+        }
+        incomingMetaByTransferId.remove(transferId)?.let { meta ->
+            _incomingProgressFlow.update { it - (meta.groupMessageId ?: transferId.toString()) }
+        }
         incoming.remove(key)?.let { stale ->
+            _incomingProgressFlow.update { it - (stale.meta.groupMessageId ?: stale.messageId.toString()) }
             synchronized(stale) {
                 runCatching { stale.raf?.close() }
                 stale.raf = null
@@ -629,10 +765,135 @@ class TorAttachmentTransfer(private val context: Context) {
     }
 
     fun saveOutgoing(transferId: UUID, bytes: ByteArray, mimeType: String): String {
-        require(bytes.size in 1..MAX_ATTACHMENT_BYTES) { "Attachment must be at most 1 MB" }
+        require(bytes.size in 1..MAX_ATTACHMENT_BYTES) { "Attachment must be at most 50 MB" }
         val file = finalFile("outgoing", transferId, normalizeSupportedMimeType(mimeType))
         file.writeBytes(bytes)
         return file.absolutePath
+    }
+
+    fun stageOutgoingFromStream(
+        transferId: UUID,
+        input: InputStream,
+        mimeType: String,
+        maxBytes: Int = MAX_ATTACHMENT_BYTES
+    ): StagedOutgoingFile {
+        val normMime = normalizeSupportedMimeType(mimeType)
+        val destFile = finalFile("outgoing", transferId, normMime)
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buf = ByteArray(32_768)
+        var total = 0L
+        try {
+            destFile.outputStream().use { out ->
+                while (true) {
+                    val read = input.read(buf)
+                    if (read <= 0) break
+                    total += read
+                    if (total > maxBytes) {
+                        throw IllegalArgumentException("File exceeds the ${maxBytes / (1024 * 1024)} MB encrypted Tor limit")
+                    }
+                    out.write(buf, 0, read)
+                    digest.update(buf, 0, read)
+                }
+            }
+            if (total <= 0L) {
+                runCatching { destFile.delete() }
+                throw IllegalArgumentException("Selected file is empty")
+            }
+        } catch (e: Exception) {
+            runCatching { destFile.delete() }
+            throw e
+        }
+        return StagedOutgoingFile(
+            path = destFile.absolutePath,
+            totalBytes = total.toInt(),
+            sha256Hex = digest.digest().joinToString("") { "%02x".format(it) },
+            normalizedMime = normMime
+        )
+    }
+
+    fun computeSha256Hex(file: File): String = computeFileSha256Hex(file)
+
+    fun stageOutgoingFromFile(
+        transferId: UUID,
+        sourceFile: File,
+        mimeType: String,
+        maxBytes: Int = MAX_ATTACHMENT_BYTES,
+        keepSourceFile: Boolean = false,
+        sha256HexHint: String = ""
+    ): StagedOutgoingFile {
+        require(sourceFile.exists() && sourceFile.isFile) { "Source file missing" }
+        val len = sourceFile.length()
+        require(len in 1L..maxBytes.toLong()) { "File exceeds the ${maxBytes / (1024 * 1024)} MB encrypted Tor limit" }
+        val normMime = normalizeSupportedMimeType(mimeType)
+        val validHint = sha256HexHint.trim().lowercase().takeIf { it.matches(HEX_PUBLIC_KEY) }
+        return if (keepSourceFile || (sourceFile.parentFile == attachmentDirectory && sourceFile.name.contains(transferId.toString()))) {
+            StagedOutgoingFile(
+                path = sourceFile.absolutePath,
+                totalBytes = len.toInt(),
+                sha256Hex = validHint ?: computeFileSha256Hex(sourceFile),
+                normalizedMime = normMime
+            )
+        } else {
+            sourceFile.inputStream().use { input ->
+                stageOutgoingFromStream(transferId, input, normMime, maxBytes)
+            }
+        }
+    }
+
+    fun readChunkPayloadFromFile(
+        sourceFile: File,
+        transferId: UUID,
+        index: Int,
+        stride: Int = CHUNK_BYTES,
+        totalBytes: Int
+    ): ByteArray {
+        val offset = index.toLong() * stride
+        val expectedLen = minOf(stride, totalBytes - offset.toInt())
+        require(offset >= 0L && expectedLen in 1..CHUNK_BYTES) { "Invalid disk chunk bounds ($index)" }
+        val chunk = ByteArray(expectedLen)
+        RandomAccessFile(sourceFile, "r").use { raf ->
+            raf.seek(offset)
+            raf.readFully(chunk, 0, expectedLen)
+        }
+        return encodeChunk(transferId, index, chunk)
+    }
+
+    fun readParityPayloadFromFile(
+        sourceFile: File,
+        transferId: UUID,
+        blockIndex: Int,
+        stride: Int = CHUNK_BYTES,
+        totalBytes: Int
+    ): ByteArray {
+        val startIdx = blockIndex * FOUNTAIN_BLOCK_SIZE
+        val endIdx = startIdx + FOUNTAIN_BLOCK_SIZE
+        var maxLen = 0
+        for (idx in startIdx until endIdx) {
+            val len = minOf(stride, totalBytes - idx * stride)
+            if (len > maxLen) maxLen = len
+        }
+        require(maxLen in 1..CHUNK_BYTES) { "Invalid parity block bounds ($blockIndex)" }
+        val xorBytes = ByteArray(maxLen)
+        val scratch = ByteArray(stride)
+        RandomAccessFile(sourceFile, "r").use { raf ->
+            for (idx in startIdx until endIdx) {
+                val len = minOf(stride, totalBytes - idx * stride)
+                if (len <= 0) continue
+                raf.seek(idx.toLong() * stride)
+                raf.readFully(scratch, 0, len)
+                for (j in 0 until len) {
+                    xorBytes[j] = (xorBytes[j].toInt() xor (scratch[j].toInt() and 0xFF)).toByte()
+                }
+            }
+        }
+        return ByteBuffer.allocate(PARITY_HEADER_BYTES + maxLen)
+            .putLong(transferId.mostSignificantBits)
+            .putLong(transferId.leastSignificantBits)
+            .putInt(blockIndex)
+            .putInt(FOUNTAIN_BLOCK_SIZE)
+            .putInt(maxLen)
+            .put(xorBytes)
+            .array()
     }
 
     fun savePreview(transferId: UUID, previewBytes: ByteArray): String? = runCatching {
@@ -642,10 +903,18 @@ class TorAttachmentTransfer(private val context: Context) {
         file.absolutePath
     }.getOrNull()
 
+    fun saveStreamingPlaceholder(transferId: UUID): String? = runCatching {
+        val file = File(attachmentDirectory, "streaming_${transferId}.part")
+        if (!file.exists()) file.writeBytes(ByteArray(0))
+        file.absolutePath
+    }.getOrNull()
+
     fun deletePreview(transferId: UUID) {
         runCatching {
-            val file = File(attachmentDirectory, "preview_${transferId}.webp")
-            if (file.exists()) file.delete()
+            val webp = File(attachmentDirectory, "preview_${transferId}.webp")
+            if (webp.exists()) webp.delete()
+            val streamMarker = File(attachmentDirectory, "streaming_${transferId}.part")
+            if (streamMarker.exists()) streamMarker.delete()
         }
     }
 
@@ -716,7 +985,9 @@ class TorAttachmentTransfer(private val context: Context) {
         groupMessageId = transfer.meta.groupMessageId,
         fileName = transfer.meta.fileName,
         durationMs = transfer.meta.durationMs,
-        viewOnce = transfer.meta.viewOnce
+        viewOnce = transfer.meta.viewOnce,
+        pageCount = transfer.meta.pageCount,
+        sha256Hex = transfer.meta.sha256Hex
     )
 
     private fun persistIncoming(transfer: IncomingTransfer, synchronous: Boolean = false): Boolean {
@@ -737,7 +1008,9 @@ class TorAttachmentTransfer(private val context: Context) {
             transfer.meta.chunkSize.toString(),
             fileNameB64,
             transfer.meta.durationMs.toString(),
-            if (transfer.meta.viewOnce) "1" else "0"
+            if (transfer.meta.viewOnce) "1" else "0",
+            transfer.meta.pageCount.toString(),
+            transfer.meta.sha256Hex
         ).joinToString("|")
         val editor = transferPrefs.edit()
             .putString(transferPrefsKey(transfer.sender, transfer.meta.transferId), value)
@@ -752,7 +1025,7 @@ class TorAttachmentTransfer(private val context: Context) {
     private fun restoreIncoming(sender: String, transferId: UUID): IncomingTransfer? = runCatching {
         val value = transferPrefs.getString(transferPrefsKey(sender, transferId), null) ?: return null
         val parts = value.split('|')
-        if (parts.size !in 6..13) return null
+        if (parts.size !in 6..15) return null
         val messageId = UUID.fromString(parts[0])
         val timestamp = parts[1].toLong()
         val mime = normalizeSupportedMimeType(String(Base64.decode(parts[2], Base64.NO_WRAP), Charsets.UTF_8))
@@ -771,6 +1044,8 @@ class TorAttachmentTransfer(private val context: Context) {
             .orEmpty()
         val durationMs = parts.getOrNull(11)?.toIntOrNull()?.coerceAtLeast(0) ?: 0
         val viewOnce = parts.getOrNull(12) == "1"
+        val pageCount = parts.getOrNull(13)?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+        val sha256Hex = parts.getOrNull(14)?.trim()?.lowercase()?.takeIf { it.matches(HEX_PUBLIC_KEY) }.orEmpty()
         if (totalBytes !in 1..MAX_ATTACHMENT_BYTES ||
             chunkCount != (totalBytes + chunkStride - 1) / chunkStride ||
             (senderPublicKey.isNotBlank() && !senderPublicKey.matches(HEX_PUBLIC_KEY)) ||
@@ -791,7 +1066,9 @@ class TorAttachmentTransfer(private val context: Context) {
                 chunkSize = chunkStride,
                 fileName = fileName,
                 durationMs = durationMs,
-                viewOnce = viewOnce
+                viewOnce = viewOnce,
+                pageCount = pageCount,
+                sha256Hex = sha256Hex
             ),
             messageId = messageId,
             timestamp = timestamp,
@@ -829,6 +1106,12 @@ class TorAttachmentTransfer(private val context: Context) {
             "application/vnd.android.package-archive" -> "apk"
             "application/msword" -> "doc"
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> "docx"
+            "application/vnd.ms-excel" -> "xls"
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" -> "xlsx"
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation" -> "pptx"
+            "application/epub+zip" -> "epub"
+            "application/rtf" -> "rtf"
+            "text/markdown" -> "md"
             else -> "bin"
         }
         return File(attachmentDirectory, "${sender.hashCode()}_${transferId}.$extension")

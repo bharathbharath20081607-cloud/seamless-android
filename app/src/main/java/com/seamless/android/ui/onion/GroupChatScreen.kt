@@ -44,9 +44,11 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Edit
@@ -63,6 +65,7 @@ import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.core.content.ContextCompat
 import androidx.compose.material3.AlertDialog
@@ -121,6 +124,7 @@ import com.seamless.android.data.GroupMemberEntity
 import com.seamless.android.data.GroupMessageEntity
 import com.seamless.android.data.PrivateGroupEntity
 import com.seamless.android.net.OnionContactManager
+import com.seamless.android.net.TorAttachmentTransfer
 import com.seamless.android.net.TorContactTrustState
 import com.seamless.android.net.TorGroupMessaging
 import com.seamless.android.net.TorMessagingService
@@ -129,6 +133,7 @@ import com.seamless.android.service.TorForegroundService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import kotlin.math.abs
 
 private val QuickReactionEmojis = listOf("❤️", "👍", "🔥", "😂", "😮", "🙏")
@@ -166,6 +171,7 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
     val members by remember(group.groupId) { groupDao.getMembersForGroup(group.groupId) }
         .collectAsState(initial = emptyList())
     val connectedPeers by messagingService.connectedPeersFlow.collectAsState()
+    val attachmentProgressMap by messagingService.attachmentTransferProgressFlow.collectAsState()
     val deliveryProgressMap by groupService.deliveryProgressFlow.collectAsState()
     val reactionsMap by groupService.reactionsFlow.collectAsState()
     val editedIds by groupService.editedMessageIdsFlow.collectAsState()
@@ -194,6 +200,21 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
     var showSearchBar by remember(group.groupId) { mutableStateOf(false) }
     var searchQuery by remember(group.groupId) { mutableStateOf("") }
     var activeBurnTarget by remember(group.groupId) { mutableStateOf<GroupMessageEntity?>(null) }
+    var pendingPdfStudioDoc by remember(group.groupId) { mutableStateOf<PdfDocumentTools.StagedDocument?>(null) }
+    var pendingPdfBurnArmed by remember(group.groupId) { mutableStateOf(false) }
+    var activePdfTarget by remember(group.groupId) { mutableStateOf<Triple<GroupMessageEntity, Int, File>?>(null) }
+
+    fun openGroupPdfMessage(target: GroupMessageEntity, initialPageOneBased: Int = 1) {
+        val file = target.attachmentPath
+            ?.takeIf { !TorAttachmentTransfer.isTemporaryAttachmentPath(it) }
+            ?.let(::File)
+            ?.takeIf { it.exists() && it.isFile }
+        if (file == null) {
+            Toast.makeText(context, "PDF is still transferring or unavailable", Toast.LENGTH_SHORT).show()
+            return
+        }
+        activePdfTarget = Triple(target, (initialPageOneBased - 1).coerceAtLeast(0), file)
+    }
 
     val myCanonicalOnion = remember {
         OnionContactManager.OnionContact.canonicalizeOnionEndpoint(contactManager.getMyContactInfo().onionAddress)
@@ -231,6 +252,44 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
         else Toast.makeText(context, "Microphone permission is required for voice notes", Toast.LENGTH_SHORT).show()
     }
 
+    val groupCallManager = remember { com.seamless.android.call.GroupCallManager.getInstance(context) }
+    val activeGroupCallSession by groupCallManager.sessionFlow.collectAsState()
+    val activeRoomsByGroup by groupCallManager.activeRoomsByGroupFlow.collectAsState()
+    val roomBanner = activeRoomsByGroup[group.groupId]
+    var pendingCallWithVideo by remember { mutableStateOf(false) }
+
+    val groupCallPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        val hasMic = grants[Manifest.permission.RECORD_AUDIO] == true ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val hasCam = grants[Manifest.permission.CAMERA] == true ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        if (!hasMic) {
+            Toast.makeText(context, "Microphone permission is required for group calls", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        groupCallManager.startOrJoinGroupCall(
+            groupId = group.groupId,
+            isVideo = pendingCallWithVideo && hasCam
+        )
+    }
+
+    fun launchGroupCall(withVideo: Boolean) {
+        val hasMic = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val hasCam = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        if (hasMic && (!withVideo || hasCam)) {
+            groupCallManager.startOrJoinGroupCall(groupId = group.groupId, isVideo = withVideo)
+        } else {
+            pendingCallWithVideo = withVideo
+            val req = buildList {
+                if (!hasMic) add(Manifest.permission.RECORD_AUDIO)
+                if (withVideo && !hasCam) add(Manifest.permission.CAMERA)
+            }.toTypedArray()
+            groupCallPermLauncher.launch(req)
+        }
+    }
+
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null || isSendingMedia) return@rememberLauncherForActivityResult
         val useViewOnce = burnOnReadArmed
@@ -258,17 +317,29 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
         scope.launch {
             isSendingMedia = true
             try {
-                val preparedDoc = withContext(Dispatchers.IO) { prepareDocumentForTor(context, uri) }
-                preparedDoc.onFailure { err ->
+                val stagedResult = withContext(Dispatchers.IO) { PdfDocumentTools.stageUriForTor(context, uri) }
+                stagedResult.onFailure { err ->
                     Toast.makeText(context, err.message ?: "Unable to read file", Toast.LENGTH_SHORT).show()
-                }.onSuccess { doc ->
-                    groupService.sendGroupAttachment(
-                        groupId = group.groupId,
-                        bytes = doc.bytes,
-                        mimeType = doc.mimeType,
-                        fileName = doc.fileName,
-                        viewOnce = useViewOnce
-                    ).onFailure { Toast.makeText(context, it.message ?: "Unable to queue file", Toast.LENGTH_SHORT).show() }
+                }.onSuccess { staged ->
+                    if (staged.isPdf && !staged.isPasswordProtected && staged.pageCount > 0) {
+                        pendingPdfBurnArmed = useViewOnce
+                        pendingPdfStudioDoc = staged
+                    } else {
+                        try {
+                            groupService.sendGroupAttachmentFromFile(
+                                groupId = group.groupId,
+                                sourceFile = staged.file,
+                                mimeType = staged.mimeType,
+                                fileName = staged.fileName,
+                                pageCount = staged.pageCount,
+                                sha256Hex = staged.sha256Hex,
+                                viewOnce = useViewOnce,
+                                previewBytes = if (useViewOnce) null else staged.coverPreviewBytes
+                            ).onFailure { Toast.makeText(context, it.message ?: "Unable to queue file", Toast.LENGTH_SHORT).show() }
+                        } finally {
+                            runCatching { staged.file.delete() }
+                        }
+                    }
                 }
             } finally { isSendingMedia = false }
         }
@@ -356,6 +427,11 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
 
     androidx.activity.compose.BackHandler {
         when {
+            activePdfTarget != null -> activePdfTarget = null
+            pendingPdfStudioDoc != null -> {
+                pendingPdfStudioDoc?.let { runCatching { it.file.delete() } }
+                pendingPdfStudioDoc = null
+            }
             activeBurnTarget != null -> activeBurnTarget = null
             isRecordingVoice -> isRecordingVoice = false
             fullscreenPhotoPath != null -> fullscreenPhotoPath = null
@@ -412,6 +488,12 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                         }
                     },
                     actions = {
+                        IconButton(onClick = { launchGroupCall(withVideo = false) }) {
+                            Icon(Icons.Default.Call, "Group voice call", tint = OnionUi.Online)
+                        }
+                        IconButton(onClick = { launchGroupCall(withVideo = true) }) {
+                            Icon(Icons.Default.Videocam, "Group video call", tint = OnionUi.AccentBlue)
+                        }
                         IconButton(onClick = {
                             showSearchBar = !showSearchBar
                             if (!showSearchBar) searchQuery = ""
@@ -519,6 +601,59 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
             }
             Box(Modifier.fillMaxSize().padding(padding)) {
                 Column(Modifier.fillMaxSize()) {
+                    val showJoinBanner = roomBanner != null &&
+                        (activeGroupCallSession?.groupId != group.groupId ||
+                            activeGroupCallSession?.state == com.seamless.android.call.GroupCallState.IDLE ||
+                            activeGroupCallSession?.state == com.seamless.android.call.GroupCallState.ENDED)
+                    AnimatedVisibility(visible = showJoinBanner) {
+                        val b = roomBanner
+                        if (b != null) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                                    .clip(RoundedCornerShape(18.dp))
+                                    .background(OnionUi.Online.copy(alpha = 0.14f))
+                                    .border(1.dp, OnionUi.Online.copy(alpha = 0.45f), RoundedCornerShape(18.dp))
+                                    .clickable { launchGroupCall(withVideo = b.isVideo) }
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(OnionUi.Online)
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        if (b.isVideo) "Live Group Video Call" else "Live Group Voice Call",
+                                        color = OnionUi.TextPrimary,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp
+                                    )
+                                    Text(
+                                        "${b.participantCount} in call · Started by ${b.initiatorNickname}",
+                                        color = OnionUi.Online,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = OnionUi.Online
+                                ) {
+                                    Text(
+                                        "Join",
+                                        color = Color(0xFF05130C),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
                     AnimatedVisibility(visible = showSearchBar) {
                         InChatSearchBar(
                             query = searchQuery,
@@ -579,7 +714,18 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                                     DateHeaderPill(formatDateHeader(message.timestamp))
                                 }
                                 if (message.senderOnionAddress == TorGroupMessaging.SYSTEM_SENDER) {
-                                    SystemEventBanner(message.text)
+                                    if (message.text.startsWith("📞") || message.text.startsWith("📹")) {
+                                        val isVideoEvent = message.text.startsWith("📹")
+                                        GroupCallTimelineCard(
+                                            text = message.text.removePrefix("📞").removePrefix("📹").trim(),
+                                            timestamp = message.timestamp,
+                                            isVideo = isVideoEvent,
+                                            isCallCurrentlyLive = roomBanner != null,
+                                            onActionClick = { launchGroupCall(withVideo = roomBanner?.isVideo ?: isVideoEvent) }
+                                        )
+                                    } else {
+                                        SystemEventBanner(message.text)
+                                    }
                                 } else {
                                     fun sameCluster(neighbor: GroupMessageEntity?): Boolean {
                                         if (neighbor == null) return false
@@ -610,6 +756,7 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                                             cleanMsgBody == TorRichChatCodec.BURNED_CAPSULE_TEXT,
                                         groupShredCount = shredReceiptsMap[message.id]?.size ?: 0,
                                         deliveryProgress = deliveryProgressMap[message.id] ?: groupService.deliveryProgress(message.id),
+                                        transferProgress = attachmentProgressMap[message.id],
                                         reactions = reactionsMap[message.id].orEmpty(),
                                         onLongPress = { actionTargetMessage = message },
                                         onQuotedMessageClick = { targetId ->
@@ -619,6 +766,13 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                                             }
                                         },
                                         onPhotoClick = { path -> fullscreenPhotoPath = path },
+                                        onOpenPdf = { openGroupPdfMessage(message, 1) },
+                                        onOpenReplyPdfPage = { replyId, pageOneBased ->
+                                            val target = messages.firstOrNull { it.id == replyId }
+                                            if (target != null) {
+                                                openGroupPdfMessage(target, pageOneBased)
+                                            }
+                                        },
                                         onOpenBurnCapsule = { activeBurnTarget = message },
                                         onReactionClick = { emoji ->
                                             emojiEffectText = emoji
@@ -820,6 +974,13 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
     }
 
     if (showInfo) {
+        val inCallOnions = remember(activeGroupCallSession, group.groupId) {
+            if (activeGroupCallSession?.groupId == group.groupId &&
+                activeGroupCallSession?.state == com.seamless.android.call.GroupCallState.ACTIVE
+            ) {
+                activeGroupCallSession?.participants?.mapTo(HashSet()) { it.onionAddress }.orEmpty()
+            } else emptySet()
+        }
         GroupInfoSheet(
             group = current,
             members = members,
@@ -828,9 +989,159 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
             adminsSet = groupAdminsMap[current.groupId].orEmpty(),
             currentEpoch = currentEpoch,
             currentDisappearingTtlMs = currentTtlMs,
+            inCallMemberOnions = inCallOnions,
+            onStartVoiceCall = { showInfo = false; launchGroupCall(withVideo = false) },
+            onStartVideoCall = { showInfo = false; launchGroupCall(withVideo = true) },
             onDismiss = { showInfo = false },
             onLeft = { showInfo = false; onNavigateBack() }
         )
+    }
+
+    pendingPdfStudioDoc?.let { stagedDoc ->
+        PdfPreSendStudioSheet(
+            staged = stagedDoc,
+            initialBurnOnRead = pendingPdfBurnArmed,
+            onDismiss = {
+                runCatching { stagedDoc.file.delete() }
+                pendingPdfStudioDoc = null
+            },
+            onSendConfirmed = { selectedPages, redactionsByPage, preset, useViewOnce ->
+                pendingPdfStudioDoc = null
+                scope.launch {
+                    isSendingMedia = true
+                    try {
+                        val builtResult = PdfDocumentTools.buildProcessedPdf(
+                            context = context,
+                            source = stagedDoc,
+                            selectedPages = selectedPages,
+                            redactionsByPage = redactionsByPage,
+                            preset = preset
+                        )
+                        builtResult.onFailure { err ->
+                            Toast.makeText(context, err.message ?: "Unable to prepare PDF", Toast.LENGTH_SHORT).show()
+                        }.onSuccess { finalDoc ->
+                            try {
+                                groupService.sendGroupAttachmentFromFile(
+                                    groupId = group.groupId,
+                                    sourceFile = finalDoc.file,
+                                    mimeType = finalDoc.mimeType,
+                                    fileName = finalDoc.fileName,
+                                    pageCount = finalDoc.pageCount,
+                                    sha256Hex = finalDoc.sha256Hex,
+                                    viewOnce = useViewOnce,
+                                    previewBytes = if (useViewOnce) null else finalDoc.coverPreviewBytes
+                                ).onFailure { Toast.makeText(context, it.message ?: "Unable to queue PDF", Toast.LENGTH_SHORT).show() }
+                            } finally {
+                                if (finalDoc.file != stagedDoc.file) {
+                                    runCatching { finalDoc.file.delete() }
+                                }
+                            }
+                        }
+                    } finally {
+                        runCatching { stagedDoc.file.delete() }
+                        isSendingMedia = false
+                    }
+                }
+            }
+        )
+    }
+
+    activePdfTarget?.let { (sourceMsg, initialPageIdx, pdfFile) ->
+        val desc = remember(sourceMsg.text, sourceMsg.attachmentMimeType, sourceMsg.attachmentPath) {
+            TorRichChatCodec.inferDescriptor(sourceMsg.text, sourceMsg.attachmentMimeType, sourceMsg.attachmentPath)
+        }
+        val safeName = desc?.fileName?.ifBlank { pdfFile.name } ?: pdfFile.name
+        AegisPdfViewerDialog(
+            file = pdfFile,
+            fileName = safeName,
+            sha256Hex = desc?.sha256.orEmpty(),
+            initialPage = initialPageIdx,
+            isSecureMode = false,
+            onQuotePage = { oneBasedPage ->
+                replyingTo = sourceMsg
+                text = "${TorRichChatCodec.formatPdfPageCitation(oneBasedPage)} — "
+            },
+            onExport = {
+                scope.launch {
+                    saveAttachmentToDownloads(context, pdfFile, safeName, "application/pdf")
+                        .onSuccess { dest -> Toast.makeText(context, "Saved to $dest", Toast.LENGTH_SHORT).show() }
+                        .onFailure { Toast.makeText(context, it.message ?: "Save failed", Toast.LENGTH_SHORT).show() }
+                }
+            },
+            onDismiss = { activePdfTarget = null }
+        )
+    }
+}
+
+@Composable
+private fun GroupCallTimelineCard(
+    text: String,
+    timestamp: Long,
+    isVideo: Boolean,
+    isCallCurrentlyLive: Boolean,
+    onActionClick: () -> Unit
+) {
+    val accent = if (isCallCurrentlyLive) OnionUi.Online else if (isVideo) OnionUi.AccentBlue else OnionUi.Online
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(OnionUi.CanvasRaised)
+                .border(1.dp, accent.copy(alpha = if (isCallCurrentlyLive) 0.55f else 0.25f), RoundedCornerShape(18.dp))
+                .clickable { onActionClick() }
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(accent.copy(alpha = 0.16f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    if (isVideo) Icons.Default.Videocam else Icons.Default.Call,
+                    contentDescription = null,
+                    tint = accent,
+                    modifier = Modifier.size(17.dp)
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text,
+                    color = OnionUi.TextPrimary,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    formatChatTime(timestamp) + " · End-to-End Encrypted",
+                    color = OnionUi.TextSecondary,
+                    fontSize = 11.sp
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Surface(
+                shape = RoundedCornerShape(999.dp),
+                color = accent.copy(alpha = 0.18f)
+            ) {
+                Text(
+                    if (isCallCurrentlyLive) "Join Live" else "Call Again",
+                    color = accent,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                )
+            }
+        }
     }
 }
 
@@ -870,10 +1181,13 @@ private fun GroupMessageBubble(
     isBurned: Boolean,
     groupShredCount: Int,
     deliveryProgress: Pair<Int, Int>?,
+    transferProgress: TorAttachmentTransfer.TransferProgress? = null,
     reactions: Map<String, String>,
     onLongPress: () -> Unit,
     onQuotedMessageClick: (String) -> Unit,
     onPhotoClick: (String) -> Unit,
+    onOpenPdf: () -> Unit = {},
+    onOpenReplyPdfPage: (replyToId: String, pageOneBased: Int) -> Unit = { _, _ -> },
     onOpenBurnCapsule: () -> Unit,
     onReactionClick: (String) -> Unit,
     onRetryClick: () -> Unit
@@ -1091,7 +1405,11 @@ private fun GroupMessageBubble(
                                 fileName = descriptor.fileName,
                                 totalBytes = descriptor.totalBytes,
                                 mimeType = message.attachmentMimeType,
-                                outgoing = outgoing
+                                outgoing = outgoing,
+                                pageCount = descriptor.pageCount,
+                                sha256Hex = descriptor.sha256,
+                                transferProgress = transferProgress,
+                                onOpenPdf = onOpenPdf
                             )
                         }
                         else -> {
@@ -1102,6 +1420,33 @@ private fun GroupMessageBubble(
                                     fontSize = if (isExpressiveEmoji(parsed.body)) 30.sp else 15.sp,
                                     lineHeight = if (isExpressiveEmoji(parsed.body)) 36.sp else 21.sp
                                 )
+                                val pdfCitation = remember(parsed.body) { TorRichChatCodec.parsePdfPageCitation(parsed.body) }
+                                val replyTargetId = parsed.replyToId
+                                if (pdfCitation != null && !replyTargetId.isNullOrBlank()) {
+                                    Spacer(Modifier.height(6.dp))
+                                    Row(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(999.dp))
+                                            .background(if (outgoing) Color.White.copy(alpha = 0.16f) else OnionUi.AccentBlue.copy(alpha = 0.14f))
+                                            .clickable { onOpenReplyPdfPage(replyTargetId, pdfCitation.pageNumber) }
+                                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Description,
+                                            null,
+                                            tint = if (outgoing) Color(0xFF93C5FD) else OnionUi.AccentBlue,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Spacer(Modifier.width(5.dp))
+                                        Text(
+                                            "Open Page ${pdfCitation.pageNumber}",
+                                            color = if (outgoing) Color(0xFFDBEAFE) else OnionUi.AccentBlue,
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
                             }
 
                             message.attachmentPath?.let { path ->
@@ -1386,6 +1731,9 @@ private fun GroupInfoSheet(
     adminsSet: Set<String>,
     currentEpoch: Long,
     currentDisappearingTtlMs: Long,
+    inCallMemberOnions: Set<String> = emptySet(),
+    onStartVoiceCall: () -> Unit = {},
+    onStartVideoCall: () -> Unit = {},
     onDismiss: () -> Unit,
     onLeft: () -> Unit
 ) {
@@ -1440,7 +1788,13 @@ private fun GroupInfoSheet(
                     color = OnionUi.Online
                 )
             }
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(16.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                ActionPill("Voice Call", Icons.Default.Call, Modifier.weight(1f), onClick = onStartVoiceCall)
+                ActionPill("Video Call", Icons.Default.Videocam, Modifier.weight(1f), onClick = onStartVideoCall)
+            }
+            Spacer(Modifier.height(10.dp))
 
             if (isLocalAdmin) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
@@ -1495,7 +1849,15 @@ private fun GroupInfoSheet(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
-                                if (isOnline && !isMe) {
+                                if (canonicalMember in inCallMemberOnions) {
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        "In Call",
+                                        color = OnionUi.AccentBlue,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                } else if (isOnline && !isMe) {
                                     Spacer(Modifier.width(6.dp))
                                     Text(
                                         "Online",

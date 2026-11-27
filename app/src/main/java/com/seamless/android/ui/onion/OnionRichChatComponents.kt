@@ -71,6 +71,8 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Videocam
@@ -172,7 +174,7 @@ internal fun prepareDocumentForTor(context: Context, uri: Uri): Result<PreparedD
             }
         }
     if (reportedSize > TorAttachmentTransfer.MAX_ATTACHMENT_BYTES) {
-        error("File exceeds the 1 MB encrypted Tor limit")
+        error("File exceeds the 50 MB encrypted Tor limit")
     }
     val safeName = TorAttachmentTransfer.sanitizeFileName(fileName)
         .ifBlank { "document_${System.currentTimeMillis()}" }
@@ -186,7 +188,7 @@ internal fun prepareDocumentForTor(context: Context, uri: Uri): Result<PreparedD
             if (read <= 0) break
             total += read
             if (total > TorAttachmentTransfer.MAX_ATTACHMENT_BYTES) {
-                error("File exceeds the 1 MB encrypted Tor limit")
+                error("File exceeds the 50 MB encrypted Tor limit")
             }
             out.write(buf, 0, read)
         }
@@ -396,7 +398,7 @@ internal fun OmniAttachmentSheet(
                 AttachmentTile(
                     icon = Icons.Default.Description,
                     title = "File / Doc",
-                    subtitle = "Any Document",
+                    subtitle = "50 MB · PDF Studio",
                     tint = OnionUi.Indigo,
                     modifier = Modifier.weight(1f),
                     onClick = { onDismiss(); onPickDocument() }
@@ -1136,11 +1138,16 @@ internal fun OnionDocumentCard(
     fileName: String,
     totalBytes: Int,
     mimeType: String?,
-    outgoing: Boolean
+    outgoing: Boolean,
+    pageCount: Int = 0,
+    sha256Hex: String = "",
+    transferProgress: TorAttachmentTransfer.TransferProgress? = null,
+    onOpenPdf: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val sourceFile = remember(filePath) { filePath?.let(::File)?.takeIf { it.exists() } }
+    val isTempStreaming = remember(filePath) { TorAttachmentTransfer.isTemporaryAttachmentPath(filePath) }
     val displayName = fileName.ifBlank { sourceFile?.name ?: "Encrypted document" }
     val extBadge = displayName.substringAfterLast('.', "").uppercase(Locale.US)
         .take(4)
@@ -1152,11 +1159,12 @@ internal fun OnionDocumentCard(
                 else -> "FILE"
             }
         }
+    val isPdf = extBadge == "PDF" || mimeType.equals("application/pdf", ignoreCase = true)
     val typeLabel = when (extBadge) {
-        "PDF" -> "PDF Document"
-        "TXT", "MD", "LOG" -> "Text Document"
+        "PDF" -> "PDF"
+        "TXT", "MD", "LOG" -> "Text Doc"
         "ZIP", "RAR", "7Z" -> "Archive"
-        "DOC", "DOCX" -> "Word Document"
+        "DOC", "DOCX" -> "Word Doc"
         "XLS", "XLSX", "CSV" -> "Spreadsheet"
         "MP3", "M4A", "WAV", "OGG" -> "Audio File"
         else -> "Encrypted File"
@@ -1164,72 +1172,157 @@ internal fun OnionDocumentCard(
     val fg = if (outgoing) OnionUi.OutgoingText else OnionUi.TextPrimary
     val sub = if (outgoing) OnionUi.OutgoingSubtle else OnionUi.TextSecondary
 
-    Row(
-        modifier = Modifier
-            .widthIn(min = 212.dp, max = 256.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(enabled = sourceFile != null) {
-                val fileToSave = sourceFile ?: return@clickable
-                scope.launch {
-                    saveAttachmentToDownloads(context, fileToSave, displayName, mimeType ?: "application/octet-stream")
-                        .onSuccess { dest -> Toast.makeText(context, "Saved to $dest", Toast.LENGTH_SHORT).show() }
-                        .onFailure { Toast.makeText(context, it.message ?: "Save failed", Toast.LENGTH_SHORT).show() }
-                }
-            }
-            .padding(vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically
+    val coverBitmap by produceState<ImageBitmap?>(
+        initialValue = null,
+        key1 = sourceFile?.absolutePath,
+        key2 = isPdf
     ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clip(RoundedCornerShape(11.dp))
-                .background(if (outgoing) Color(0xFFF5F8FF).copy(alpha = 0.14f) else OnionUi.Indigo.copy(alpha = 0.16f)),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                extBadge,
-                color = if (outgoing) Color(0xFFF5F8FF) else OnionUi.Indigo,
-                fontWeight = FontWeight.ExtraBold,
-                fontSize = 11.sp
-            )
+        value = if (sourceFile != null && (isPdf || isTempStreaming)) {
+            withContext(Dispatchers.IO) { PdfDocumentTools.getCachedCoverBitmap(sourceFile) }
+        } else {
+            null
         }
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                text = displayName,
-                color = fg,
-                fontSize = 13.5.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            val byteLabel = formatByteCount(if (totalBytes > 0) totalBytes else (sourceFile?.length()?.toInt() ?: 0))
-            Text(
-                text = if (byteLabel.isNotBlank()) "$byteLabel · $typeLabel" else typeLabel,
-                color = sub,
-                fontSize = 11.sp,
-                maxLines = 1
-            )
-        }
-        if (sourceFile != null) {
-            Spacer(Modifier.width(6.dp))
-            IconButton(
-                onClick = {
+    }
+
+    val effectiveBytes = if (totalBytes > 0) totalBytes else (sourceFile?.takeIf { !isTempStreaming }?.length()?.toInt() ?: 0)
+    val byteLabel = formatByteCount(effectiveBytes)
+    val showProgress = isTempStreaming || (transferProgress != null && transferProgress.doneUnits < transferProgress.totalUnits)
+
+    Column(
+        modifier = Modifier
+            .widthIn(min = 228.dp, max = 272.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = !isTempStreaming && sourceFile != null) {
+                val fileToUse = sourceFile ?: return@clickable
+                if (isPdf && onOpenPdf != null) {
+                    onOpenPdf()
+                } else {
                     scope.launch {
-                        saveAttachmentToDownloads(context, sourceFile, displayName, mimeType ?: "application/octet-stream")
+                        saveAttachmentToDownloads(context, fileToUse, displayName, mimeType ?: "application/octet-stream")
                             .onSuccess { dest -> Toast.makeText(context, "Saved to $dest", Toast.LENGTH_SHORT).show() }
                             .onFailure { Toast.makeText(context, it.message ?: "Save failed", Toast.LENGTH_SHORT).show() }
                     }
-                },
-                modifier = Modifier.size(32.dp)
-            ) {
-                Icon(
-                    if (outgoing) Icons.Default.CheckCircle else Icons.Default.Download,
-                    contentDescription = if (outgoing) "Export copy" else "Save file",
-                    tint = if (outgoing) Color(0xFFF5F8FF).copy(alpha = 0.76f) else OnionUi.AccentBlue,
-                    modifier = Modifier.size(18.dp)
-                )
+                }
             }
+            .padding(vertical = 2.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (coverBitmap != null) {
+                Image(
+                    bitmap = coverBitmap!!,
+                    contentDescription = "PDF preview",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .width(44.dp)
+                        .height(56.dp)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(Color.White)
+                        .border(1.dp, if (outgoing) Color.White.copy(alpha = 0.24f) else OnionUi.Hairline, RoundedCornerShape(9.dp))
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(RoundedCornerShape(11.dp))
+                        .background(if (outgoing) Color(0xFFF5F8FF).copy(alpha = 0.14f) else OnionUi.Indigo.copy(alpha = 0.16f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        extBadge,
+                        color = if (outgoing) Color(0xFFF5F8FF) else OnionUi.Indigo,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = displayName,
+                    color = fg,
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(2.dp))
+                val metaParts = buildList {
+                    if (pageCount > 0) add("$pageCount ${if (pageCount == 1) "page" else "pages"}")
+                    if (byteLabel.isNotBlank()) add(byteLabel)
+                    add(typeLabel)
+                }.joinToString(" · ")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (sha256Hex.length == 64 && !isTempStreaming) {
+                        Icon(
+                            Icons.Default.VerifiedUser,
+                            contentDescription = "Integrity verified",
+                            tint = if (outgoing) Color(0xFF86EFAC) else OnionUi.Online,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    Text(
+                        text = metaParts,
+                        color = sub,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (isPdf && !isTempStreaming && sourceFile != null && onOpenPdf != null && !showProgress) {
+                    Text(
+                        text = "Tap to read",
+                        color = if (outgoing) Color(0xFF93C5FD) else OnionUi.AccentBlue,
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+            if (!isTempStreaming && sourceFile != null) {
+                Spacer(Modifier.width(4.dp))
+                IconButton(
+                    onClick = {
+                        scope.launch {
+                            saveAttachmentToDownloads(context, sourceFile, displayName, mimeType ?: "application/octet-stream")
+                                .onSuccess { dest -> Toast.makeText(context, "Saved to $dest", Toast.LENGTH_SHORT).show() }
+                                .onFailure { Toast.makeText(context, it.message ?: "Save failed", Toast.LENGTH_SHORT).show() }
+                        }
+                    },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Download,
+                        contentDescription = if (outgoing) "Export copy" else "Save file",
+                        tint = if (outgoing) Color(0xFFF5F8FF).copy(alpha = 0.80f) else OnionUi.AccentBlue,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        }
+        if (showProgress) {
+            Spacer(Modifier.height(6.dp))
+            val frac = transferProgress?.fraction?.coerceIn(0f, 1f) ?: 0f
+            LinearProgressIndicator(
+                progress = { frac },
+                modifier = Modifier.fillMaxWidth().height(3.dp).clip(CircleShape),
+                color = if (outgoing) Color.White else OnionUi.Online,
+                trackColor = fg.copy(alpha = 0.16f)
+            )
+            val pct = (frac * 100f).toInt()
+            val statusLine = when {
+                isTempStreaming -> "Receiving encrypted stream… $pct%"
+                transferProgress != null -> "Sending encrypted stream… $pct%"
+                else -> "Queued for Tor delivery…"
+            }
+            Text(
+                text = statusLine,
+                color = sub,
+                fontSize = 10.5.sp,
+                modifier = Modifier.padding(top = 3.dp)
+            )
         }
     }
 }
@@ -1471,8 +1564,14 @@ internal fun AegisBurnViewerDialog(
     val activity = remember(context) { context.findHostActivity() }
     val isVoice = attachmentMimeType?.startsWith("audio/") == true
     val isImage = attachmentMimeType?.startsWith("image/") == true
-    val effectiveTtlMs = remember(isVoice, ttlSeconds) {
-        if (isVoice) 30_000L else ttlSeconds.coerceIn(5, 60) * 1000L
+    val isPdf = attachmentMimeType.equals("application/pdf", ignoreCase = true) ||
+        attachmentFile?.name?.lowercase(Locale.US)?.endsWith(".pdf") == true
+    val effectiveTtlMs = remember(isVoice, isPdf, ttlSeconds) {
+        when {
+            isPdf -> 45_000L
+            isVoice -> 30_000L
+            else -> ttlSeconds.coerceIn(5, 60) * 1000L
+        }
     }
     var remainingMs by remember { mutableIntStateOf(effectiveTtlMs.toInt()) }
     var shredded by remember { mutableStateOf(false) }
@@ -1625,6 +1724,15 @@ internal fun AegisBurnViewerDialog(
                                 accentColor = AegisEmberColor
                             )
                         }
+                    }
+                    isPdf && attachmentFile != null -> {
+                        EmbeddedPdfReaderContent(
+                            file = attachmentFile,
+                            darkPaperMode = true,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(16.dp))
+                        )
                     }
                     else -> {
                         CircularProgressIndicator(color = AegisEmberColor)
