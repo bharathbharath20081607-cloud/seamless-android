@@ -2,18 +2,145 @@
 package com.seamless.android.ui.theme
 
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.colorspace.ColorSpaces
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.pow
+import kotlin.math.sin
 
 /**
- * Seamless — Obsidian & Optical Light Design System
+ * Perceptual Color Science Engine (2025-2026)
  *
- * Philosophy: True-black canvas (#000000) with Optical White (#FFFFFF) as the
- * sole accent. Depth comes from luminance layering, not hue. Every surface is
- * a shade of obsidian; every accent is a shade of light.
- *
- * Neuroaesthetic rationale:
- *   • High-contrast achromatic palette reduces cognitive load.
- *   • Zinc-grey secondary text leverages Weber's law for comfortable reading.
- *   • Sparse warm accents (Coral, Amber) trigger salience without distraction.
+ * Implements W3C CSS Color 4/5 OKLCH -> wide-gamut Display P3 binary-search
+ * chroma gamut mapping (constant lightness & hue) alongside WCAG 3.0 Draft APCA
+ * polarity-aware contrast verification (0.0.98G-4g).
+ */
+object PerceptualColorScience {
+
+    private fun srgbTransferEncode(linear: Double): Float {
+        val clamped = linear.coerceIn(0.0, 1.0)
+        val encoded = if (clamped <= 0.0031308) {
+            12.92 * clamped
+        } else {
+            1.055 * clamped.pow(1.0 / 2.4) - 0.055
+        }
+        return encoded.coerceIn(0.0, 1.0).toFloat()
+    }
+
+    private fun srgbTransferDecode(encoded: Float): Double {
+        val v = encoded.toDouble().coerceIn(0.0, 1.0)
+        return if (v <= 0.04045) v / 12.92 else ((v + 0.055) / 1.055).pow(2.4)
+    }
+
+    private fun oklabToLinearP3(l: Double, c: Double, cosH: Double, sinH: Double): Triple<Double, Double, Double> {
+        val a = c * cosH
+        val b = c * sinH
+        val l_ = l + 0.3963377774 * a + 0.2158037573 * b
+        val m_ = l - 0.1055613458 * a - 0.0638541728 * b
+        val s_ = l - 0.0894841775 * a - 1.2914855480 * b
+
+        val l3 = l_ * l_ * l_
+        val m3 = m_ * m_ * m_
+        val s3 = s_ * s_ * s_
+
+        val rSrgb = +4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3
+        val gSrgb = -1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3
+        val bSrgb = -0.0041960863 * l3 - 0.7034186147 * m3 + 1.7076147010 * s3
+
+        // Exact CSS Color 4 linear-sRGB -> linear-DisplayP3 transform
+        val rP3 = 0.8224621 * rSrgb + 0.1775380 * gSrgb
+        val gP3 = 0.0331941 * rSrgb + 0.9668058 * gSrgb
+        val bP3 = 0.0170827 * rSrgb + 0.0723974 * gSrgb + 0.9105199 * bSrgb
+        return Triple(rP3, gP3, bP3)
+    }
+
+    /**
+     * Converts OKLCH (L in [0..1], Chroma >= 0, Hue in degrees) to wide-gamut
+     * Display P3 with constant-lightness / constant-hue gamut clamping.
+     */
+    fun oklchDisplayP3(l: Float, c: Float, hDeg: Float, alpha: Float = 1f): Color {
+        val targetL = l.toDouble().coerceIn(0.0, 1.0)
+        val requestedC = c.toDouble().coerceAtLeast(0.0)
+        val rad = hDeg.toDouble() * PI / 180.0
+        val cosH = cos(rad)
+        val sinH = sin(rad)
+
+        var best = oklabToLinearP3(targetL, requestedC, cosH, sinH)
+        if (best.first < 0.0 || best.first > 1.0 ||
+            best.second < 0.0 || best.second > 1.0 ||
+            best.third < 0.0 || best.third > 1.0
+        ) {
+            var low = 0.0
+            var high = requestedC
+            var inGamut = oklabToLinearP3(targetL, 0.0, cosH, sinH)
+            repeat(10) {
+                val mid = (low + high) * 0.5
+                val candidate = oklabToLinearP3(targetL, mid, cosH, sinH)
+                if (candidate.first in 0.0..1.0 &&
+                    candidate.second in 0.0..1.0 &&
+                    candidate.third in 0.0..1.0
+                ) {
+                    low = mid
+                    inGamut = candidate
+                } else {
+                    high = mid
+                }
+            }
+            best = inGamut
+        }
+
+        return Color(
+            red = srgbTransferEncode(best.first),
+            green = srgbTransferEncode(best.second),
+            blue = srgbTransferEncode(best.third),
+            alpha = alpha.coerceIn(0f, 1f),
+            colorSpace = ColorSpaces.DisplayP3
+        )
+    }
+
+    /** Relative CIE luminance (Y) supporting both Display P3 and sRGB Compose colors. */
+    fun relativeLuminance(color: Color): Double {
+        return if (color.colorSpace == ColorSpaces.DisplayP3) {
+            val r = srgbTransferDecode(color.red)
+            val g = srgbTransferDecode(color.green)
+            val b = srgbTransferDecode(color.blue)
+            (0.2289746 * r + 0.6917385 * g + 0.0792869 * b).coerceIn(0.0, 1.0)
+        } else {
+            val srgb = if (color.colorSpace == ColorSpaces.Srgb) color else color.convert(ColorSpaces.Srgb)
+            val r = srgbTransferDecode(srgb.red)
+            val g = srgbTransferDecode(srgb.green)
+            val b = srgbTransferDecode(srgb.blue)
+            (0.2126729 * r + 0.7151522 * g + 0.0721750 * b).coerceIn(0.0, 1.0)
+        }
+    }
+
+    /**
+     * WCAG 3.0 Draft APCA Contrast (Lc, signed for Light/Dark polarity).
+     * Positive = dark text on light background; Negative = light text on dark background.
+     */
+    fun apcaContrastLc(foreground: Color, background: Color): Double {
+        var yFg = relativeLuminance(foreground)
+        var yBg = relativeLuminance(background)
+        val blkThrs = 0.022
+        val blkClmp = 1.414
+        if (yFg <= blkThrs) yFg += (blkThrs - yFg).pow(blkClmp)
+        if (yBg <= blkThrs) yBg += (blkThrs - yBg).pow(blkClmp)
+        if (abs(yBg - yFg) < 0.0005) return 0.0
+
+        return if (yBg > yFg) {
+            val sapc = (yBg.pow(0.56) - yFg.pow(0.57)) * 1.14
+            if (sapc < 0.1) 0.0 else (sapc - 0.027) * 100.0
+        } else {
+            val sapc = (yBg.pow(0.65) - yFg.pow(0.62)) * 1.14
+            if (sapc > -0.1) 0.0 else (sapc + 0.027) * 100.0
+        }
+    }
+}
+
+/**
+ * Seamless — 2025-2026 Frontier Precision Tech Design Tokens
+ * Space Graphite Titanium + Studio Optical Neutral + Low-Melanopic Display P3 OKLCH
  */
 
 // ─────────────────────────────────────────────
@@ -50,17 +177,37 @@ object SeamlessColors {
         get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFFF2F4F8) else Color(0xFF0B0F17)
     val AccentPrimaryLight = Color(0xFF0B0F17) // Carbon ink accent on light
 
-    // ── Apple HIG & M3 HCT System Semantics (Orthogonal Pop-Out Channels) ───
+    // ── Display P3 Low-Melanopic (264°) & M3 Expressive Semantics ───────────
     val SystemBlue: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF2B6EF6) else Color(0xFF1D58D8)
+        get() = if (ThemePreferenceManager.isCurrentlyDark) {
+            PerceptualColorScience.oklchDisplayP3(0.58f, 0.195f, 264f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.47f, 0.190f, 264f)
+        }
     val Coral: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFFF9544B) else Color(0xFFDC2626)
+        get() = if (ThemePreferenceManager.isCurrentlyDark) {
+            PerceptualColorScience.oklchDisplayP3(0.64f, 0.195f, 25f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.52f, 0.200f, 26f)
+        }
     val Amber: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFFFBBF24) else Color(0xFFB45309)
+        get() = if (ThemePreferenceManager.isCurrentlyDark) {
+            PerceptualColorScience.oklchDisplayP3(0.82f, 0.155f, 80f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.54f, 0.140f, 72f)
+        }
     val Emerald: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF2ED158) else Color(0xFF15803D)
+        get() = if (ThemePreferenceManager.isCurrentlyDark) {
+            PerceptualColorScience.oklchDisplayP3(0.77f, 0.185f, 152f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.51f, 0.155f, 152f)
+        }
     val SteelBlue: Color
-        get() = if (ThemePreferenceManager.isCurrentlyDark) Color(0xFF38BDF8) else Color(0xFF0284C7)
+        get() = if (ThemePreferenceManager.isCurrentlyDark) {
+            PerceptualColorScience.oklchDisplayP3(0.75f, 0.145f, 232f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.53f, 0.145f, 236f)
+        }
 
     // ── Semantic Aliases ────────────────────────────────────
     val Success: Color get() = Emerald
@@ -68,38 +215,38 @@ object SeamlessColors {
     val Error: Color   get() = Coral
     val Info: Color    get() = SteelBlue
 
-    // ── Message Bubbles (Precision Sapphire Self vs Machined Graphite / White) ──
-    val BubbleSelfDark    = Color(0xFF163568)  // Deep Precision Sapphire — "I sent this"
+    // ── Message Bubbles (Low-Melanopic Ultramarine P3 vs Graphite / White) ──
+    val BubbleSelfDark    = PerceptualColorScience.oklchDisplayP3(0.29f, 0.088f, 264f)
     val BubbleOtherDark   = Color(0xFF181C26)  // Machined Graphite — others
-    val BubbleSelfLight   = Color(0xFF1D58D8)  // Precision System Cobalt — "I sent this"
+    val BubbleSelfLight   = PerceptualColorScience.oklchDisplayP3(0.45f, 0.180f, 264f)
     val BubbleOtherLight  = Color(0xFFFFFFFF)  // Pure Optical White — others
 
     // ── Bubble Text ─────────────────────────────────────────
-    val BubbleSelfTextDark  = Color(0xFFF5F8FF)  // Crisp Optical Blue-White on Sapphire
+    val BubbleSelfTextDark  = Color(0xFFF5F8FF)  // Crisp Optical Blue-White on Ultramarine
     val BubbleOtherTextDark = Color(0xFFF2F4F8)  // Optical Platinum on Machined Graphite
-    val BubbleSelfTextLight = Color(0xFFFFFFFF)  // Pure White on System Cobalt
+    val BubbleSelfTextLight = Color(0xFFFFFFFF)  // Pure White on Ultramarine Cobalt
     val BubbleOtherTextLight = Color(0xFF0B0F17) // Carbon Ink on Pure Optical White
 
-    // ── Peer Colors (M3 HCT Iso-Luminant: T76 Dark / T42 Light) ─────────────
+    // ── Peer Colors (Display P3 OKLCH Iso-Luminant: L=0.77 Dark / L=0.46 Light) ─
     private val PeerColorsDark = listOf(
-        Color(0xFF60A5FA),  // System Blue
-        Color(0xFF34D399),  // System Emerald
-        Color(0xFF818CF8),  // System Indigo
-        Color(0xFFFBBF24),  // System Amber
-        Color(0xFFFB7185),  // System Rose
-        Color(0xFF22D3EE),  // System Cyan
-        Color(0xFFA78BFA),  // System Violet
-        Color(0xFF4ADE80)   // System Mint
+        PerceptualColorScience.oklchDisplayP3(0.77f, 0.135f, 260f), // Ultramarine Blue
+        PerceptualColorScience.oklchDisplayP3(0.77f, 0.135f, 154f), // System Emerald
+        PerceptualColorScience.oklchDisplayP3(0.77f, 0.135f, 292f), // Expressive Indigo
+        PerceptualColorScience.oklchDisplayP3(0.77f, 0.135f, 80f),  // Precision Amber
+        PerceptualColorScience.oklchDisplayP3(0.77f, 0.135f, 12f),  // Crimson Rose
+        PerceptualColorScience.oklchDisplayP3(0.77f, 0.135f, 212f), // Arctic Cyan
+        PerceptualColorScience.oklchDisplayP3(0.77f, 0.135f, 322f), // Orchid Magenta
+        PerceptualColorScience.oklchDisplayP3(0.77f, 0.135f, 138f)  // Vivid Leaf
     )
     private val PeerColorsLight = listOf(
-        Color(0xFF1D4ED8),  // Precision Cobalt
-        Color(0xFF047857),  // Deep Emerald
-        Color(0xFF4338CA),  // Deep Indigo
-        Color(0xFFB45309),  // Precision Amber
-        Color(0xFFBE123C),  // Crimson Rose
-        Color(0xFF0E7490),  // Deep Cyan
-        Color(0xFF6D28D9),  // Deep Violet
-        Color(0xFF15803D)   // Forest Emerald
+        PerceptualColorScience.oklchDisplayP3(0.46f, 0.145f, 260f),
+        PerceptualColorScience.oklchDisplayP3(0.46f, 0.145f, 154f),
+        PerceptualColorScience.oklchDisplayP3(0.46f, 0.145f, 292f),
+        PerceptualColorScience.oklchDisplayP3(0.46f, 0.145f, 80f),
+        PerceptualColorScience.oklchDisplayP3(0.46f, 0.145f, 12f),
+        PerceptualColorScience.oklchDisplayP3(0.46f, 0.145f, 212f),
+        PerceptualColorScience.oklchDisplayP3(0.46f, 0.145f, 322f),
+        PerceptualColorScience.oklchDisplayP3(0.46f, 0.145f, 138f)
     )
     val PeerColors: List<Color>
         get() = if (ThemePreferenceManager.isCurrentlyDark) PeerColorsDark else PeerColorsLight

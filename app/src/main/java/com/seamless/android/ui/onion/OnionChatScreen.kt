@@ -52,6 +52,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -522,10 +523,19 @@ fun OnionChatScreen(
                             modifier = Modifier
                                 .size(36.dp)
                                 .clip(CircleShape)
-                                .background(if (callReady) OnionUi.Online.copy(alpha = 0.14f) else Color.Transparent)
+                                .background(if (callReady) OnionUi.Online.copy(alpha = 0.18f) else Color.Transparent)
                                 .then(
-                                    if (callReady) Modifier.border(0.9.dp, OnionUi.Online.copy(alpha = 0.30f), CircleShape)
-                                    else Modifier
+                                    if (callReady) {
+                                        Modifier.border(
+                                            1.dp,
+                                            Brush.linearGradient(
+                                                listOf(OnionUi.Online.copy(alpha = 0.42f), OnionUi.Online.copy(alpha = 0.12f)),
+                                                start = Offset.Zero,
+                                                end = Offset.Infinite
+                                            ),
+                                            CircleShape
+                                        )
+                                    } else Modifier
                                 )
                                 .clickable(role = androidx.compose.ui.semantics.Role.Button) {
                                     launchCallWithChecks(isVideo = false)
@@ -546,10 +556,19 @@ fun OnionChatScreen(
                             modifier = Modifier
                                 .size(36.dp)
                                 .clip(CircleShape)
-                                .background(if (callReady) OnionUi.Info.copy(alpha = 0.14f) else Color.Transparent)
+                                .background(if (callReady) OnionUi.Info.copy(alpha = 0.18f) else Color.Transparent)
                                 .then(
-                                    if (callReady) Modifier.border(0.9.dp, OnionUi.Info.copy(alpha = 0.30f), CircleShape)
-                                    else Modifier
+                                    if (callReady) {
+                                        Modifier.border(
+                                            1.dp,
+                                            Brush.linearGradient(
+                                                listOf(OnionUi.Info.copy(alpha = 0.42f), OnionUi.Info.copy(alpha = 0.12f)),
+                                                start = Offset.Zero,
+                                                end = Offset.Infinite
+                                            ),
+                                            CircleShape
+                                        )
+                                    } else Modifier
                                 )
                                 .clickable(role = androidx.compose.ui.semantics.Role.Button) {
                                     launchCallWithChecks(isVideo = true)
@@ -1333,7 +1352,7 @@ private fun TorMessageBubble(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(bottom = 6.dp)
-                                .clip(RoundedCornerShape(10.dp))
+                                .clip(RoundedCornerShape(com.seamless.android.ui.theme.concentricCornerRadius(20.dp, 8.dp)))
                                 .background(quoteBg)
                                 .then(
                                     if (replyId != null) Modifier.clickable { onQuotedMessageClick(replyId) }

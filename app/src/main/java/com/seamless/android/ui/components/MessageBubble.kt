@@ -17,6 +17,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Outline
@@ -61,7 +62,7 @@ fun MessageBubble(
     )
 
     val backgroundModifier = if (isSelf) {
-        // ── SENT BUBBLE (Precision Sapphire — Apple/Google/Signal Figure-Ground Hierarchy) ──
+        // ── SENT BUBBLE (Low-Melanopic Ultramarine P3 + WWDC Liquid Glass Specular Rim) ──
         Modifier
             .shadow(
                 elevation = if (isDark) 3.dp else 4.dp,
@@ -70,35 +71,39 @@ fun MessageBubble(
                 ambientColor = Color.Black.copy(alpha = 0.16f)
             )
             .background(
-                brush = Brush.verticalGradient(
+                brush = Brush.linearGradient(
                     colors = if (isDark) {
                         listOf(
-                            Color(0xFF163568),
-                            Color(0xFF10274F)
+                            com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.30f, 0.088f, 264f),
+                            com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.24f, 0.076f, 264f)
                         )
                     } else {
                         listOf(
-                            Color(0xFF1D58D8),
-                            Color(0xFF1746B0)
+                            com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.47f, 0.182f, 264f),
+                            com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.39f, 0.168f, 264f)
                         )
-                    }
+                    },
+                    start = Offset.Zero,
+                    end = Offset.Infinite
                 ),
                 shape = bubbleShape
             )
             .border(
                 width = 1.dp,
-                brush = Brush.verticalGradient(
+                brush = Brush.linearGradient(
                     colors = if (isDark) {
                         listOf(
-                            Color(0xFF60A5FA).copy(alpha = 0.26f),
-                            Color(0xFF60A5FA).copy(alpha = 0.06f)
+                            com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.73f, 0.145f, 262f, alpha = 0.30f),
+                            com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.73f, 0.145f, 262f, alpha = 0.06f)
                         )
                     } else {
                         listOf(
-                            Color.White.copy(alpha = 0.24f),
-                            Color(0xFF1E3A8A).copy(alpha = 0.18f)
+                            Color.White.copy(alpha = 0.30f),
+                            com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.32f, 0.130f, 264f, alpha = 0.20f)
                         )
-                    }
+                    },
+                    start = Offset.Zero,
+                    end = Offset.Infinite
                 ),
                 shape = bubbleShape
             )

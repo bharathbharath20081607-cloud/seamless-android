@@ -68,14 +68,22 @@ import java.util.Locale
 
 // ───────────────────────── Shared helpers ─────────────────────────
 
-// M3 HCT Iso-Luminant Sender Palette (Dark T76 / Light T42) — zero Bezold-Brücke shift
+// Display P3 OKLCH Iso-Luminant Sender Palette (Dark L=0.77 / Light L=0.46) — zero Bezold-Brücke shift
 private val SenderPaletteDark = listOf(
-    Color(0xFF60A5FA), Color(0xFF34D399), Color(0xFF818CF8),
-    Color(0xFFFBBF24), Color(0xFFFB7185), Color(0xFF22D3EE)
+    com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.77f, 0.135f, 260f),
+    com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.77f, 0.135f, 154f),
+    com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.77f, 0.135f, 292f),
+    com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.77f, 0.135f, 80f),
+    com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.77f, 0.135f, 12f),
+    com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.77f, 0.135f, 212f)
 )
 private val SenderPaletteLight = listOf(
-    Color(0xFF1D4ED8), Color(0xFF047857), Color(0xFF4338CA),
-    Color(0xFFB45309), Color(0xFFBE123C), Color(0xFF0E7490)
+    com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.46f, 0.145f, 260f),
+    com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.46f, 0.145f, 154f),
+    com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.46f, 0.145f, 292f),
+    com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.46f, 0.145f, 80f),
+    com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.46f, 0.145f, 12f),
+    com.seamless.android.ui.theme.PerceptualColorScience.oklchDisplayP3(0.46f, 0.145f, 212f)
 )
 
 private val AvatarGradients = listOf(

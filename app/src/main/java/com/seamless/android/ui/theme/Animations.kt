@@ -222,6 +222,83 @@ fun Modifier.specularSurface(
 }
 
 /**
+ * WWDC 2025-2026 Concentric Corner Geometry: preserves equal border thickness around
+ * nested capsules/cards (`R_inner = max(R_outer - padding, minRadius)`).
+ */
+fun concentricCornerRadius(outerRadius: Dp, padding: Dp, minRadius: Dp = 6.dp): Dp =
+    (outerRadius - padding).coerceAtLeast(minRadius)
+
+/**
+ * WWDC 2025-2026 Liquid Glass Optical Modifier:
+ * Pairs depth-calibrated optical fill with a 135-degree directional refractive specular rim
+ * and contextual color-spill along the upper-left catchlight.
+ */
+fun Modifier.liquidGlass(
+    shape: Shape = RoundedCornerShape(24.dp),
+    tintSpill: Color = Color.Transparent,
+    elevated: Boolean = false
+): Modifier = composed {
+    val isDark = ThemePreferenceManager.isCurrentlyDark
+    val fillBrush = if (isDark) {
+        Brush.linearGradient(
+            colors = if (elevated) {
+                listOf(
+                    Color(0xFF1E2432).copy(alpha = 0.94f),
+                    Color(0xFF131722).copy(alpha = 0.92f)
+                )
+            } else {
+                listOf(
+                    Color(0xFF181D29).copy(alpha = 0.92f),
+                    Color(0xFF11141C).copy(alpha = 0.90f)
+                )
+            },
+            start = Offset.Zero,
+            end = Offset.Infinite
+        )
+    } else {
+        Brush.linearGradient(
+            colors = listOf(
+                Color(0xFFFFFFFF).copy(alpha = 0.96f),
+                Color(0xFFF6F8FC).copy(alpha = 0.94f)
+            ),
+            start = Offset.Zero,
+            end = Offset.Infinite
+        )
+    }
+
+    val midSpill = if (tintSpill != Color.Transparent) {
+        tintSpill.copy(alpha = if (isDark) 0.28f else 0.24f)
+    } else if (isDark) {
+        Color(0xFFF2F4F8).copy(alpha = 0.08f)
+    } else {
+        Color(0xFF0B0F17).copy(alpha = 0.08f)
+    }
+
+    val specularRim = Brush.linearGradient(
+        colors = if (isDark) {
+            listOf(
+                Color(0xFFF2F4F8).copy(alpha = if (elevated) 0.26f else 0.20f),
+                midSpill,
+                Color(0xFFF2F4F8).copy(alpha = 0.04f)
+            )
+        } else {
+            listOf(
+                Color.White.copy(alpha = 0.95f),
+                midSpill,
+                Color(0xFF0B0F17).copy(alpha = 0.10f)
+            )
+        },
+        start = Offset.Zero,
+        end = Offset.Infinite
+    )
+
+    this
+        .clip(shape)
+        .background(fillBrush, shape)
+        .border(1.dp, specularRim, shape)
+}
+
+/**
  * Modifier that applies a shimmering effect to the component.
  * Useful for loading states.
  */

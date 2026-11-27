@@ -151,6 +151,11 @@ fun SeamlessTheme(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 window.isNavigationBarContrastEnforced = false
             }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                window.context.resources.configuration.isScreenWideColorGamut
+            ) {
+                window.colorMode = android.content.pm.ActivityInfo.COLOR_MODE_WIDE_COLOR_GAMUT
+            }
         }
     }
 

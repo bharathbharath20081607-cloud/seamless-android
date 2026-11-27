@@ -18,6 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -25,6 +26,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.seamless.android.ui.theme.PerceptualColorScience
 import com.seamless.android.ui.theme.ThemePreferenceManager
 
 internal object OnionUi {
@@ -59,34 +61,62 @@ internal object OnionUi {
     val AccentStrong: Color
         get() = if (isDark) Color(0xFF252B3B) else Color(0xFFE2E6EE)
 
-    // Precision System Cobalt Primary CTA Tokens (HCT T52 / APCA Lc > 80 with White Ink)
+    // Precision Display P3 Ultramarine (264° low-melanopic) Primary CTA Tokens
     val PrimaryStart: Color
-        get() = if (isDark) Color(0xFF2B6EF6) else Color(0xFF1D58D8)
+        get() = if (isDark) {
+            PerceptualColorScience.oklchDisplayP3(0.58f, 0.195f, 264f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.48f, 0.190f, 264f)
+        }
 
     val PrimaryEnd: Color
-        get() = if (isDark) Color(0xFF1D58D8) else Color(0xFF1746B0)
+        get() = if (isDark) {
+            PerceptualColorScience.oklchDisplayP3(0.48f, 0.185f, 264f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.40f, 0.175f, 264f)
+        }
 
     val PrimaryRim: Color
-        get() = if (isDark) Color(0xFF93C5FD).copy(alpha = 0.32f) else Color.White.copy(alpha = 0.28f)
+        get() = if (isDark) {
+            PerceptualColorScience.oklchDisplayP3(0.84f, 0.115f, 258f, alpha = 0.36f)
+        } else {
+            Color.White.copy(alpha = 0.30f)
+        }
 
     val OnPrimary: Color = Color(0xFFFFFFFF)
 
     val AccentBlue: Color
-        get() = if (isDark) Color(0xFF60A5FA) else Color(0xFF1D58D8)
+        get() = if (isDark) {
+            PerceptualColorScience.oklchDisplayP3(0.73f, 0.145f, 262f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.47f, 0.185f, 264f)
+        }
 
-    // Pre-attentive Figure-Ground Outgoing ("Me") Deep Precision Sapphire gradient
+    // Pre-attentive Figure-Ground Outgoing ("Me") Low-Melanopic P3 Ultramarine Sapphire
     val OutgoingStart: Color
-        get() = if (isDark) Color(0xFF163568) else Color(0xFF1D58D8)
+        get() = if (isDark) {
+            PerceptualColorScience.oklchDisplayP3(0.30f, 0.088f, 264f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.47f, 0.182f, 264f)
+        }
 
     val OutgoingEnd: Color
-        get() = if (isDark) Color(0xFF10274F) else Color(0xFF1746B0)
+        get() = if (isDark) {
+            PerceptualColorScience.oklchDisplayP3(0.24f, 0.076f, 264f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.39f, 0.168f, 264f)
+        }
 
     val OutgoingBorder: Color
-        get() = if (isDark) Color(0xFF60A5FA).copy(alpha = 0.24f) else Color(0xFF1E3A8A).copy(alpha = 0.20f)
+        get() = if (isDark) {
+            PerceptualColorScience.oklchDisplayP3(0.73f, 0.145f, 262f, alpha = 0.28f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.32f, 0.130f, 264f, alpha = 0.22f)
+        }
 
     val OutgoingText: Color = Color(0xFFF5F8FF)
 
-    val OutgoingSubtle: Color = Color(0xFFD6E4FF).copy(alpha = 0.76f)
+    val OutgoingSubtle: Color = Color(0xFFD6E4FF).copy(alpha = 0.78f)
 
     // Elevated Machined Graphite (Dark) / Studio Optical White (Light) Incoming ("Peer") gradient
     val IncomingStart: Color
@@ -96,7 +126,7 @@ internal object OnionUi {
         get() = if (isDark) Color(0xFF131720) else Color(0xFFF8FAFC)
 
     val IncomingBorder: Color
-        get() = if (isDark) Color(0xFFF2F4F8).copy(alpha = 0.09f) else Color(0xFF0B0F17).copy(alpha = 0.08f)
+        get() = if (isDark) Color(0xFFF2F4F8).copy(alpha = 0.11f) else Color(0xFF0B0F17).copy(alpha = 0.09f)
 
     val IncomingText: Color
         get() = TextPrimary
@@ -104,19 +134,43 @@ internal object OnionUi {
     val IncomingSubtle: Color
         get() = TextSecondary
 
-    // Apple HIG & Material 3 HCT System Semantics (Zero V4 Chromostereopsis)
+    // 2025-2026 Display P3 M3 Expressive Semantic Tokens (Anti-Chromostereopsis)
     val Online: Color
-        get() = if (isDark) Color(0xFF2ED158) else Color(0xFF15803D) // Precision System Emerald
+        get() = if (isDark) {
+            PerceptualColorScience.oklchDisplayP3(0.77f, 0.188f, 152f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.50f, 0.155f, 152f)
+        }
     val Warning: Color
-        get() = if (isDark) Color(0xFFFBBF24) else Color(0xFFB45309) // Precision System Amber
+        get() = if (isDark) {
+            PerceptualColorScience.oklchDisplayP3(0.82f, 0.158f, 80f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.54f, 0.142f, 72f)
+        }
     val Danger: Color
-        get() = if (isDark) Color(0xFFF9544B) else Color(0xFFDC2626) // Precision System Red
+        get() = if (isDark) {
+            PerceptualColorScience.oklchDisplayP3(0.64f, 0.198f, 25f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.52f, 0.200f, 26f)
+        }
     val Info: Color
-        get() = if (isDark) Color(0xFF38BDF8) else Color(0xFF0284C7) // Precision System Sky
+        get() = if (isDark) {
+            PerceptualColorScience.oklchDisplayP3(0.75f, 0.148f, 232f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.53f, 0.145f, 236f)
+        }
     val Indigo: Color
-        get() = if (isDark) Color(0xFF818CF8) else Color(0xFF4F46E5) // Fovea-lifted System Indigo
+        get() = if (isDark) {
+            PerceptualColorScience.oklchDisplayP3(0.70f, 0.150f, 286f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.48f, 0.175f, 286f)
+        }
     val Ember: Color
-        get() = if (isDark) Color(0xFFFF7A2F) else Color(0xFFC2410C) // Ephemeral System Flame Orange
+        get() = if (isDark) {
+            PerceptualColorScience.oklchDisplayP3(0.69f, 0.192f, 44f)
+        } else {
+            PerceptualColorScience.oklchDisplayP3(0.52f, 0.185f, 42f)
+        }
 
     val TextSecondary: Color
         get() = if (isDark) Color(0xFF98A1B3) else Color(0xFF475467)
@@ -156,11 +210,15 @@ internal fun OnionStatusChip(
     Surface(
         modifier = modifier.border(
             width = 1.dp,
-            color = color.copy(alpha = 0.28f),
+            brush = Brush.linearGradient(
+                colors = listOf(color.copy(alpha = 0.36f), color.copy(alpha = 0.14f)),
+                start = Offset.Zero,
+                end = Offset.Infinite
+            ),
             shape = RoundedCornerShape(999.dp)
         ),
         shape = RoundedCornerShape(999.dp),
-        color = color.copy(alpha = 0.14f),
+        color = color.copy(alpha = 0.18f),
         contentColor = color
     ) {
         Row(

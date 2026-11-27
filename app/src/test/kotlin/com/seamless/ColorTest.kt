@@ -2,8 +2,14 @@
 package com.seamless
 
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.colorspace.ColorSpaces
+import com.seamless.android.ui.theme.PerceptualColorScience
+import com.seamless.android.ui.theme.SeamlessColors
+import com.seamless.android.ui.theme.ThemePreferenceManager
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
 
 /**
  * Generate a consistent color for a username based on their peer ID or nickname
@@ -74,6 +80,62 @@ class ColorTest {
             assertEquals(`eve'sColor`, `eve's_color`)
 
             println("Alice color (test ${it + 1}): ${`alice'sColor`.value.toString(16).uppercase()}")
+        }
+    }
+
+    @Test
+    fun oklchDisplayP3_gamutMapsCleanlyAcrossFullHueWheel() {
+        val chromas = floatArrayOf(0.05f, 0.22f, 0.40f)
+        for (hue in 0 until 360 step 15) {
+            for (c in chromas) {
+                val p3Color = PerceptualColorScience.oklchDisplayP3(0.62f, c, hue.toFloat())
+                assertEquals(ColorSpaces.DisplayP3, p3Color.colorSpace)
+                assertTrue("Red out of range for hue=$hue c=$c", p3Color.red in 0f..1f)
+                assertTrue("Green out of range for hue=$hue c=$c", p3Color.green in 0f..1f)
+                assertTrue("Blue out of range for hue=$hue c=$c", p3Color.blue in 0f..1f)
+            }
+        }
+    }
+
+    @Test
+    fun apcaContrastLc_meetsWcag3AndStripeAccessibleThresholds() {
+        val darkPrimaryLc = abs(
+            PerceptualColorScience.apcaContrastLc(SeamlessColors.TextPrimaryDark, SeamlessColors.Obsidian)
+        )
+        assertTrue("Dark primary APCA Lc expected >= 85, was $darkPrimaryLc", darkPrimaryLc >= 85.0)
+
+        val lightPrimaryLc = PerceptualColorScience.apcaContrastLc(
+            SeamlessColors.TextPrimaryLight,
+            SeamlessColors.OpticalLight
+        )
+        assertTrue("Light primary APCA Lc expected >= 85, was $lightPrimaryLc", lightPrimaryLc >= 85.0)
+
+        val darkSecondaryLc = abs(
+            PerceptualColorScience.apcaContrastLc(SeamlessColors.TextSecondaryDark, SeamlessColors.Obsidian)
+        )
+        assertTrue("Dark secondary APCA Lc expected >= 45, was $darkSecondaryLc", darkSecondaryLc >= 45.0)
+
+        val selfBubbleDarkLc = abs(
+            PerceptualColorScience.apcaContrastLc(SeamlessColors.BubbleSelfTextDark, SeamlessColors.BubbleSelfDark)
+        )
+        assertTrue("Ultramarine bubble APCA Lc expected >= 75, was $selfBubbleDarkLc", selfBubbleDarkLc >= 75.0)
+    }
+
+    @Test
+    fun peerColors_maintainTsengSzafirCategoricalIsoLuminance() {
+        val prevDark = ThemePreferenceManager.isCurrentlyDark
+        try {
+            ThemePreferenceManager.isCurrentlyDark = true
+            val darkY = SeamlessColors.PeerColors.map { PerceptualColorScience.relativeLuminance(it) }
+            val darkSpread = (darkY.maxOrNull() ?: 0.0) - (darkY.minOrNull() ?: 0.0)
+            assertTrue("Dark peer iso-luminance spread expected < 0.08, was $darkSpread", darkSpread < 0.08)
+
+            ThemePreferenceManager.isCurrentlyDark = false
+            val lightY = SeamlessColors.PeerColors.map { PerceptualColorScience.relativeLuminance(it) }
+            val lightSpread = (lightY.maxOrNull() ?: 0.0) - (lightY.minOrNull() ?: 0.0)
+            assertTrue("Light peer iso-luminance spread expected < 0.06, was $lightSpread", lightSpread < 0.06)
+        } finally {
+            ThemePreferenceManager.isCurrentlyDark = prevDark
         }
     }
 }

@@ -91,6 +91,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -682,8 +683,16 @@ private fun ContactCard(
                         modifier = Modifier
                             .size(36.dp)
                             .clip(CircleShape)
-                            .background(OnionUi.Online.copy(alpha = 0.13f))
-                            .border(1.dp, OnionUi.Online.copy(alpha = 0.28f), CircleShape)
+                            .background(OnionUi.Online.copy(alpha = 0.18f))
+                            .border(
+                                1.dp,
+                                Brush.linearGradient(
+                                    listOf(OnionUi.Online.copy(alpha = 0.42f), OnionUi.Online.copy(alpha = 0.12f)),
+                                    start = Offset.Zero,
+                                    end = Offset.Infinite
+                                ),
+                                CircleShape
+                            )
                             .clickable(role = androidx.compose.ui.semantics.Role.Button) {
                                 callHaptics.toggleOn(view)
                                 val hasMic = ContextCompat.checkSelfPermission(
@@ -709,8 +718,16 @@ private fun ContactCard(
                         modifier = Modifier
                             .size(36.dp)
                             .clip(CircleShape)
-                            .background(OnionUi.Info.copy(alpha = 0.13f))
-                            .border(1.dp, OnionUi.Info.copy(alpha = 0.28f), CircleShape)
+                            .background(OnionUi.Info.copy(alpha = 0.18f))
+                            .border(
+                                1.dp,
+                                Brush.linearGradient(
+                                    listOf(OnionUi.Info.copy(alpha = 0.42f), OnionUi.Info.copy(alpha = 0.12f)),
+                                    start = Offset.Zero,
+                                    end = Offset.Infinite
+                                ),
+                                CircleShape
+                            )
                             .clickable(role = androidx.compose.ui.semantics.Role.Button) {
                                 callHaptics.toggleOn(view)
                                 val hasMic = ContextCompat.checkSelfPermission(

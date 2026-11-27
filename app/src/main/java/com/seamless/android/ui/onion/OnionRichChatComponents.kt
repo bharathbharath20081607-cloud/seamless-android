@@ -18,6 +18,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -106,6 +107,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -127,6 +129,8 @@ import com.seamless.android.net.TorRichChatCodec
 import com.seamless.android.ui.media.ScrollingWaveformRecorder
 import com.seamless.android.ui.media.WaveformPreview
 import com.seamless.android.ui.privacy.PrivacyPreferenceManager
+import com.seamless.android.ui.theme.concentricCornerRadius
+import com.seamless.android.ui.theme.liquidGlass
 import com.seamless.android.ui.theme.tactilePress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -557,11 +561,22 @@ internal fun SovereignChatComposer(
                 onSendVoiceNote = onSendVoiceNote
             )
         } else {
-            val pillBorderColor = when {
-                burnOnReadArmed -> AegisEmberColor.copy(alpha = 0.85f)
-                isFocused -> OnionUi.AccentBlue.copy(alpha = 0.58f)
-                else -> OnionUi.Hairline
+            val spillTint = when {
+                burnOnReadArmed -> AegisEmberColor
+                isFocused -> OnionUi.AccentBlue
+                else -> Color.Transparent
             }
+            val pillRadius = 26.dp
+            val toggleCorner by animateDpAsState(
+                targetValue = if (burnOnReadArmed) 11.dp else 17.dp,
+                animationSpec = spring(dampingRatio = 0.68f, stiffness = 480f),
+                label = "m3e_burn_shape_morph"
+            )
+            val ctaCorner by animateDpAsState(
+                targetValue = if (canSend || burnOnReadArmed) 15.dp else 24.dp,
+                animationSpec = spring(dampingRatio = 0.68f, stiffness = 480f),
+                label = "m3e_cta_shape_morph"
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.Bottom
@@ -570,13 +585,15 @@ internal fun SovereignChatComposer(
                     modifier = Modifier
                         .weight(1f)
                         .shadow(
-                            elevation = if (isFocused) 4.dp else 1.dp,
-                            shape = RoundedCornerShape(26.dp),
-                            spotColor = Color.Black.copy(alpha = 0.22f)
+                            elevation = if (isFocused) 5.dp else 2.dp,
+                            shape = RoundedCornerShape(pillRadius),
+                            spotColor = Color.Black.copy(alpha = 0.24f)
                         )
-                        .clip(RoundedCornerShape(26.dp))
-                        .background(OnionUi.Surface)
-                        .border(if (burnOnReadArmed || isFocused) 1.3.dp else 1.dp, pillBorderColor, RoundedCornerShape(26.dp))
+                        .liquidGlass(
+                            shape = RoundedCornerShape(pillRadius),
+                            tintSpill = spillTint,
+                            elevated = isFocused || burnOnReadArmed
+                        )
                         .padding(horizontal = 6.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -613,7 +630,7 @@ internal fun SovereignChatComposer(
                                 Text(
                                     text = if (burnOnReadArmed) burnPlaceholder else placeholder,
                                     fontSize = 15.sp,
-                                    color = if (burnOnReadArmed) AegisEmberColor.copy(alpha = 0.8f) else OnionUi.TextMuted,
+                                    color = if (burnOnReadArmed) AegisEmberColor.copy(alpha = 0.85f) else OnionUi.TextMuted,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
@@ -625,8 +642,8 @@ internal fun SovereignChatComposer(
                     Box(
                         modifier = Modifier
                             .size(34.dp)
-                            .clip(CircleShape)
-                            .background(if (burnOnReadArmed) AegisEmberColor.copy(alpha = 0.18f) else Color.Transparent)
+                            .clip(RoundedCornerShape(toggleCorner))
+                            .background(if (burnOnReadArmed) AegisEmberColor.copy(alpha = 0.20f) else Color.Transparent)
                             .tactilePress(scaleDown = 0.90f, onClick = onToggleBurnOnRead),
                         contentAlignment = Alignment.Center
                     ) {
@@ -643,23 +660,36 @@ internal fun SovereignChatComposer(
                 Spacer(Modifier.width(8.dp))
 
                 val primaryBtnBrush = if (burnOnReadArmed) {
-                    Brush.verticalGradient(listOf(Color(0xFFFF7A2F), Color(0xFFC2410C)))
+                    Brush.linearGradient(
+                        colors = listOf(AegisEmberColor, Color(0xFFC2410C)),
+                        start = Offset.Zero,
+                        end = Offset.Infinite
+                    )
                 } else {
-                    Brush.verticalGradient(listOf(OnionUi.PrimaryStart, OnionUi.PrimaryEnd))
+                    Brush.linearGradient(
+                        colors = listOf(OnionUi.PrimaryStart, OnionUi.PrimaryEnd),
+                        start = Offset.Zero,
+                        end = Offset.Infinite
+                    )
                 }
-                val primaryBtnBorder = if (burnOnReadArmed) {
-                    Color(0xFFFDBA74).copy(alpha = 0.32f)
-                } else {
-                    OnionUi.PrimaryRim
-                }
+                val primaryBtnBorder = Brush.linearGradient(
+                    colors = if (burnOnReadArmed) {
+                        listOf(Color(0xFFFDBA74).copy(alpha = 0.44f), Color(0xFFFDBA74).copy(alpha = 0.12f))
+                    } else {
+                        listOf(OnionUi.PrimaryRim, OnionUi.PrimaryRim.copy(alpha = 0.12f))
+                    },
+                    start = Offset.Zero,
+                    end = Offset.Infinite
+                )
                 val primaryIconTint = OnionUi.OnPrimary
+                val ctaShape = RoundedCornerShape(ctaCorner)
 
                 Box(
                     modifier = Modifier
                         .size(48.dp)
-                        .clip(CircleShape)
-                        .background(primaryBtnBrush)
-                        .border(1.dp, primaryBtnBorder, CircleShape)
+                        .clip(ctaShape)
+                        .background(primaryBtnBrush, ctaShape)
+                        .border(1.dp, primaryBtnBorder, ctaShape)
                         .tactilePress(
                             scaleDown = 0.91f,
                             enabled = !isSending,
@@ -720,10 +750,8 @@ internal fun DateHeaderPill(label: String) {
             .padding(vertical = 8.dp),
         contentAlignment = Alignment.Center
     ) {
-        Surface(
-            shape = RoundedCornerShape(999.dp),
-            color = OnionUi.Surface.copy(alpha = 0.90f),
-            modifier = Modifier.border(1.dp, OnionUi.Hairline, RoundedCornerShape(999.dp))
+        Box(
+            modifier = Modifier.liquidGlass(shape = RoundedCornerShape(999.dp))
         ) {
             Text(
                 text = label,
@@ -745,9 +773,7 @@ internal fun JumpToLatestButton(
         modifier = modifier
             .size(42.dp)
             .shadow(6.dp, CircleShape, spotColor = Color.Black.copy(alpha = 0.45f))
-            .clip(CircleShape)
-            .background(OnionUi.Surface)
-            .border(1.dp, OnionUi.Outline, CircleShape)
+            .liquidGlass(shape = CircleShape, elevated = true)
             .tactilePress(scaleDown = 0.90f, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
