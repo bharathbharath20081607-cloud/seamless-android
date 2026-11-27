@@ -181,10 +181,17 @@ class GroupCallManager private constructor(private val context: Context) {
         private const val UDP_MAGIC_PROBE: Byte = 0x11
         private const val UDP_MAGIC_PROBE_ACK: Byte = 0x12
         private const val UDP_MAGIC_SFRAME: Byte = 0x13
-        private const val DIRECT_UDP_STALE_MS = 4_500L
+        const val DIRECT_UDP_STALE_MS = 4_500L
         private const val MAX_UDP_CANDIDATES = 12
         private const val REACTION_TTL_MS = 4_500L
         private val ALLOWED_CALL_REACTIONS = setOf("👍", "❤️", "🔥", "👏", "😂", "🎉")
+
+        internal fun shouldApplyTorHeartbeatRtt(
+            hasVerifiedUdp: Boolean,
+            lastUdpVerifiedAtMs: Long,
+            nowMs: Long,
+            staleThresholdMs: Long = DIRECT_UDP_STALE_MS
+        ): Boolean = !hasVerifiedUdp || (nowMs - lastUdpVerifiedAtMs) > staleThresholdMs
 
         data class HubCandidateMetrics(
             val onionAddress: String,
@@ -282,6 +289,7 @@ class GroupCallManager private constructor(private val context: Context) {
             onRequestKeyframe = { onRequestPli(onionAddress) }
         )
 
+        @Synchronized
         fun onFragment(fragment: ByteArray) {
             val complete = reassembler.onFragment(fragment) ?: return
             decodeReassembledFrame(complete)
@@ -342,7 +350,23 @@ class GroupCallManager private constructor(private val context: Context) {
                         base.copy(Bitmap.Config.RGB_565, false)
                     }
                 } else {
-                    val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 }
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(frame.data, 0, frame.data.size, bounds)
+                    if (bounds.outWidth <= 0 || bounds.outHeight <= 0 ||
+                        bounds.outWidth > 4096 || bounds.outHeight > 4096
+                    ) {
+                        return
+                    }
+                    var sampleSize = 1
+                    var longest = kotlin.math.max(bounds.outWidth, bounds.outHeight)
+                    while (longest / 2 >= 1280) {
+                        sampleSize *= 2
+                        longest /= 2
+                    }
+                    val opts = BitmapFactory.Options().apply {
+                        inPreferredConfig = Bitmap.Config.RGB_565
+                        inSampleSize = sampleSize
+                    }
                     val bmp = BitmapFactory.decodeByteArray(frame.data, 0, frame.data.size, opts) ?: return
                     if (bmp.width in 16..1280 && bmp.height in 16..1280) {
                         var base = deltaBaseBitmap
@@ -370,6 +394,7 @@ class GroupCallManager private constructor(private val context: Context) {
             }
         }
 
+        @Synchronized
         fun release() {
             reassembler.reset()
             deltaBaseBitmap?.recycle()
@@ -425,7 +450,10 @@ class GroupCallManager private constructor(private val context: Context) {
             onOutboundFragment = { _, _, _, _ -> },
             onRequestRemoteKeyframe = { requestKeyframeFromVisibleVideoPeers() },
             onOutboundFrame = { seq, ts, fragments -> dispatchOutboundVideoFrame(seq, ts, fragments) }
-        )
+        ).apply {
+            useExternalCameraSource = false
+            forceMtuSafeFragments = true
+        }
     }
 
     private var audioMixer: GroupCallAudioMixer? = null
@@ -1160,22 +1188,52 @@ class GroupCallManager private constructor(private val context: Context) {
                                 val nextEp = crypto.currentEpoch + 1
                                 val newSeed = crypto.rotateEpoch(nextEp, retainPreviousGraceMs = 1_500L)
                                 _sessionFlow.update { it?.copy(epoch = nextEp) }
+                                if (current.isLocalVideoEnabled) {
+                                    localVideoEngine.requestImmediateKeyframe()
+                                }
                                 launch {
                                     peersByOnion.keys.toList().forEach { peer ->
                                         sendSenderKeyPacket(peer, groupId, callId, nextEp, newSeed)
                                     }
                                     AegisTorCrypto.zeroize(newSeed)
                                     sendRosterSync(canonicalSender, groupId, callId)
+                                    sendGroupSignal(
+                                        targetOnion = canonicalSender,
+                                        type = "G_MEDIA_STATE",
+                                        groupId = groupId,
+                                        callId = callId,
+                                        extras = mapOf(
+                                            "isMuted" to current.isMuted,
+                                            "isVideo" to current.isLocalVideoEnabled,
+                                            "isHandRaised" to current.isHandRaised,
+                                            "videoSubscribed" to !current.isMinimized
+                                        )
+                                    )
                                 }
                             }
                         } else if (current.state == GroupCallState.ACTIVE) {
                             val crypto = roomCrypto
                             val mySeed = crypto?.ensureLocalEpochKey(crypto.currentEpoch)
+                            if (current.isLocalVideoEnabled) {
+                                localVideoEngine.requestImmediateKeyframe()
+                            }
                             if (crypto != null && mySeed != null) {
                                 val ep = crypto.currentEpoch
                                 launch {
                                     sendSenderKeyPacket(canonicalSender, groupId, callId, ep, mySeed)
                                     AegisTorCrypto.zeroize(mySeed)
+                                    sendGroupSignal(
+                                        targetOnion = canonicalSender,
+                                        type = "G_MEDIA_STATE",
+                                        groupId = groupId,
+                                        callId = callId,
+                                        extras = mapOf(
+                                            "isMuted" to current.isMuted,
+                                            "isVideo" to current.isLocalVideoEnabled,
+                                            "isHandRaised" to current.isHandRaised,
+                                            "videoSubscribed" to !current.isMinimized
+                                        )
+                                    )
                                 }
                             }
                         }
@@ -1225,6 +1283,29 @@ class GroupCallManager private constructor(private val context: Context) {
                         }
                         crypto.installPeerSenderKey(canonicalSender, ep, seedBytes)
                         AegisTorCrypto.zeroize(seedBytes)
+                        if (current.state == GroupCallState.ACTIVE) {
+                            if (current.isLocalVideoEnabled) {
+                                localVideoEngine.requestImmediateKeyframe()
+                            }
+                            val peerVideoActive = peersByOnion[canonicalSender]?.isVideoEnabled == true
+                            launch {
+                                sendGroupSignal(
+                                    targetOnion = canonicalSender,
+                                    type = "G_MEDIA_STATE",
+                                    groupId = groupId,
+                                    callId = callId,
+                                    extras = mapOf(
+                                        "isMuted" to current.isMuted,
+                                        "isVideo" to current.isLocalVideoEnabled,
+                                        "isHandRaised" to current.isHandRaised,
+                                        "videoSubscribed" to !current.isMinimized
+                                    )
+                                )
+                                if (peerVideoActive) {
+                                    sendGroupSignal(canonicalSender, "G_VIDEO_PLI", groupId, callId)
+                                }
+                            }
+                        }
                         updateRoomTopologyAndEmojisLocked()
                     }
 
@@ -1321,7 +1402,7 @@ class GroupCallManager private constructor(private val context: Context) {
                         val peer = peersByOnion[canonicalSender] ?: return@withLock
                         peer.lastSeenAtMs = now
                         val echo = json.optLong("echoTs", 0L)
-                        if (echo > 0L) {
+                        if (echo > 0L && shouldApplyTorHeartbeatRtt(peer.verifiedUdpEndpoint != null, peer.lastUdpVerifiedAtMs, now)) {
                             peer.rttMs = (now - echo).toInt().coerceIn(10, 4_000)
                         }
                         updateRoomTopologyAndEmojisLocked()
@@ -1613,7 +1694,7 @@ class GroupCallManager private constructor(private val context: Context) {
 
             suspend fun sendVideoWithAudioPriority(v: OutboundTorVideoItem) {
                 for (recipient in v.recipients) {
-                    for (chunk in v.sealedFragments.chunked(4)) {
+                    for (chunk in v.sealedFragments.chunked(8)) {
                         if (!drainAudio()) return
                         messaging.sendCallVideoFramesBurst(recipient, v.frameSeq, v.timestampMs, chunk)
                     }
@@ -1823,6 +1904,13 @@ class GroupCallManager private constructor(private val context: Context) {
 
         rttSamples.sort()
         val medianRtt = if (rttSamples.isEmpty()) 0 else rttSamples[rttSamples.size / 2]
+        if (current.isLocalVideoEnabled) {
+            localVideoEngine.updateNetworkProfile(
+                isDirectP2p = directCount > 0 && torCount == 0,
+                rttMs = medianRtt,
+                lossDetected = false
+            )
+        }
 
         val (hub, standby) = if (nextTopo == GroupTopologyMode.ELECTED_SFU_HUB) {
             electSwarmHubs(hubMetrics)
@@ -2104,11 +2192,22 @@ class GroupCallManager private constructor(private val context: Context) {
                             val rtt = (now - echoTs).toInt()
                             if (rtt !in 0..5_000) continue
                             val peer = peerByTag[peerTag] ?: continue
+                            val wasDirect = peer.verifiedUdpEndpoint != null && (now - peer.lastUdpVerifiedAtMs) <= DIRECT_UDP_STALE_MS
+                            val prevRtt = peer.rttMs
                             peer.verifiedUdpEndpoint = fromEp
                             peer.lastUdpVerifiedAtMs = now
                             peer.lastSeenAtMs = now
                             peer.rttMs = rtt.coerceAtLeast(1)
                             audioMixer?.updatePeerTransport(peerTag, true)
+                            if (!wasDirect || abs(prevRtt - peer.rttMs) >= 20) {
+                                scope.launch {
+                                    callMutex.withLock {
+                                        if (_sessionFlow.value?.callId == callId) {
+                                            updateRoomTopologyAndEmojisLocked()
+                                        }
+                                    }
+                                }
+                            }
                         }
                         UDP_MAGIC_SFRAME -> {
                             val sframeBytes = data.copyOfRange(1, data.size)

@@ -16,6 +16,7 @@ import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
@@ -38,6 +39,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -107,6 +109,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
@@ -265,41 +268,57 @@ internal fun InChatSearchBar(
     matchCount: Int,
     onClose: () -> Unit
 ) {
-    Row(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .background(OnionUi.CanvasRaised)
-            .border(1.dp, OnionUi.Hairline)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(Icons.Default.Search, null, tint = OnionUi.TextSecondary, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(8.dp))
-        BasicTextField(
-            value = query,
-            onValueChange = onQueryChange,
-            singleLine = true,
-            modifier = Modifier.weight(1f),
-            textStyle = TextStyle(color = OnionUi.TextPrimary, fontSize = 14.sp),
-            cursorBrush = SolidColor(OnionUi.AccentBlue),
-            decorationBox = { inner ->
-                if (query.isEmpty()) {
-                    Text("Search encrypted messages…", color = OnionUi.TextMuted, fontSize = 14.sp)
-                }
-                inner()
+            .drawBehind {
+                drawLine(
+                    color = OnionUi.Hairline,
+                    start = Offset(0f, size.height),
+                    end = Offset(size.width, size.height),
+                    strokeWidth = 1.dp.toPx()
+                )
             }
-        )
-        if (query.isNotEmpty()) {
-            Text(
-                "$matchCount found",
-                color = OnionUi.AccentBlue,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(horizontal = 6.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(OnionUi.Surface)
+                .border(1.dp, OnionUi.Outline.copy(alpha = 0.7f), RoundedCornerShape(18.dp))
+                .padding(horizontal = 12.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Default.Search, null, tint = OnionUi.TextSecondary, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            BasicTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+                textStyle = TextStyle(color = OnionUi.TextPrimary, fontSize = 14.sp),
+                cursorBrush = SolidColor(OnionUi.AccentBlue),
+                decorationBox = { inner ->
+                    if (query.isEmpty()) {
+                        Text("Search encrypted messages…", color = OnionUi.TextMuted, fontSize = 14.sp)
+                    }
+                    inner()
+                }
             )
-        }
-        IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
-            Icon(Icons.Default.Close, "Close search", tint = OnionUi.TextSecondary, modifier = Modifier.size(18.dp))
+            if (query.isNotEmpty()) {
+                Text(
+                    "$matchCount found",
+                    color = OnionUi.AccentBlue,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 6.dp)
+                )
+            }
+            IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Default.Close, "Close search", tint = OnionUi.TextSecondary, modifier = Modifier.size(18.dp))
+            }
         }
     }
 }
@@ -473,89 +492,18 @@ internal fun SovereignChatComposer(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(OnionUi.Canvas.copy(alpha = 0.94f))
-            .border(1.dp, OnionUi.Hairline.copy(alpha = 0.45f))
+            .background(OnionUi.Canvas.copy(alpha = 0.96f))
+            .drawBehind {
+                drawLine(
+                    color = OnionUi.Hairline,
+                    start = Offset(0f, 0f),
+                    end = Offset(size.width, 0f),
+                    strokeWidth = 1.dp.toPx()
+                )
+            }
             .navigationBarsPadding()
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        AnimatedVisibility(visible = replySenderLabel != null) {
-            if (replySenderLabel != null) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 8.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(OnionUi.Surface)
-                        .border(1.dp, OnionUi.Hairline, RoundedCornerShape(14.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .width(3.dp)
-                            .height(28.dp)
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(replyAccentColor)
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            text = "Replying to $replySenderLabel",
-                            color = replyAccentColor,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        if (!replyPreviewText.isNullOrBlank()) {
-                            Text(
-                                text = replyPreviewText,
-                                color = OnionUi.TextSecondary,
-                                fontSize = 12.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-                    IconButton(onClick = onCancelReply, modifier = Modifier.size(28.dp)) {
-                        Icon(Icons.Default.Close, "Cancel reply", tint = OnionUi.TextSecondary, modifier = Modifier.size(16.dp))
-                    }
-                }
-            }
-        }
-
-        AnimatedVisibility(visible = burnOnReadArmed && !isRecordingVoice) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(AegisEmberColor.copy(alpha = 0.14f))
-                    .border(1.dp, AegisEmberColor.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Default.LocalFireDepartment, null, tint = AegisEmberColor, modifier = Modifier.size(15.dp))
-                Spacer(Modifier.width(7.dp))
-                Text(
-                    "View-Once active · Self-destructs after opening",
-                    color = AegisEmberColor,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Icon(
-                    Icons.Default.Close,
-                    contentDescription = "Disable View-Once",
-                    tint = AegisEmberColor,
-                    modifier = Modifier
-                        .size(18.dp)
-                        .clip(CircleShape)
-                        .clickable { onToggleBurnOnRead() }
-                )
-            }
-        }
-
         if (isRecordingVoice) {
             SonicWarpRecorderBar(
                 burnOnReadArmed = burnOnReadArmed,
@@ -563,52 +511,151 @@ internal fun SovereignChatComposer(
                 onSendVoiceNote = onSendVoiceNote
             )
         } else {
-            val spillTint = when {
-                burnOnReadArmed -> AegisEmberColor
-                isFocused -> OnionUi.AccentBlue
-                else -> Color.Transparent
-            }
-            val pillRadius = 26.dp
-            val toggleCorner by animateDpAsState(
-                targetValue = if (burnOnReadArmed) 11.dp else 17.dp,
-                animationSpec = spring(dampingRatio = 0.68f, stiffness = 480f),
-                label = "m3e_burn_shape_morph"
+            val composerShape = RoundedCornerShape(24.dp)
+            val cardBorderColor by animateColorAsState(
+                targetValue = when {
+                    burnOnReadArmed -> AegisEmberColor.copy(alpha = 0.65f)
+                    isFocused -> OnionUi.AccentBlue.copy(alpha = 0.55f)
+                    else -> OnionUi.Outline.copy(alpha = 0.78f)
+                },
+                animationSpec = tween(180),
+                label = "composer_border"
             )
-            val ctaCorner by animateDpAsState(
-                targetValue = if (canSend || burnOnReadArmed) 15.dp else 24.dp,
-                animationSpec = spring(dampingRatio = 0.68f, stiffness = 480f),
-                label = "m3e_cta_shape_morph"
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Bottom
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .shadow(
+                        elevation = if (isFocused || burnOnReadArmed) 8.dp else 3.dp,
+                        shape = composerShape,
+                        spotColor = Color.Black.copy(alpha = 0.28f)
+                    )
+                    .clip(composerShape)
+                    .background(OnionUi.Surface)
+                    .border(1.dp, cardBorderColor, composerShape)
             ) {
+                AnimatedVisibility(visible = replySenderLabel != null) {
+                    if (replySenderLabel != null) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(OnionUi.SurfacePressed.copy(alpha = 0.48f))
+                                .drawBehind {
+                                    drawLine(
+                                        color = OnionUi.Hairline,
+                                        start = Offset(0f, size.height),
+                                        end = Offset(size.width, size.height),
+                                        strokeWidth = 1.dp.toPx()
+                                    )
+                                }
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(3.dp)
+                                    .height(26.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(replyAccentColor)
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    text = "Replying to $replySenderLabel",
+                                    color = replyAccentColor,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                if (!replyPreviewText.isNullOrBlank()) {
+                                    Text(
+                                        text = replyPreviewText,
+                                        color = OnionUi.TextSecondary,
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            IconButton(onClick = onCancelReply, modifier = Modifier.size(28.dp)) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Cancel reply",
+                                    tint = OnionUi.TextSecondary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                AnimatedVisibility(visible = burnOnReadArmed) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(AegisEmberColor.copy(alpha = 0.13f))
+                            .drawBehind {
+                                drawLine(
+                                    color = AegisEmberColor.copy(alpha = 0.25f),
+                                    start = Offset(0f, size.height),
+                                    end = Offset(size.width, size.height),
+                                    strokeWidth = 1.dp.toPx()
+                                )
+                            }
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.LocalFireDepartment,
+                            contentDescription = null,
+                            tint = AegisEmberColor,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(Modifier.width(7.dp))
+                        Text(
+                            text = "View-Once active · Self-destructs after opening",
+                            color = AegisEmberColor,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Disable View-Once",
+                            tint = AegisEmberColor,
+                            modifier = Modifier
+                                .size(18.dp)
+                                .clip(CircleShape)
+                                .clickable { onToggleBurnOnRead() }
+                        )
+                    }
+                }
+
                 Row(
                     modifier = Modifier
-                        .weight(1f)
-                        .shadow(
-                            elevation = if (isFocused) 5.dp else 2.dp,
-                            shape = RoundedCornerShape(pillRadius),
-                            spotColor = Color.Black.copy(alpha = 0.24f)
-                        )
-                        .liquidGlass(
-                            shape = RoundedCornerShape(pillRadius),
-                            tintSpill = spillTint,
-                            elevated = isFocused || burnOnReadArmed
-                        )
-                        .padding(horizontal = 6.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 48.dp)
+                        .padding(horizontal = 6.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.Bottom
                 ) {
-                    IconButton(
-                        onClick = onOpenAttachments,
-                        enabled = enabled && mediaEnabled && !isSending,
-                        modifier = Modifier.size(38.dp)
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(OnionUi.SurfacePressed)
+                            .tactilePress(
+                                scaleDown = 0.90f,
+                                enabled = enabled && mediaEnabled && !isSending,
+                                onClick = onOpenAttachments
+                            ),
+                        contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             Icons.Default.Add,
                             contentDescription = "Attachments",
                             tint = if (enabled && mediaEnabled && !isSending) OnionUi.TextPrimary else OnionUi.TextMuted,
-                            modifier = Modifier.size(21.dp)
+                            modifier = Modifier.size(20.dp)
                         )
                     }
 
@@ -619,122 +666,137 @@ internal fun SovereignChatComposer(
                         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                         modifier = Modifier
                             .weight(1f)
-                            .padding(horizontal = 6.dp, vertical = 9.dp)
+                            .align(Alignment.CenterVertically)
                             .onFocusChanged { isFocused = it.isFocused },
                         textStyle = TextStyle(
                             color = OnionUi.TextPrimary,
-                            fontSize = 15.sp,
-                            lineHeight = 20.sp
+                            fontSize = 15.5.sp,
+                            lineHeight = 21.sp
                         ),
                         cursorBrush = SolidColor(if (burnOnReadArmed) AegisEmberColor else OnionUi.AccentBlue),
                         decorationBox = { innerTextField ->
-                            if (value.isEmpty()) {
-                                Text(
-                                    text = if (burnOnReadArmed) burnPlaceholder else placeholder,
-                                    fontSize = 15.sp,
-                                    color = if (burnOnReadArmed) AegisEmberColor.copy(alpha = 0.85f) else OnionUi.TextMuted,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .defaultMinSize(minHeight = 38.dp)
+                                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                if (value.isEmpty()) {
+                                    Text(
+                                        text = if (burnOnReadArmed) burnPlaceholder else placeholder,
+                                        fontSize = 15.5.sp,
+                                        lineHeight = 21.sp,
+                                        color = if (burnOnReadArmed) AegisEmberColor.copy(alpha = 0.85f) else OnionUi.TextMuted,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                innerTextField()
                             }
-                            innerTextField()
                         }
                     )
 
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(RoundedCornerShape(toggleCorner))
-                            .background(if (burnOnReadArmed) AegisEmberColor.copy(alpha = 0.20f) else Color.Transparent)
-                            .tactilePress(scaleDown = 0.90f, onClick = onToggleBurnOnRead),
-                        contentAlignment = Alignment.Center
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            Icons.Default.LocalFireDepartment,
-                            contentDescription = "Toggle View-Once",
-                            tint = if (burnOnReadArmed) AegisEmberColor else OnionUi.TextMuted,
-                            modifier = Modifier.size(19.dp)
-                        )
-                    }
-                    Spacer(Modifier.width(2.dp))
-                }
-
-                Spacer(Modifier.width(8.dp))
-
-                val primaryBtnBrush = if (burnOnReadArmed) {
-                    Brush.linearGradient(
-                        colors = listOf(AegisEmberColor, Color(0xFFC2410C)),
-                        start = Offset.Zero,
-                        end = Offset.Infinite
-                    )
-                } else {
-                    Brush.linearGradient(
-                        colors = listOf(OnionUi.PrimaryStart, OnionUi.PrimaryEnd),
-                        start = Offset.Zero,
-                        end = Offset.Infinite
-                    )
-                }
-                val primaryBtnBorder = Brush.linearGradient(
-                    colors = if (burnOnReadArmed) {
-                        listOf(Color(0xFFFDBA74).copy(alpha = 0.44f), Color(0xFFFDBA74).copy(alpha = 0.12f))
-                    } else {
-                        listOf(OnionUi.PrimaryRim, OnionUi.PrimaryRim.copy(alpha = 0.12f))
-                    },
-                    start = Offset.Zero,
-                    end = Offset.Infinite
-                )
-                val primaryIconTint = OnionUi.OnPrimary
-                val ctaShape = RoundedCornerShape(ctaCorner)
-
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(ctaShape)
-                        .background(primaryBtnBrush, ctaShape)
-                        .border(1.dp, primaryBtnBorder, ctaShape)
-                        .tactilePress(
-                            scaleDown = 0.91f,
-                            enabled = !isSending,
-                            onClick = {
-                                if (canSend) onSendText() else onStartVoiceNote()
-                            }
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (isSending) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            color = primaryIconTint,
-                            strokeWidth = 2.dp
-                        )
-                    } else {
-                        AnimatedContent(
-                            targetState = canSend,
-                            transitionSpec = {
-                                (scaleIn(
-                                    initialScale = 0.65f,
-                                    animationSpec = spring(dampingRatio = 0.68f, stiffness = 500f)
-                                ) + fadeIn(tween(130))).togetherWith(
-                                    scaleOut(targetScale = 0.65f, animationSpec = tween(110)) +
-                                        fadeOut(tween(100))
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (burnOnReadArmed) AegisEmberColor.copy(alpha = 0.18f)
+                                    else OnionUi.SurfacePressed.copy(alpha = 0.55f)
                                 )
-                            },
-                            label = "sovereign_composer_action"
-                        ) { sendMode ->
-                            if (sendMode) {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.Send,
-                                    contentDescription = "Send",
-                                    tint = primaryIconTint,
-                                    modifier = Modifier.size(20.dp)
+                                .border(
+                                    width = 1.dp,
+                                    color = if (burnOnReadArmed) AegisEmberColor.copy(alpha = 0.55f) else Color.Transparent,
+                                    shape = CircleShape
+                                )
+                                .tactilePress(scaleDown = 0.90f, onClick = onToggleBurnOnRead),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.LocalFireDepartment,
+                                contentDescription = "Toggle View-Once",
+                                tint = if (burnOnReadArmed) AegisEmberColor else OnionUi.TextSecondary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        val sendAccentTint = if (burnOnReadArmed) AegisEmberColor else OnionUi.AccentBlue
+                        val actionBrush = when {
+                            canSend && burnOnReadArmed -> Brush.linearGradient(
+                                colors = listOf(AegisEmberColor, Color(0xFFC2410C)),
+                                start = Offset.Zero,
+                                end = Offset.Infinite
+                            )
+                            canSend -> Brush.linearGradient(
+                                colors = listOf(OnionUi.PrimaryStart, OnionUi.PrimaryEnd),
+                                start = Offset.Zero,
+                                end = Offset.Infinite
+                            )
+                            else -> SolidColor(sendAccentTint.copy(alpha = 0.16f))
+                        }
+                        val actionBorderColor = when {
+                            canSend && burnOnReadArmed -> Color(0xFFFDBA74).copy(alpha = 0.40f)
+                            canSend -> OnionUi.PrimaryRim
+                            else -> sendAccentTint.copy(alpha = 0.36f)
+                        }
+                        val actionIconTint = if (canSend) OnionUi.OnPrimary else sendAccentTint
+
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(actionBrush, CircleShape)
+                                .border(1.dp, actionBorderColor, CircleShape)
+                                .tactilePress(
+                                    scaleDown = 0.90f,
+                                    enabled = !isSending,
+                                    onClick = {
+                                        if (canSend) onSendText() else onStartVoiceNote()
+                                    }
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (isSending) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    color = actionIconTint,
+                                    strokeWidth = 2.dp
                                 )
                             } else {
-                                Icon(
-                                    Icons.Default.Mic,
-                                    contentDescription = "Record voice note",
-                                    tint = primaryIconTint,
-                                    modifier = Modifier.size(21.dp)
-                                )
+                                AnimatedContent(
+                                    targetState = canSend,
+                                    transitionSpec = {
+                                        (scaleIn(
+                                            initialScale = 0.65f,
+                                            animationSpec = spring(dampingRatio = 0.68f, stiffness = 500f)
+                                        ) + fadeIn(tween(130))).togetherWith(
+                                            scaleOut(targetScale = 0.65f, animationSpec = tween(110)) +
+                                                fadeOut(tween(100))
+                                        )
+                                    },
+                                    label = "sovereign_composer_action"
+                                ) { sendMode ->
+                                    if (sendMode) {
+                                        Icon(
+                                            Icons.AutoMirrored.Filled.Send,
+                                            contentDescription = "Send",
+                                            tint = actionIconTint,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    } else {
+                                        Icon(
+                                            Icons.Default.Mic,
+                                            contentDescription = "Record voice note",
+                                            tint = actionIconTint,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

@@ -2,6 +2,7 @@ package com.seamless
 
 import com.seamless.android.call.ActiveGroupRoomBanner
 import com.seamless.android.call.CallFluxFec
+import com.seamless.android.call.CallVideoEngine
 import com.seamless.android.call.GroupCallAudioMixer
 import com.seamless.android.call.GroupCallManager
 import com.seamless.android.crypto.AegisGroupCallCrypto
@@ -282,5 +283,78 @@ class TorGroupCallTest {
             maxAgeMs = 35_000L
         )
         assertEquals(setOf("grp-fresh", "grp-active-even-if-old"), pruned.keys)
+    }
+
+    @Test
+    fun groupVideoFragments_stayUnder4gLteUdpMtu_andRoundTripThroughSFrame() {
+        val aliceOnion = "aliceaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion"
+        val bobOnion = "bobbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion"
+        val alice = AegisGroupCallCrypto.GroupCryptoRoomSession("grp-vid", "call-vid", aliceOnion)
+        val bob = AegisGroupCallCrypto.GroupCryptoRoomSession("grp-vid", "call-vid", bobOnion)
+
+        val aSeed = alice.ensureLocalEpochKey(1)
+        val bSeed = bob.ensureLocalEpochKey(1)
+        alice.installPeerSenderKey(bobOnion, 1, bSeed)
+        bob.installPeerSenderKey(aliceOnion, 1, aSeed)
+
+        val rawKeyframe = ByteArray(22 * 1024) { i -> ((i * 73 + 19) and 0xFF).toByte() }
+        val fragments = CallVideoEngine.fragmentFrame(
+            frameSeq = 42,
+            ptsMs = 12_345,
+            flags = CallVideoEngine.FLAG_KEYFRAME or CallVideoEngine.FLAG_SELF_CONTAINED_JPEG,
+            rotationDeg = 90,
+            frameBytes = rawKeyframe,
+            maxFragmentPayload = CallVideoEngine.MAX_FRAGMENT_PAYLOAD
+        )
+        assertTrue("Expected multi-fragment video frame", fragments.size > 15)
+
+        val reassembler = CallVideoEngine.VideoFrameReassembler(onRequestKeyframe = {})
+        var decoded: CallVideoEngine.ReassembledFrame? = null
+        for (frag in fragments) {
+            val sealed = alice.sealVideoFragment(frag)!!
+            // 1 byte UDP_MAGIC_SFRAME + sealed SFrame must stay safely under 4G/LTE & IPv6 1280B MTU
+            assertTrue(
+                "UDP video datagram (${1 + sealed.size}B) exceeds 1200B mobile MTU",
+                1 + sealed.size <= 1200
+            )
+            val opened = bob.open(sealed)!!
+            val candidate = reassembler.onFragment(opened.plaintext)
+            if (candidate != null) decoded = candidate
+        }
+
+        assertNotNull("All SFrame video fragments should reassemble", decoded)
+        assertArrayEquals(rawKeyframe, decoded!!.data)
+
+        alice.zeroize()
+        bob.zeroize()
+    }
+
+    @Test
+    fun torHeartbeatAckRtt_doesNotOverwriteFreshDirectUdpRtt() {
+        val now = 500_000L
+        assertEquals(
+            false,
+            GroupCallManager.shouldApplyTorHeartbeatRtt(
+                hasVerifiedUdp = true,
+                lastUdpVerifiedAtMs = now - 1_500L,
+                nowMs = now
+            )
+        )
+        assertEquals(
+            true,
+            GroupCallManager.shouldApplyTorHeartbeatRtt(
+                hasVerifiedUdp = true,
+                lastUdpVerifiedAtMs = now - (GroupCallManager.DIRECT_UDP_STALE_MS + 1_000L),
+                nowMs = now
+            )
+        )
+        assertEquals(
+            true,
+            GroupCallManager.shouldApplyTorHeartbeatRtt(
+                hasVerifiedUdp = false,
+                lastUdpVerifiedAtMs = 0L,
+                nowMs = now
+            )
+        )
     }
 }

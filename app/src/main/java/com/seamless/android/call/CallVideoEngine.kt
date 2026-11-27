@@ -359,6 +359,7 @@ class CallVideoEngine(
     private var deltaStripScratch: ByteArray? = null
     private val jpegOutStream = ByteArrayOutputStream(16_384)
     @Volatile var useExternalCameraSource: Boolean = true
+    @Volatile var forceMtuSafeFragments: Boolean = false
 
     @Volatile private var remoteTextureView: TextureView? = null
     @Volatile private var remoteCropFill: Boolean = true
@@ -403,6 +404,9 @@ class CallVideoEngine(
 
     fun setLifecycleOwner(owner: LifecycleOwner) {
         boundLifecycleOwner = owner
+        if (localVideoEnabled && !useExternalCameraSource && (!isCameraBound || (callActive && !isAnalyzerBound))) {
+            rebindCameraOnMain()
+        }
     }
 
     private fun resolveLifecycleOwner(): LifecycleOwner? {
@@ -480,8 +484,9 @@ class CallVideoEngine(
     }
 
     fun clearLocalPreviewIfMatches(previewView: PreviewView?) {
-        if (boundPreviewView === previewView && !localVideoEnabled) {
+        if (previewView != null && boundPreviewView === previewView) {
             boundPreviewView = null
+            activePreviewUseCase?.setSurfaceProvider(null)
         }
     }
 
@@ -759,7 +764,7 @@ class CallVideoEngine(
                             flags = flags,
                             rotationDeg = rotationDeg,
                             frameBytes = deltaPayload,
-                            maxFragmentPayload = 3500
+                            maxFragmentPayload = if (isDirect || forceMtuSafeFragments) MAX_FRAGMENT_PAYLOAD else 3500
                         )
                         if (fragments.isNotEmpty()) {
                             if (onOutboundFrame != null) {
@@ -806,7 +811,7 @@ class CallVideoEngine(
 
         val seq = outboundFrameSeq.incrementAndGet()
         val ptsMs = (nowMs and 0x7FFFFFFFL).toInt()
-        val payloadMtu = if (isDirect) MAX_FRAGMENT_PAYLOAD else 3500
+        val payloadMtu = if (isDirect || forceMtuSafeFragments) MAX_FRAGMENT_PAYLOAD else 3500
         val fragments = fragmentFrame(
             frameSeq = seq,
             ptsMs = ptsMs,

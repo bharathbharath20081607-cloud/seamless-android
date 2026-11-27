@@ -106,6 +106,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -502,17 +503,30 @@ private fun ActiveGroupConferenceScreen(
         session.pinnedSpeakerOnion,
         session.activeSpeakerOnion,
         session.layoutMode,
+        session.isLocalVideoEnabled,
         videoBitmaps
     ) {
+        val pinned = session.pinnedSpeakerOnion?.let { pin ->
+            session.participants.firstOrNull { it.onionAddress == pin }
+        }
         if (session.layoutMode == GroupStageLayoutMode.EQUAL_GRID) {
-            session.pinnedSpeakerOnion?.let { pin -> session.participants.firstOrNull { it.onionAddress == pin } }
+            pinned
         } else {
-            val pinned = session.pinnedSpeakerOnion?.let { pin ->
-                session.participants.firstOrNull { it.onionAddress == pin }
+            val remoteActiveVideo = session.activeSpeakerOnion?.let { active ->
+                session.participants.firstOrNull {
+                    !it.isLocal && it.onionAddress == active &&
+                        (it.isVideoEnabled || videoBitmaps[it.onionAddress] != null)
+                }
             }
-            val activeVideo = session.participants.firstOrNull { !it.isLocal && it.isVideoEnabled }
-                ?: session.participants.firstOrNull { it.isLocal && session.isLocalVideoEnabled }
-            pinned ?: activeVideo
+            val anyRemoteVideo = session.participants.firstOrNull {
+                !it.isLocal && (it.isVideoEnabled || videoBitmaps[it.onionAddress] != null)
+            }
+            val remoteActiveSpeaker = if (session.participants.size >= 3) {
+                session.activeSpeakerOnion?.let { active ->
+                    session.participants.firstOrNull { !it.isLocal && it.onionAddress == active }
+                }
+            } else null
+            pinned ?: remoteActiveVideo ?: anyRemoteVideo ?: remoteActiveSpeaker
         }
     }
 
@@ -649,14 +663,52 @@ private fun ActiveGroupConferenceScreen(
 
             Spacer(Modifier.height(10.dp))
 
-            // Main Stage: Spotlight OR Bento Grid + Floating Reaction Bursts
+            // Main Stage: 2-Peer Floating PiP OR Multi-Peer Spotlight OR Bento Grid + Floating Reaction Bursts
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp)
             ) {
-                if (spotlightTarget != null && session.participants.size >= 2) {
+                val anyVideoInTwoPeer = session.participants.size == 2 &&
+                    session.layoutMode == GroupStageLayoutMode.AUTO_SPOTLIGHT &&
+                    (session.isLocalVideoEnabled || session.participants.any {
+                        !it.isLocal && (it.isVideoEnabled || videoBitmaps[it.onionAddress] != null)
+                    })
+
+                if (anyVideoInTwoPeer) {
+                    val primary = spotlightTarget
+                        ?: session.participants.firstOrNull { !it.isLocal }
+                        ?: session.participants.first()
+                    val secondary = session.participants.firstOrNull { it.onionAddress != primary.onionAddress }
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        GroupParticipantTile(
+                            participant = primary,
+                            session = session,
+                            manager = manager,
+                            remoteBitmap = videoBitmaps[primary.onionAddress],
+                            isSpotlight = true,
+                            onInspectPeer = { if (!primary.isLocal) inspectedPeerOnion = primary.onionAddress },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        if (secondary != null) {
+                            GroupParticipantTile(
+                                participant = secondary,
+                                session = session,
+                                manager = manager,
+                                remoteBitmap = videoBitmaps[secondary.onionAddress],
+                                isSpotlight = false,
+                                onInspectPeer = { if (!secondary.isLocal) inspectedPeerOnion = secondary.onionAddress },
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(end = 10.dp, bottom = if (reactionEvents.isNotEmpty()) 58.dp else 12.dp)
+                                    .width(108.dp)
+                                    .height(152.dp)
+                                    .shadow(12.dp, RoundedCornerShape(20.dp), spotColor = Color.Black.copy(alpha = 0.55f))
+                            )
+                        }
+                    }
+                } else if (spotlightTarget != null && session.participants.size >= 2) {
                     val others = session.participants.filter { it.onionAddress != spotlightTarget.onionAddress }
                     Column(modifier = Modifier.fillMaxSize()) {
                         GroupParticipantTile(
@@ -1192,9 +1244,11 @@ private fun GroupParticipantTile(
                     PreviewView(ctx).apply {
                         implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                         scaleType = PreviewView.ScaleType.FILL_CENTER
+                        manager.localVideoEngine.bindLocalPreview(lifecycleOwner, this)
                     }
                 },
                 update = { pv -> manager.localVideoEngine.bindLocalPreview(lifecycleOwner, pv) },
+                onRelease = { pv -> manager.localVideoEngine.clearLocalPreviewIfMatches(pv) },
                 modifier = Modifier.fillMaxSize()
             )
         } else if (!participant.isLocal && participant.isVideoEnabled && remoteBitmap != null && !remoteBitmap.isRecycled) {
