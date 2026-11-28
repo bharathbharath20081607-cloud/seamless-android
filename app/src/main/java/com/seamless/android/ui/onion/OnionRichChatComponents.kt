@@ -5,6 +5,9 @@ import android.app.Activity
 import android.content.ContentValues
 import android.content.Context
 import android.content.ContextWrapper
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
@@ -14,6 +17,7 @@ import android.provider.OpenableColumns
 import android.view.WindowManager
 import android.webkit.MimeTypeMap
 import android.widget.Toast
+import android.widget.VideoView
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -39,6 +43,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -72,9 +77,16 @@ import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Videocam
@@ -117,6 +129,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
@@ -126,6 +139,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.seamless.android.features.voice.VoiceRecorder
@@ -329,6 +343,7 @@ internal fun OmniAttachmentSheet(
     burnOnReadArmed: Boolean,
     onToggleBurnOnRead: (Boolean) -> Unit,
     onPickPhoto: () -> Unit,
+    onPickVideo: () -> Unit = {},
     onStartVoiceNote: () -> Unit,
     onPickDocument: () -> Unit,
     onDismiss: () -> Unit
@@ -407,6 +422,20 @@ internal fun OmniAttachmentSheet(
                     onClick = { onDismiss(); onPickPhoto() }
                 )
                 AttachmentTile(
+                    icon = Icons.Default.Videocam,
+                    title = "Video",
+                    subtitle = "MP4 · 50 MB",
+                    tint = OnionUi.AccentBlue,
+                    modifier = Modifier.weight(1f),
+                    onClick = { onDismiss(); onPickVideo() }
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                AttachmentTile(
                     icon = Icons.Default.Mic,
                     title = "Voice Note",
                     subtitle = "Crystal Audio",
@@ -416,7 +445,7 @@ internal fun OmniAttachmentSheet(
                 )
                 AttachmentTile(
                     icon = Icons.Default.Description,
-                    title = "File / Doc",
+                    title = "PDF / File",
                     subtitle = "50 MB · PDF Studio",
                     tint = OnionUi.Indigo,
                     modifier = Modifier.weight(1f),
@@ -1228,6 +1257,9 @@ internal fun OnionDocumentCard(
         "ZIP", "RAR", "7Z" -> "Archive"
         "DOC", "DOCX" -> "Word Doc"
         "XLS", "XLSX", "CSV" -> "Spreadsheet"
+        "PPT", "PPTX" -> "Presentation"
+        "APK" -> "Android Package"
+        "EPUB" -> "eBook"
         "MP3", "M4A", "WAV", "OGG" -> "Audio File"
         else -> "Encrypted File"
     }
@@ -1356,7 +1388,7 @@ internal fun OnionDocumentCard(
                     modifier = Modifier.size(32.dp)
                 ) {
                     Icon(
-                        Icons.Default.Download,
+                        if (outgoing) Icons.Default.Share else Icons.Default.Download,
                         contentDescription = if (outgoing) "Export copy" else "Save file",
                         tint = if (outgoing) Color(0xFFF5F8FF).copy(alpha = 0.80f) else OnionUi.AccentBlue,
                         modifier = Modifier.size(18.dp)
@@ -1374,9 +1406,11 @@ internal fun OnionDocumentCard(
                 trackColor = fg.copy(alpha = 0.16f)
             )
             val pct = (frac * 100f).toInt()
+            val doneLabel = transferProgress?.transferredBytes?.toInt()?.let(::formatByteCount).orEmpty()
+            val progressBytes = if (doneLabel.isNotBlank() && byteLabel.isNotBlank()) " · $doneLabel / $byteLabel" else ""
             val statusLine = when {
-                isTempStreaming -> "Receiving encrypted stream… $pct%"
-                transferProgress != null -> "Sending encrypted stream… $pct%"
+                isTempStreaming -> "Receiving encrypted stream… $pct%$progressBytes"
+                transferProgress != null -> "Sending encrypted stream… $pct%$progressBytes"
                 else -> "Queued for Tor delivery…"
             }
             Text(
@@ -1385,6 +1419,372 @@ internal fun OnionDocumentCard(
                 fontSize = 10.5.sp,
                 modifier = Modifier.padding(top = 3.dp)
             )
+        }
+    }
+}
+
+@Composable
+internal fun OnionVideoCard(
+    filePath: String?,
+    fileName: String,
+    totalBytes: Int,
+    durationMsHint: Int,
+    mimeType: String?,
+    outgoing: Boolean,
+    sha256Hex: String = "",
+    transferProgress: TorAttachmentTransfer.TransferProgress? = null,
+    onOpenVideo: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val sourceFile = remember(filePath) { filePath?.let(::File)?.takeIf { it.exists() } }
+    val isTempStreaming = remember(filePath) { TorAttachmentTransfer.isTemporaryAttachmentPath(filePath) }
+    val isPosterPreviewFile = remember(filePath) { sourceFile?.name?.startsWith("preview_") == true }
+    val fg = if (outgoing) OnionUi.OutgoingText else OnionUi.TextPrimary
+    val sub = if (outgoing) OnionUi.OutgoingSubtle else OnionUi.TextSecondary
+
+    val posterBitmap by produceState<ImageBitmap?>(
+        initialValue = null,
+        key1 = sourceFile?.absolutePath,
+        key2 = isTempStreaming
+    ) {
+        value = withContext(Dispatchers.IO) {
+            val file = sourceFile ?: return@withContext null
+            if (isPosterPreviewFile) {
+                runCatching { BitmapFactory.decodeFile(file.absolutePath)?.asImageBitmap() }.getOrNull()
+            } else if (!isTempStreaming) {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(file.absolutePath)
+                    val frame = retriever.getFrameAtTime(150_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        ?: retriever.getFrameAtTime(0L)
+                    frame?.asImageBitmap()
+                } catch (_: Exception) {
+                    null
+                } finally {
+                    runCatching { retriever.release() }
+                }
+            } else null
+        }
+    }
+
+    val effectiveBytes = if (totalBytes > 0) totalBytes else (sourceFile?.takeIf { !isTempStreaming }?.length()?.toInt() ?: 0)
+    val byteLabel = formatByteCount(effectiveBytes)
+    val durationLabel = if (durationMsHint > 0) TorRichChatCodec.formatDurationMs(durationMsHint) else ""
+    val displayTitle = fileName.ifBlank { "Encrypted video" }
+    val showProgress = isTempStreaming || (transferProgress != null && transferProgress.doneUnits < transferProgress.totalUnits)
+
+    Column(
+        modifier = Modifier
+            .widthIn(min = 224.dp, max = 276.dp)
+            .clip(RoundedCornerShape(14.dp))
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(168.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color(0xFF0A0F1A))
+                .border(1.dp, if (outgoing) Color.White.copy(alpha = 0.22f) else OnionUi.Hairline, RoundedCornerShape(14.dp))
+                .clickable(enabled = !isTempStreaming && sourceFile != null) { onOpenVideo() },
+            contentAlignment = Alignment.Center
+        ) {
+            if (posterBitmap != null) {
+                Image(
+                    bitmap = posterBitmap!!,
+                    contentDescription = "Video thumbnail",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Icon(
+                    Icons.Default.Videocam,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.28f),
+                    modifier = Modifier.size(44.dp)
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.22f))
+            )
+            if (isTempStreaming) {
+                val frac = transferProgress?.fraction?.coerceIn(0f, 1f) ?: 0f
+                CircularProgressIndicator(
+                    progress = { if (frac > 0f) frac else 0.12f },
+                    color = Color.White,
+                    trackColor = Color.White.copy(alpha = 0.24f),
+                    strokeWidth = 3.dp,
+                    modifier = Modifier.size(46.dp)
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.62f))
+                        .border(1.2.dp, Color.White.copy(alpha = 0.72f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.PlayArrow,
+                        contentDescription = "Play encrypted video",
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(Color.Black.copy(alpha = 0.62f))
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Videocam, null, tint = Color.White, modifier = Modifier.size(12.dp))
+                if (durationLabel.isNotBlank()) {
+                    Spacer(Modifier.width(4.dp))
+                    Text(durationLabel, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                }
+                if (byteLabel.isNotBlank()) {
+                    Spacer(Modifier.width(5.dp))
+                    Text(byteLabel, color = Color.White.copy(alpha = 0.85f), fontSize = 10.5.sp)
+                }
+            }
+            if (!isTempStreaming && sourceFile != null) {
+                IconButton(
+                    onClick = {
+                        scope.launch {
+                            saveAttachmentToDownloads(context, sourceFile, displayTitle, mimeType ?: "video/mp4")
+                                .onSuccess { dest -> Toast.makeText(context, "Saved to $dest", Toast.LENGTH_SHORT).show() }
+                                .onFailure { Toast.makeText(context, it.message ?: "Save failed", Toast.LENGTH_SHORT).show() }
+                        }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.56f))
+                ) {
+                    Icon(
+                        if (outgoing) Icons.Default.Share else Icons.Default.Download,
+                        contentDescription = if (outgoing) "Export video" else "Save video",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(5.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (sha256Hex.length == 64 && !isTempStreaming) {
+                Icon(
+                    Icons.Default.VerifiedUser,
+                    contentDescription = "Integrity verified",
+                    tint = if (outgoing) Color(0xFF86EFAC) else OnionUi.Online,
+                    modifier = Modifier.size(12.dp)
+                )
+                Spacer(Modifier.width(4.dp))
+            }
+            Text(
+                text = displayTitle,
+                color = fg,
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        if (showProgress) {
+            Spacer(Modifier.height(5.dp))
+            val frac = transferProgress?.fraction?.coerceIn(0f, 1f) ?: 0f
+            LinearProgressIndicator(
+                progress = { frac },
+                modifier = Modifier.fillMaxWidth().height(3.dp).clip(CircleShape),
+                color = if (outgoing) Color.White else OnionUi.Online,
+                trackColor = fg.copy(alpha = 0.16f)
+            )
+            val pct = (frac * 100f).toInt()
+            val doneLabel = transferProgress?.transferredBytes?.toInt()?.let(::formatByteCount).orEmpty()
+            val progressBytes = if (doneLabel.isNotBlank() && byteLabel.isNotBlank()) " · $doneLabel / $byteLabel" else ""
+            val statusLine = when {
+                isTempStreaming -> "Receiving encrypted video… $pct%$progressBytes"
+                transferProgress != null -> "Sending encrypted video… $pct%$progressBytes"
+                else -> "Queued for Tor delivery…"
+            }
+            Text(
+                text = statusLine,
+                color = sub,
+                fontSize = 10.5.sp,
+                modifier = Modifier.padding(top = 3.dp)
+            )
+        }
+    }
+}
+
+@Composable
+internal fun FullscreenEncryptedVideoDialog(
+    file: File,
+    fileName: String,
+    mimeType: String,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var videoViewRef by remember { mutableStateOf<VideoView?>(null) }
+    var mediaPlayerRef by remember { mutableStateOf<MediaPlayer?>(null) }
+    var isPlaying by remember { mutableStateOf(true) }
+    var isMuted by remember { mutableStateOf(false) }
+    var durationMs by remember { mutableIntStateOf(0) }
+    var positionMs by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(videoViewRef, isPlaying) {
+        while (true) {
+            val vv = videoViewRef
+            if (vv != null && vv.duration > 0) {
+                durationMs = vv.duration
+                positionMs = vv.currentPosition.coerceIn(0, durationMs)
+            }
+            delay(200)
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+        ) {
+            AndroidView(
+                factory = { ctx ->
+                    VideoView(ctx).apply {
+                        setVideoPath(file.absolutePath)
+                        setOnPreparedListener { mp ->
+                            mediaPlayerRef = mp
+                            mp.isLooping = true
+                            val vol = if (isMuted) 0f else 1f
+                            mp.setVolume(vol, vol)
+                            durationMs = mp.duration.coerceAtLeast(0)
+                            start()
+                            isPlaying = true
+                        }
+                        videoViewRef = this
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable {
+                        val vv = videoViewRef ?: return@clickable
+                        if (vv.isPlaying) {
+                            vv.pause()
+                            isPlaying = false
+                        } else {
+                            vv.start()
+                            isPlaying = true
+                        }
+                    }
+            )
+
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.56f))
+                    .padding(horizontal = 12.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Default.Close, "Close video", tint = Color.White)
+                }
+                Text(
+                    text = fileName.ifBlank { "Encrypted Video" },
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = {
+                    isMuted = !isMuted
+                    val vol = if (isMuted) 0f else 1f
+                    runCatching { mediaPlayerRef?.setVolume(vol, vol) }
+                }) {
+                    Icon(
+                        if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                        "Toggle mute",
+                        tint = Color.White
+                    )
+                }
+                IconButton(onClick = {
+                    scope.launch {
+                        saveAttachmentToDownloads(context, file, fileName.ifBlank { file.name }, mimeType)
+                            .onSuccess { dest -> Toast.makeText(context, "Saved to $dest", Toast.LENGTH_SHORT).show() }
+                            .onFailure { Toast.makeText(context, it.message ?: "Save failed", Toast.LENGTH_SHORT).show() }
+                    }
+                }) {
+                    Icon(Icons.Default.Download, "Save to Downloads", tint = Color.White)
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.62f))
+                    .navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 10.dp)
+            ) {
+                val safeDur = durationMs.coerceAtLeast(1)
+                Slider(
+                    value = (positionMs.toFloat() / safeDur.toFloat()).coerceIn(0f, 1f),
+                    onValueChange = { frac ->
+                        val target = (frac * safeDur).toInt().coerceIn(0, safeDur)
+                        positionMs = target
+                        runCatching { videoViewRef?.seekTo(target) }
+                    },
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color.White,
+                        activeTrackColor = OnionUi.AccentBlue,
+                        inactiveTrackColor = Color.White.copy(alpha = 0.28f)
+                    )
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "${TorRichChatCodec.formatDurationMs(positionMs)} / ${TorRichChatCodec.formatDurationMs(durationMs)}",
+                        color = Color.White.copy(alpha = 0.88f),
+                        fontSize = 12.sp
+                    )
+                    IconButton(onClick = {
+                        val vv = videoViewRef ?: return@IconButton
+                        if (vv.isPlaying) {
+                            vv.pause()
+                            isPlaying = false
+                        } else {
+                            vv.start()
+                            isPlaying = true
+                        }
+                    }) {
+                        Icon(
+                            if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            "Play or pause",
+                            tint = Color.White
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -1625,12 +2025,13 @@ internal fun AegisBurnViewerDialog(
     val context = LocalContext.current
     val activity = remember(context) { context.findHostActivity() }
     val isVoice = attachmentMimeType?.startsWith("audio/") == true
+    val isVideo = attachmentMimeType?.startsWith("video/") == true
     val isImage = attachmentMimeType?.startsWith("image/") == true
     val isPdf = attachmentMimeType.equals("application/pdf", ignoreCase = true) ||
         attachmentFile?.name?.lowercase(Locale.US)?.endsWith(".pdf") == true
-    val effectiveTtlMs = remember(isVoice, isPdf, ttlSeconds) {
+    val effectiveTtlMs = remember(isVoice, isVideo, isPdf, ttlSeconds) {
         when {
-            isPdf -> 45_000L
+            isPdf || isVideo -> 45_000L
             isVoice -> 30_000L
             else -> ttlSeconds.coerceIn(5, 60) * 1000L
         }
@@ -1787,6 +2188,22 @@ internal fun AegisBurnViewerDialog(
                             )
                         }
                     }
+                    isVideo && attachmentFile != null -> {
+                        AndroidView(
+                            factory = { ctx ->
+                                VideoView(ctx).apply {
+                                    setVideoPath(attachmentFile.absolutePath)
+                                    setOnPreparedListener { mp ->
+                                        mp.isLooping = true
+                                        start()
+                                    }
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(16.dp))
+                        )
+                    }
                     isPdf && attachmentFile != null -> {
                         EmbeddedPdfReaderContent(
                             file = attachmentFile,
@@ -1827,6 +2244,7 @@ internal fun DirectMessageActionSheet(
     onReply: () -> Unit,
     onCopy: (() -> Unit)?,
     onEdit: (() -> Unit)?,
+    onRetry: (() -> Unit)? = null,
     onDelete: (() -> Unit)?
 ) {
     ModalBottomSheet(
@@ -1873,11 +2291,14 @@ internal fun DirectMessageActionSheet(
                     DirectActionPill("Copy", Icons.Default.ContentCopy, Modifier.weight(1f), onClick = onCopy)
                 }
             }
-            if (onEdit != null || onDelete != null) {
+            if (onEdit != null || onRetry != null || onDelete != null) {
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                     if (onEdit != null) {
                         DirectActionPill("Edit", Icons.Default.Edit, Modifier.weight(1f), onClick = onEdit)
+                    }
+                    if (onRetry != null) {
+                        DirectActionPill("Retry Tor", Icons.Default.Refresh, Modifier.weight(1f), tint = OnionUi.AccentBlue, onClick = onRetry)
                     }
                     if (onDelete != null) {
                         DirectActionPill("Delete", Icons.Default.Delete, Modifier.weight(1f), tint = OnionUi.Danger, onClick = onDelete)

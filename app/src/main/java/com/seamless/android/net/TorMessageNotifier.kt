@@ -34,7 +34,8 @@ class TorMessageNotifier(context: Context) {
         private const val TAG = "TorMessageNotifier"
         private const val LEGACY_CHANNEL_ID = "tor_messages"
         private const val LEGACY_CHANNEL_ID_V2 = "seamless_tor_messages_v2"
-        const val CHANNEL_ID = "seamless_tor_messages_v3"
+        private const val LEGACY_CHANNEL_ID_V3 = "seamless_tor_messages_v3"
+        const val CHANNEL_ID = "seamless_tor_messages_v4"
         private const val GROUP_KEY_TOR = "seamless_tor_messages_group"
         private const val SUMMARY_NOTIFICATION_ID = 77910
         private const val MAX_STACKED_MESSAGES = 6
@@ -72,6 +73,7 @@ class TorMessageNotifier(context: Context) {
         val nm = appContext.getSystemService(NotificationManager::class.java) ?: return
         runCatching { nm.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
         runCatching { nm.deleteNotificationChannel(LEGACY_CHANNEL_ID_V2) }
+        runCatching { nm.deleteNotificationChannel(LEGACY_CHANNEL_ID_V3) }
 
         val soundUri = buildSoundUri(appContext)
         val audioAttributes = AudioAttributes.Builder()

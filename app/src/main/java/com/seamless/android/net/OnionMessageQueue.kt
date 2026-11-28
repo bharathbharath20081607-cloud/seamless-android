@@ -70,10 +70,10 @@ class OnionMessageQueue private constructor(private val context: Context) {
         // preferences is expensive. Writes are coalesced into one snapshot
         // per debounce window instead of one per state transition.
         const val SAVE_DEBOUNCE_MS = 250L
-        // High-throughput bulk transfer window sized for up to 50 MB documents while
+        // High-throughput bulk transfer window sized for up to 50 MB documents/videos while
         // still letting small control, chat, and call frames interleave cleanly.
-        const val ATTACHMENT_WINDOW_SIZE = 192
-        const val ATTACHMENT_DISPATCH_SLICE = 64
+        const val ATTACHMENT_WINDOW_SIZE = 384
+        const val ATTACHMENT_DISPATCH_SLICE = 96
         private const val COMPACT_DELIVERED_THRESHOLD = 128
         
         // Cleanup
@@ -84,12 +84,24 @@ class OnionMessageQueue private constructor(private val context: Context) {
         private var instance: OnionMessageQueue? = null
         
         fun getInstance(context: Context): OnionMessageQueue {
-            return instance ?: synchronized(this) {
-                instance ?: OnionMessageQueue(context.applicationContext).also { instance = it }
+            val appCtx = context.applicationContext
+            val current = instance
+            if (current != null && current.appFilesDir == appCtx.filesDir) {
+                return current
+            }
+            return synchronized(this) {
+                val existing = instance
+                if (existing != null && existing.appFilesDir == appCtx.filesDir) {
+                    existing
+                } else {
+                    existing?.scope?.cancel()
+                    OnionMessageQueue(appCtx).also { instance = it }
+                }
             }
         }
     }
     
+    private val appFilesDir: File = context.filesDir
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val gson = Gson()
     private val mutex = Mutex()
@@ -97,16 +109,21 @@ class OnionMessageQueue private constructor(private val context: Context) {
     private val saveRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     @Suppress("DEPRECATION")
     private val persistencePrefs by lazy {
-        val masterKey = MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
-        EncryptedSharedPreferences.create(
-            context,
-            QUEUE_PREFS,
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
+        try {
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+            EncryptedSharedPreferences.create(
+                context,
+                QUEUE_PREFS,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "EncryptedSharedPreferences unavailable (${e.message}); using fallback prefs")
+            context.getSharedPreferences("${QUEUE_PREFS}_fallback", Context.MODE_PRIVATE)
+        }
     }
     
     // Message queues per recipient
@@ -538,6 +555,62 @@ class OnionMessageQueue private constructor(private val context: Context) {
         saveToDisk()
         
         Log.i(TAG, "✅ Message $messageId delivered")
+    }
+
+    /** Marks a batch of chunk ACKs delivered under a single lock + coalesced snapshot. */
+    suspend fun markDeliveredBatch(messageIds: Collection<String>) = mutex.withLock {
+        if (messageIds.isEmpty()) return@withLock
+        val now = System.currentTimeMillis()
+        var trackerChanged = false
+        for (messageId in messageIds) {
+            val msg = findMessage(messageId)
+            updateMessageState(messageId, OnionMessageProtocol.DeliveryState.DELIVERED)
+            deliveryStatus[messageId]?.deliveredAt = now
+            if (msg != null) {
+                outgoingTrackers[msg.uiMessageId]?.let { tracker ->
+                    if (tracker.ackedIds.add(messageId)) {
+                        trackerChanged = true
+                    }
+                }
+            }
+            if (msg != null && !msg.completesUiMessage && isAttachmentFrame(msg)) {
+                deliveredAttachmentChunksSinceCompact++
+            } else {
+                removeFromQueue(messageId)
+            }
+        }
+        if (deliveredAttachmentChunksSinceCompact >= COMPACT_DELIVERED_THRESHOLD) {
+            deliveredAttachmentChunksSinceCompact = 0
+            compactDeliveredAttachmentChunksLocked()
+        }
+        if (trackerChanged) publishOutgoingProgress()
+        saveToDisk()
+    }
+
+    /** Wakes any queued/failed frames for a UI message so a user-triggered retry sends immediately. */
+    suspend fun resetFailedOrPendingForUiMessage(uiMessageId: String): Int = mutex.withLock {
+        val now = System.currentTimeMillis()
+        var resetCount = 0
+        for (queue in queues.values) {
+            for (msg in queue) {
+                if (msg.uiMessageId == uiMessageId &&
+                    msg.state != OnionMessageProtocol.DeliveryState.DELIVERED &&
+                    msg.state != OnionMessageProtocol.DeliveryState.READ
+                ) {
+                    msg.state = OnionMessageProtocol.DeliveryState.PENDING
+                    msg.retryCount = 0
+                    msg.nextRetryAt = now
+                    msg.mailboxStored = false
+                    deliveryStatus[msg.id]?.apply {
+                        state = OnionMessageProtocol.DeliveryState.PENDING
+                        failReason = null
+                    }
+                    resetCount++
+                }
+            }
+        }
+        if (resetCount > 0) saveToDisk()
+        resetCount
     }
 
     private fun compactDeliveredAttachmentChunksLocked() {

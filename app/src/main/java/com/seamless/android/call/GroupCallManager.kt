@@ -56,6 +56,10 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.LockSupport
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 import kotlin.math.abs
 import kotlin.math.min
 
@@ -181,10 +185,69 @@ class GroupCallManager private constructor(private val context: Context) {
         private const val UDP_MAGIC_PROBE: Byte = 0x11
         private const val UDP_MAGIC_PROBE_ACK: Byte = 0x12
         private const val UDP_MAGIC_SFRAME: Byte = 0x13
+        private const val UDP_MAGIC_SIGNAL: Byte = 0x14
         const val DIRECT_UDP_STALE_MS = 4_500L
         private const val MAX_UDP_CANDIDATES = 12
         private const val REACTION_TTL_MS = 4_500L
         private val ALLOWED_CALL_REACTIONS = setOf("👍", "❤️", "🔥", "👏", "😂", "🎉")
+
+        internal fun deriveRoomSignalKey(groupId: String, callId: String): SecretKeySpec {
+            val rawKey = AegisTorCrypto.hkdfSha256(
+                ikm = "$groupId|$callId".toByteArray(Charsets.UTF_8),
+                salt = "SeamlessGroupUdpSigSalt/v1".toByteArray(Charsets.UTF_8),
+                info = "SeamlessGroupUdpSigInfo/v1".toByteArray(Charsets.UTF_8),
+                length = 32
+            )
+            return try {
+                SecretKeySpec(rawKey, "AES")
+            } finally {
+                AegisTorCrypto.zeroize(rawKey)
+            }
+        }
+
+        internal fun sealUdpControlSignal(
+            groupId: String,
+            callId: String,
+            payload: ByteArray,
+            random: SecureRandom = SecureRandom()
+        ): ByteArray? {
+            if (groupId.isBlank() || callId.isBlank() || payload.isEmpty() || payload.size > 16 * 1024) return null
+            return try {
+                val nonce = ByteArray(12).also { random.nextBytes(it) }
+                val aad = "SGRPUDP1|$groupId|$callId".toByteArray(Charsets.UTF_8)
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.ENCRYPT_MODE, deriveRoomSignalKey(groupId, callId), GCMParameterSpec(128, nonce))
+                cipher.updateAAD(aad)
+                val ct = cipher.doFinal(payload)
+                ByteArray(1 + 12 + ct.size).apply {
+                    this[0] = UDP_MAGIC_SIGNAL
+                    System.arraycopy(nonce, 0, this, 1, 12)
+                    System.arraycopy(ct, 0, this, 13, ct.size)
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        internal fun openUdpControlSignal(
+            groupId: String,
+            callId: String,
+            packet: ByteArray
+        ): ByteArray? {
+            if (groupId.isBlank() || callId.isBlank() || packet.size < 1 + 12 + 16) return null
+            if (packet[0] != UDP_MAGIC_SIGNAL) return null
+            return try {
+                val nonce = packet.copyOfRange(1, 13)
+                val ct = packet.copyOfRange(13, packet.size)
+                val aad = "SGRPUDP1|$groupId|$callId".toByteArray(Charsets.UTF_8)
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, deriveRoomSignalKey(groupId, callId), GCMParameterSpec(128, nonce))
+                cipher.updateAAD(aad)
+                cipher.doFinal(ct)
+            } catch (_: Exception) {
+                null
+            }
+        }
 
         internal fun shouldApplyTorHeartbeatRtt(
             hasVerifiedUdp: Boolean,
@@ -281,6 +344,8 @@ class GroupCallManager private constructor(private val context: Context) {
     ) {
         private var deltaBaseBitmap: Bitmap? = null
         private var deltaBaseCanvas: Canvas? = null
+        private val decodeScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        private val decodeChannel = Channel<CallVideoEngine.ReassembledFrame>(capacity = Channel.CONFLATED)
 
         val reassembler = CallVideoEngine.VideoFrameReassembler(
             maxInFlightFrames = 6,
@@ -289,10 +354,23 @@ class GroupCallManager private constructor(private val context: Context) {
             onRequestKeyframe = { onRequestPli(onionAddress) }
         )
 
-        @Synchronized
+        init {
+            decodeScope.launch {
+                try {
+                    for (complete in decodeChannel) {
+                        decodeReassembledFrame(complete)
+                    }
+                } finally {
+                    deltaBaseBitmap?.recycle()
+                    deltaBaseBitmap = null
+                    deltaBaseCanvas = null
+                }
+            }
+        }
+
         fun onFragment(fragment: ByteArray) {
             val complete = reassembler.onFragment(fragment) ?: return
-            decodeReassembledFrame(complete)
+            decodeChannel.trySend(complete)
         }
 
         private fun decodeReassembledFrame(frame: CallVideoEngine.ReassembledFrame) {
@@ -316,7 +394,7 @@ class GroupCallManager private constructor(private val context: Context) {
                         return
                     }
                     val stripOpts = BitmapFactory.Options().apply {
-                        inPreferredConfig = Bitmap.Config.RGB_565
+                        inPreferredConfig = Bitmap.Config.ARGB_8888
                     }
                     val stripBmp = BitmapFactory.decodeByteArray(
                         frame.data, 12, frame.data.size - 12, stripOpts
@@ -347,7 +425,7 @@ class GroupCallManager private constructor(private val context: Context) {
                         val m = Matrix().apply { postRotate(rot.toFloat()) }
                         Bitmap.createBitmap(base, 0, 0, base.width, base.height, m, true)
                     } else {
-                        base.copy(Bitmap.Config.RGB_565, false)
+                        base.copy(Bitmap.Config.ARGB_8888, false)
                     }
                 } else {
                     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -364,7 +442,7 @@ class GroupCallManager private constructor(private val context: Context) {
                         longest /= 2
                     }
                     val opts = BitmapFactory.Options().apply {
-                        inPreferredConfig = Bitmap.Config.RGB_565
+                        inPreferredConfig = Bitmap.Config.ARGB_8888
                         inSampleSize = sampleSize
                     }
                     val bmp = BitmapFactory.decodeByteArray(frame.data, 0, frame.data.size, opts) ?: return
@@ -372,7 +450,7 @@ class GroupCallManager private constructor(private val context: Context) {
                         var base = deltaBaseBitmap
                         if (base == null || base.isRecycled || base.width != bmp.width || base.height != bmp.height) {
                             base?.recycle()
-                            base = Bitmap.createBitmap(bmp.width, bmp.height, Bitmap.Config.RGB_565)
+                            base = Bitmap.createBitmap(bmp.width, bmp.height, Bitmap.Config.ARGB_8888)
                             deltaBaseBitmap = base
                             deltaBaseCanvas = Canvas(base)
                         }
@@ -394,12 +472,9 @@ class GroupCallManager private constructor(private val context: Context) {
             }
         }
 
-        @Synchronized
         fun release() {
             reassembler.reset()
-            deltaBaseBitmap?.recycle()
-            deltaBaseBitmap = null
-            deltaBaseCanvas = null
+            decodeChannel.close()
         }
     }
 
@@ -619,21 +694,38 @@ class GroupCallManager private constructor(private val context: Context) {
                     val mySeed = crypto.ensureLocalEpochKey(1)
                     val announceType = if (isJoiningExisting) "G_ROOM_JOIN" else "G_ROOM_ANNOUNCE"
                     otherMembers.forEach { m ->
+                        val canonMember = canonical(m.onionAddress)
                         launch {
+                            runCatching { messaging.preparePeerForUrgentCallSignal(m.onionAddress) }
+                            val extras = mapOf(
+                                "groupName" to groupName,
+                                "isVideo" to isVideo,
+                                "initialRing" to !isJoiningExisting,
+                                "epoch" to 1,
+                                "candidates" to if (effectiveForceTor) emptyList<String>() else localUdpCandidates.toList()
+                            )
                             sendGroupSignal(
                                 targetOnion = m.onionAddress,
                                 type = announceType,
                                 groupId = groupId,
                                 callId = callId,
-                                extras = mapOf(
-                                    "groupName" to groupName,
-                                    "isVideo" to isVideo,
-                                    "initialRing" to !isJoiningExisting,
-                                    "epoch" to 1,
-                                    "candidates" to if (effectiveForceTor) emptyList<String>() else localUdpCandidates.toList()
-                                )
+                                extras = extras
                             )
                             sendSenderKeyPacket(m.onionAddress, groupId, callId, 1, mySeed)
+                            for (waitMs in longArrayOf(1_200L, 1_800L)) {
+                                delay(waitMs)
+                                val cur = _sessionFlow.value
+                                if (cur?.callId != callId || cur.state != GroupCallState.ACTIVE) break
+                                if (peersByOnion.containsKey(canonMember)) break
+                                sendGroupSignal(
+                                    targetOnion = m.onionAddress,
+                                    type = announceType,
+                                    groupId = groupId,
+                                    callId = callId,
+                                    extras = extras + ("candidates" to if (effectiveForceTor) emptyList<String>() else localUdpCandidates.toList())
+                                )
+                                sendSenderKeyPacket(m.onionAddress, groupId, callId, 1, mySeed)
+                            }
                         }
                     }
                 }
@@ -675,7 +767,9 @@ class GroupCallManager private constructor(private val context: Context) {
                 startVideoPipelineIfNeededLocked(enableVideo, current.isFrontCamera, current.forceTorOnly)
 
                 if (!current.forceTorOnly) {
-                    openDirectUdpSocket(current.callId)
+                    if (udpSocket == null || udpSocket?.isClosed == true) {
+                        openDirectUdpSocket(current.callId)
+                    }
                     startUdpProbingLoop(current.callId)
                 }
                 startTorMediaSenderLoop(current.callId)
@@ -684,6 +778,7 @@ class GroupCallManager private constructor(private val context: Context) {
 
                 val mySeedCopy = mySeed.copyOf()
                 launch {
+                    val messaging = TorMessagingService.getInstance(context)
                     val activePeers = peersByOnion.keys.toList()
                     val allVerified = TorGroupMessaging.getInstance(context)
                         .getVerifiedCallMembers(current.groupId)
@@ -691,23 +786,65 @@ class GroupCallManager private constructor(private val context: Context) {
                     val targets = (activePeers + allVerified).distinct()
                         .filter { it != crypto.localOnion }
                         .take(MAX_GROUP_CALL_PARTICIPANTS - 1)
-                    targets.forEach { target ->
+                    if (!current.forceTorOnly) {
+                        val joinBytes = buildGroupSignalBytes(
+                            type = "G_ROOM_JOIN",
+                            groupId = current.groupId,
+                            callId = current.callId,
+                            extras = mapOf(
+                                "groupName" to current.groupName,
+                                "isVideo" to enableVideo,
+                                "epoch" to current.epoch,
+                                "candidates" to localUdpCandidates.toList()
+                            )
+                        )
+                        val keyBytes = buildSenderKeySignalBytes(current.groupId, current.callId, current.epoch, mySeedCopy)
                         launch {
+                            for (delayMs in longArrayOf(0L, 120L, 300L)) {
+                                if (delayMs > 0L) delay(delayMs)
+                                val s = _sessionFlow.value
+                                if (s?.callId != current.callId || s.state != GroupCallState.ACTIVE) break
+                                targets.forEach { target ->
+                                    sendUdpControlToPeer(target, current.groupId, current.callId, joinBytes)
+                                    sendUdpControlToPeer(target, current.groupId, current.callId, keyBytes)
+                                }
+                            }
+                        }
+                    }
+                    val torJobs = targets.map { target ->
+                        launch {
+                            runCatching { messaging.preparePeerForUrgentCallSignal(target) }
+                            val extras = mapOf(
+                                "groupName" to current.groupName,
+                                "isVideo" to enableVideo,
+                                "epoch" to current.epoch,
+                                "candidates" to if (current.forceTorOnly) emptyList<String>() else localUdpCandidates.toList()
+                            )
                             sendGroupSignal(
                                 targetOnion = target,
                                 type = "G_ROOM_JOIN",
                                 groupId = current.groupId,
                                 callId = current.callId,
-                                extras = mapOf(
-                                    "groupName" to current.groupName,
-                                    "isVideo" to enableVideo,
-                                    "epoch" to current.epoch,
-                                    "candidates" to if (current.forceTorOnly) emptyList<String>() else localUdpCandidates.toList()
-                                )
+                                extras = extras
                             )
                             sendSenderKeyPacket(target, current.groupId, current.callId, current.epoch, mySeedCopy)
+                            delay(1_300L)
+                            val cur = _sessionFlow.value
+                            if (cur?.callId == current.callId && cur.state == GroupCallState.ACTIVE &&
+                                !crypto.hasKeyForPeer(target, cur.epoch)
+                            ) {
+                                sendGroupSignal(
+                                    targetOnion = target,
+                                    type = "G_ROOM_JOIN",
+                                    groupId = current.groupId,
+                                    callId = current.callId,
+                                    extras = extras + ("candidates" to if (cur.forceTorOnly) emptyList<String>() else localUdpCandidates.toList())
+                                )
+                                sendSenderKeyPacket(target, current.groupId, current.callId, current.epoch, mySeedCopy)
+                            }
                         }
                     }
+                    torJobs.forEach { it.join() }
                     AegisTorCrypto.zeroize(mySeedCopy)
                 }
             }
@@ -1164,6 +1301,10 @@ class GroupCallManager private constructor(private val context: Context) {
                                 statusMessage = if (isVideo) "${senderInfo.nickname} started a group video call" else "${senderInfo.nickname} started a group voice call"
                             )
                             updateRoomTopologyAndEmojisLocked()
+                            if (!forceTor) {
+                                openDirectUdpSocket(callId)
+                                startUdpProbingLoop(callId)
+                            }
                             CallForegroundService.start(context)
                             startIncomingRingtoneAndVibration()
                             startIncomingRingTimeout(callId)
@@ -1644,7 +1785,12 @@ class GroupCallManager private constructor(private val context: Context) {
             val peer = peersByOnion[onion]
             val udpEp = peer?.verifiedUdpEndpoint
             if (!current.forceTorOnly && udpEp != null && (now - peer.lastUdpVerifiedAtMs) <= DIRECT_UDP_STALE_MS) {
-                sealedList.forEach { sendUdpSFrame(udpEp, it) }
+                sealedList.forEachIndexed { idx, sframe ->
+                    if (sealedList.size > 8 && idx > 0 && idx % 6 == 0) {
+                        LockSupport.parkNanos(150_000L)
+                    }
+                    sendUdpSFrame(udpEp, sframe)
+                }
             } else {
                 torTargets.add(onion)
             }
@@ -1904,9 +2050,12 @@ class GroupCallManager private constructor(private val context: Context) {
 
         rttSamples.sort()
         val medianRtt = if (rttSamples.isEmpty()) 0 else rttSamples[rttSamples.size / 2]
+        val allDirectP2p = !current.forceTorOnly && directCount > 0 && torCount == 0
+        audioMixer?.setLowLatencyDirectMode(allDirectP2p)
+        localVideoEngine.activeVideoPeerCount = peersByOnion.size.coerceAtLeast(1)
         if (current.isLocalVideoEnabled) {
             localVideoEngine.updateNetworkProfile(
-                isDirectP2p = directCount > 0 && torCount == 0,
+                isDirectP2p = allDirectP2p,
                 rttMs = medianRtt,
                 lossDetected = false
             )
@@ -2059,8 +2208,8 @@ class GroupCallManager private constructor(private val context: Context) {
                 reuseAddress = true
                 trafficClass = 0xB8
                 runCatching {
-                    receiveBufferSize = 512 * 1024
-                    sendBufferSize = 512 * 1024
+                    receiveBufferSize = 1024 * 1024
+                    sendBufferSize = 1024 * 1024
                 }
             }
             udpSocket = socket
@@ -2121,7 +2270,7 @@ class GroupCallManager private constructor(private val context: Context) {
             val crypto = roomCrypto ?: return@launch
             while (isActive) {
                 val cur = _sessionFlow.value ?: break
-                if (cur.callId != callId || cur.state != GroupCallState.ACTIVE || cur.forceTorOnly) break
+                if (cur.callId != callId || cur.state == GroupCallState.IDLE || cur.state == GroupCallState.ENDED || cur.forceTorOnly) break
                 val now = System.currentTimeMillis()
                 for (peer in peersByOnion.values) {
                     val endpoints = LinkedHashSet<InetSocketAddress>()
@@ -2138,7 +2287,7 @@ class GroupCallManager private constructor(private val context: Context) {
                     }
                 }
                 val n = p2pBurstCounter.incrementAndGet()
-                delay(if (n <= 12) 120L else 1_600L)
+                delay(if (n <= 16) 60L else 1_400L)
             }
         }
     }
@@ -2218,6 +2367,22 @@ class GroupCallManager private constructor(private val context: Context) {
                                 allowRelayForward = true,
                                 fromUdpEndpoint = fromEp
                             )
+                        }
+                        UDP_MAGIC_SIGNAL -> {
+                            val plainJson = openUdpControlSignal(s.groupId, s.callId, data) ?: continue
+                            val json = runCatching { JSONObject(String(plainJson, Charsets.UTF_8)) }.getOrNull() ?: continue
+                            val claimedSender = json.optString("senderOnion")
+                            if (claimedSender.isBlank()) continue
+                            val senderCanon = canonical(claimedSender)
+                            peersByOnion[senderCanon]?.let { p ->
+                                if (!p.udpCandidates.contains(fromEp) && p.udpCandidates.size < MAX_UDP_CANDIDATES) {
+                                    p.udpCandidates.add(0, fromEp)
+                                }
+                                p.verifiedUdpEndpoint = fromEp
+                                p.lastUdpVerifiedAtMs = System.currentTimeMillis()
+                                p.lastSeenAtMs = p.lastUdpVerifiedAtMs
+                            }
+                            onIncomingGroupCallSignal(claimedSender, json)
                         }
                     }
                 } catch (_: Exception) {
@@ -2321,13 +2486,30 @@ class GroupCallManager private constructor(private val context: Context) {
         )
     }
 
-    private suspend fun sendSenderKeyPacket(
+    private fun sendUdpControlToPeer(
         targetOnion: String,
+        groupId: String,
+        callId: String,
+        plainJsonBytes: ByteArray
+    ) {
+        val sock = udpSocket ?: return
+        val sealed = sealUdpControlSignal(groupId, callId, plainJsonBytes) ?: return
+        val peer = peersByOnion[canonical(targetOnion)] ?: return
+        val endpoints = LinkedHashSet<InetSocketAddress>(4).apply {
+            peer.verifiedUdpEndpoint?.let { add(it) }
+            addAll(peer.udpCandidates.take(3))
+        }
+        for (ep in endpoints) {
+            runCatching { sock.send(DatagramPacket(sealed, sealed.size, ep)) }
+        }
+    }
+
+    private fun buildSenderKeySignalBytes(
         groupId: String,
         callId: String,
         epoch: Int,
         rootSeed: ByteArray
-    ) {
+    ): ByteArray {
         val myOnion = canonical(TorMessagingService.getInstance(context).getMyContactInfo().onionAddress)
         val myTag = AegisGroupCallCrypto.senderTag4(myOnion)
         val (sigPub, sigHex) = TorGroupMessaging.getInstance(context).signGroupCallPayload(
@@ -2338,8 +2520,7 @@ class GroupCallManager private constructor(private val context: Context) {
             senderTag4 = myTag,
             rootSeed = rootSeed
         )
-        sendGroupSignal(
-            targetOnion = targetOnion,
+        return buildGroupSignalBytes(
             type = "G_SENDER_KEY",
             groupId = groupId,
             callId = callId,
@@ -2353,15 +2534,24 @@ class GroupCallManager private constructor(private val context: Context) {
         )
     }
 
-    private suspend fun sendGroupSignal(
+    private suspend fun sendSenderKeyPacket(
         targetOnion: String,
+        groupId: String,
+        callId: String,
+        epoch: Int,
+        rootSeed: ByteArray
+    ) {
+        val bytes = buildSenderKeySignalBytes(groupId, callId, epoch, rootSeed)
+        TorMessagingService.getInstance(context).sendCallSignalFrame(targetOnion, bytes)
+    }
+
+    private fun buildGroupSignalBytes(
         type: String,
         groupId: String,
         callId: String,
         extras: Map<String, Any> = emptyMap()
-    ): Boolean {
-        val messaging = TorMessagingService.getInstance(context)
-        val me = messaging.getMyContactInfo()
+    ): ByteArray {
+        val me = TorMessagingService.getInstance(context).getMyContactInfo()
         val obj = JSONObject().apply {
             put("scope", SCOPE_GROUP_CALL)
             put("type", type)
@@ -2381,8 +2571,17 @@ class GroupCallManager private constructor(private val context: Context) {
                 }
             }
         }
-        return messaging.sendCallSignalFrame(targetOnion, obj.toString().toByteArray(Charsets.UTF_8))
+        return obj.toString().toByteArray(Charsets.UTF_8)
     }
+
+    private suspend fun sendGroupSignal(
+        targetOnion: String,
+        type: String,
+        groupId: String,
+        callId: String,
+        extras: Map<String, Any> = emptyMap()
+    ): Boolean = TorMessagingService.getInstance(context)
+        .sendCallSignalFrame(targetOnion, buildGroupSignalBytes(type, groupId, callId, extras))
 
     private fun startIncomingRingtoneAndVibration() {
         try {

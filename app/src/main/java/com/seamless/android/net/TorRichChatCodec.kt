@@ -142,7 +142,7 @@ object TorRichChatCodec {
         return runCatching {
             val jsonStr = String(Base64.decode(b64, Base64.NO_WRAP), Charsets.UTF_8)
             val json = JSONObject(jsonStr)
-            val kind = json.optString("k", "").takeIf { it in setOf("photo", "voice", "file") }
+            val kind = json.optString("k", "").takeIf { it in setOf("photo", "voice", "video", "file") }
                 ?: return null
             val sha = json.optString("h", "")
                 .trim()
@@ -171,6 +171,7 @@ object TorRichChatCodec {
         val file = filePath?.takeIf { it.isNotBlank() }?.let(::File)
         val kind = when {
             mime.startsWith("audio/") -> "voice"
+            mime.startsWith("video/") -> "video"
             mime.startsWith("image/") -> "photo"
             else -> "file"
         }
@@ -230,6 +231,11 @@ object TorRichChatCodec {
                     val dur = if (desc.durationMs > 0) " (${formatDurationMs(desc.durationMs)})" else ""
                     "🎤 Voice message$dur"
                 }
+                "video" -> {
+                    val dur = if (desc.durationMs > 0) " (${formatDurationMs(desc.durationMs)})" else ""
+                    val label = desc.fileName.ifBlank { "Video" }
+                    "🎬 $label$dur"
+                }
                 "file" -> {
                     val pageSuffix = if (desc.pageCount > 0) " (${desc.pageCount} pages)" else ""
                     val fallback = if (desc.pageCount > 0) "PDF Document" else "Document"
@@ -240,6 +246,7 @@ object TorRichChatCodec {
         }
         val lowerMime = mimeType?.lowercase(Locale.US)
         if (lowerMime?.startsWith("audio/") == true) return "🎤 Voice message"
+        if (lowerMime?.startsWith("video/") == true) return "🎬 Video"
         if (lowerMime?.startsWith("image/") == true && (body == "Photo" || body.isBlank())) return "📷 Photo"
         if (lowerMime != null && !lowerMime.startsWith("image/") && body.isBlank()) return "📄 Document"
         return body

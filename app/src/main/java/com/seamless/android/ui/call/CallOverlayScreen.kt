@@ -1459,6 +1459,7 @@ private fun RemoteVideoTextureHost(
                     bitmap = bmp.asImageBitmap(),
                     contentDescription = "Remote peer video",
                     contentScale = if (cropFill) ContentScale.Crop else ContentScale.Fit,
+                    filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
                     modifier = Modifier.fillMaxSize()
                 )
             }

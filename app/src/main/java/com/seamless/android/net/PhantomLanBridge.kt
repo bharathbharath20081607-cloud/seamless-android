@@ -1,6 +1,7 @@
 package com.seamless.android.net
 
 import android.content.Context
+import android.net.wifi.WifiManager
 import android.util.Base64
 import android.util.Log
 import com.seamless.android.crypto.AegisTorCrypto
@@ -92,6 +93,7 @@ class PhantomLanBridge(
     @Volatile private var localTcpPort: Int = 0
     @Volatile private var udpSocket: DatagramSocket? = null
     @Volatile private var cachedLocalStaticKeys: Pair<ByteArray, ByteArray>? = null
+    @Volatile private var multicastLock: WifiManager.MulticastLock? = null
 
     private var acceptJob: Job? = null
     private var udpRecvJob: Job? = null
@@ -124,6 +126,13 @@ class PhantomLanBridge(
         }
 
         try {
+            runCatching {
+                val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                multicastLock = wifi?.createMulticastLock("seamless:phantom_lan")?.apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }
             val sock = DatagramSocket(null).apply {
                 reuseAddress = true
                 broadcast = true
@@ -140,6 +149,8 @@ class PhantomLanBridge(
 
     fun stop() {
         if (!running.compareAndSet(true, false)) return
+        runCatching { multicastLock?.let { if (it.isHeld) it.release() } }
+        multicastLock = null
         runCatching { tcpServer?.close() }
         runCatching { udpSocket?.close() }
         tcpServer = null
@@ -184,6 +195,33 @@ class PhantomLanBridge(
     fun hasActiveLanInterface(): Boolean {
         if (isStrictTorOnly()) return false
         return inspectLanInterfaces().hasUsableLan
+    }
+
+    fun invalidateEndpoint(onionAddress: String) {
+        val canonical = canonicalPeerKey(onionAddress)
+        if (canonical.isNotBlank()) {
+            verifiedEndpoints.remove(canonical)
+        }
+    }
+
+    fun triggerImmediateDiscoveryBurst() {
+        if (!running.get() || isStrictTorOnly()) return
+        val sock = udpSocket ?: return
+        val tcpPort = localTcpPort
+        if (tcpPort !in 1..65535 || sock.isClosed) return
+        scope.launch {
+            runCatching {
+                pruneExpiredEndpoints()
+                val interfaces = inspectLanInterfaces()
+                if (interfaces.broadcastAddresses.isNotEmpty()) {
+                    broadcastBeaconsOnce(sock, tcpPort, interfaces.broadcastAddresses)
+                    delay(160L)
+                    if (running.get() && !sock.isClosed && !isStrictTorOnly()) {
+                        broadcastBeaconsOnce(sock, tcpPort, interfaces.broadcastAddresses)
+                    }
+                }
+            }
+        }
     }
 
     private fun isStrictTorOnly(): Boolean =

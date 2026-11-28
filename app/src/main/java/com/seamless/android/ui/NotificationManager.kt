@@ -39,10 +39,12 @@ class NotificationManager(
         private const val TAG = "NotificationManager"
         private const val LEGACY_CHANNEL_ID = "bitchat_dm_notifications"
         private const val LEGACY_DM_CHANNEL_ID_V2 = "seamless_dm_notifications_v2"
+        private const val LEGACY_DM_CHANNEL_ID_V3 = "seamless_dm_notifications_v3"
         private const val LEGACY_GEOHASH_CHANNEL_ID = "bitchat_geohash_notifications"
         private const val LEGACY_GEOHASH_CHANNEL_ID_V2 = "seamless_geohash_notifications_v2"
-        const val CHANNEL_ID = "seamless_dm_notifications_v3"
-        const val GEOHASH_CHANNEL_ID = "seamless_geohash_notifications_v3"
+        private const val LEGACY_GEOHASH_CHANNEL_ID_V3 = "seamless_geohash_notifications_v3"
+        const val CHANNEL_ID = "seamless_dm_notifications_v4"
+        const val GEOHASH_CHANNEL_ID = "seamless_geohash_notifications_v4"
         const val ACTIVE_PEERS_CHANNEL_ID = "seamless_active_peers_v2"
         private const val WIFI_DIRECT_CHANNEL_ID = "bitchat_wifi_direct_notifications"
         private const val GROUP_KEY_DM = "bitchat_dm_group"
@@ -112,8 +114,10 @@ class NotificationManager(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching { systemNotificationManager.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
             runCatching { systemNotificationManager.deleteNotificationChannel(LEGACY_DM_CHANNEL_ID_V2) }
+            runCatching { systemNotificationManager.deleteNotificationChannel(LEGACY_DM_CHANNEL_ID_V3) }
             runCatching { systemNotificationManager.deleteNotificationChannel(LEGACY_GEOHASH_CHANNEL_ID) }
             runCatching { systemNotificationManager.deleteNotificationChannel(LEGACY_GEOHASH_CHANNEL_ID_V2) }
+            runCatching { systemNotificationManager.deleteNotificationChannel(LEGACY_GEOHASH_CHANNEL_ID_V3) }
 
             val soundUri = getSeamlessSoundUri()
             val audioAttributes = AudioAttributes.Builder()

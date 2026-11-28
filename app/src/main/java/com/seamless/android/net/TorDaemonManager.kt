@@ -955,12 +955,12 @@ class TorDaemonManager private constructor(private val application: Application)
     private fun applyMobileTorConfig() {
         val ok = sendControlCommands(
             listOf(
-                "SETCONF KeepalivePeriod=30 NewCircuitPeriod=30 MaxCircuitDirtiness=600 LearnCircuitBuildTimeout=1 NumEntryGuards=2 SocksTimeout=45 CircuitStreamTimeout=20 ConnectionPadding=auto UseMicrodescriptors=1"
+                "SETCONF KeepalivePeriod=25 NewCircuitPeriod=20 MaxCircuitDirtiness=600 LearnCircuitBuildTimeout=1 NumEntryGuards=2 SocksTimeout=45 CircuitStreamTimeout=20 ConnectionPadding=auto UseMicrodescriptors=1"
             )
         )
         runCatching {
             sendControlCommands(
-                listOf("SETCONF HiddenServicePoWDefensesEnabled=1 HiddenServiceNumIntroductionPoints=5")
+                listOf("SETCONF HiddenServicePoWDefensesEnabled=1 HiddenServiceNumIntroductionPoints=4 HiddenServiceMaxStreamsCloseCircuit=0")
             )
         }
         runCatching {
@@ -1012,8 +1012,8 @@ class TorDaemonManager private constructor(private val application: Application)
                 }
                 hasV4 && hasV6 -> {
                     wrapper.enableIpv6(false)
-                    sendControlCommands(listOf("SETCONF ClientUseIPv4=1 ClientUseIPv6=1"))
-                    Log.i(TAG, "Dual-stack mode enabled (ClientUseIPv4=1 ClientUseIPv6=1)")
+                    sendControlCommands(listOf("SETCONF ClientUseIPv4=1 ClientUseIPv6=1 ClientPreferIPv6ORPort=0"))
+                    Log.i(TAG, "Dual-stack IPv4-preferred mode enabled (ClientUseIPv4=1 ClientUseIPv6=1 ClientPreferIPv6ORPort=0)")
                 }
                 else -> {
                     wrapper.enableIpv6(false)
@@ -1064,8 +1064,8 @@ class TorDaemonManager private constructor(private val application: Application)
             // transitions, and append pluggable transport bridges when enabled.
             val baseTorrc = buildString {
                 appendLine("ClientOnly 1")
-                appendLine("KeepalivePeriod 30")
-                appendLine("NewCircuitPeriod 15")
+                appendLine("KeepalivePeriod 25")
+                appendLine("NewCircuitPeriod 20")
                 appendLine("MaxCircuitDirtiness 600")
                 appendLine("CircuitBuildTimeout 25")
                 appendLine("LearnCircuitBuildTimeout 1")

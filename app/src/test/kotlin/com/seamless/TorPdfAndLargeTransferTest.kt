@@ -236,6 +236,7 @@ class TorPdfAndLargeTransferTest {
             assertFalse(snapshotFile.readText(Charsets.UTF_8).contains(recipient))
         } finally {
             queue.clearAll()
+            transfer.closeOutgoingReadHandle(srcFile.absolutePath)
             srcFile.delete()
         }
     }
@@ -268,5 +269,110 @@ class TorPdfAndLargeTransferTest {
         assertNotNull(cite)
         assertEquals(7, cite!!.pageNumber)
         assertEquals("Check the key rotation diagram", cite.note)
+    }
+
+    @Test
+    fun videoSharing_preservesVideoMimeExtensionsDescriptorAndPooledChunkReads() {
+        assertEquals("video/mp4", TorAttachmentTransfer.normalizeSupportedMimeType("video/mp4; codecs=\"avc1\""))
+        assertEquals("video/quicktime", TorAttachmentTransfer.normalizeSupportedMimeType("video/mov"))
+        assertEquals("video/x-matroska", TorAttachmentTransfer.normalizeSupportedMimeType("video/mkv"))
+        assertEquals("video/webm", TorAttachmentTransfer.normalizeSupportedMimeType("video/webm"))
+
+        val sha = "abcdef01".repeat(8)
+        val encoded = TorRichChatCodec.encodeAttachmentDescriptor(
+            TorRichChatCodec.AttachmentDescriptor(
+                kind = "video",
+                fileName = "clip.mp4",
+                totalBytes = 4_200_000,
+                durationMs = 14_000,
+                viewOnce = false,
+                sha256 = sha
+            )
+        )
+        val parsed = TorRichChatCodec.parseAttachmentDescriptor(encoded)
+        assertNotNull(parsed)
+        assertEquals("video", parsed!!.kind)
+        assertEquals("clip.mp4", parsed.fileName)
+        assertEquals(14_000, parsed.durationMs)
+        assertEquals("🎬 clip.mp4 (0:14)", TorRichChatCodec.friendlyPreviewText(encoded, "video/mp4"))
+        assertEquals("video", TorRichChatCodec.inferDescriptor("", "video/mp4", null)?.kind)
+
+        val transfer = TorAttachmentTransfer(context)
+        val senderOnion = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef12.onion:18888"
+        val videoBytes = ByteArray(TorAttachmentTransfer.CHUNK_BYTES * TorAttachmentTransfer.FOUNTAIN_BLOCK_SIZE + 512) {
+            ((it * 29) xor 0x33).toByte()
+        }
+        val expectedSha = MessageDigest.getInstance("SHA-256")
+            .digest(videoBytes)
+            .joinToString("") { "%02x".format(it) }
+        val transferId = UUID.randomUUID()
+        val staged = transfer.stageOutgoingFromStream(
+            transferId = transferId,
+            input = ByteArrayInputStream(videoBytes),
+            mimeType = "video/mp4"
+        )
+        val srcFile = File(staged.path)
+        try {
+            val meta = transfer.createMeta(
+                transferId = transferId,
+                mimeType = "video/mp4",
+                totalBytes = staged.totalBytes,
+                senderPublicKey = senderPubHex,
+                fileName = "clip.mp4",
+                durationMs = 14_000,
+                sha256Hex = expectedSha
+            )
+            assertTrue(transfer.beginIncoming(senderOnion, UUID.randomUUID(), System.currentTimeMillis(), meta))
+            var completedPath: String? = null
+            for (idx in 0 until meta.chunkCount) {
+                val payload = transfer.readChunkPayloadFromFile(srcFile, transferId, idx, totalBytes = staged.totalBytes)
+                val res = transfer.acceptChunk(senderOnion, payload)
+                if (res is TorAttachmentTransfer.ChunkResult.Accepted && res.completed != null) {
+                    completedPath = res.completed!!.path
+                }
+            }
+            assertNotNull("Expected video transfer to complete via pooled RandomAccessFile reads", completedPath)
+            assertTrue("Expected .mp4 output extension", completedPath!!.endsWith(".mp4"))
+            assertArrayEquals(videoBytes, File(completedPath).readBytes())
+            transfer.closeOutgoingReadHandle(srcFile.absolutePath)
+            transfer.completeIncoming(senderOnion, transferId)
+            File(completedPath).delete()
+        } finally {
+            transfer.closeOutgoingReadHandle(srcFile.absolutePath)
+            srcFile.delete()
+        }
+    }
+
+    @Test
+    fun messageQueue_supports384ChunkWindowBatchAckAndRetryWakeup() = runBlocking {
+        assertEquals(384, OnionMessageQueue.ATTACHMENT_WINDOW_SIZE)
+        assertEquals(96, OnionMessageQueue.ATTACHMENT_DISPATCH_SLICE)
+
+        val queue = OnionMessageQueue.getInstance(context)
+        queue.clearAll()
+        try {
+            val recipient = "peer23456789012345678901234567890123456789012345678901234.onion:18888"
+            val uiMsgId = UUID.randomUUID().toString()
+            val frame1 = OnionMessageProtocol.createMessageFrame("part1", 1L)
+            val frame2 = OnionMessageProtocol.createMessageFrame("part2", 2L)
+            val ids = queue.enqueueBatch(
+                recipient,
+                listOf(
+                    OnionMessageQueue.BatchFrameSpec(frame1, uiMessageId = uiMsgId, completesUiMessage = false),
+                    OnionMessageQueue.BatchFrameSpec(frame2, uiMessageId = uiMsgId, completesUiMessage = true)
+                )
+            )
+            queue.markSentBatch(ids)
+            queue.handleSendFailure(ids[0], "Timeout")
+            val woken = queue.resetFailedOrPendingForUiMessage(uiMsgId)
+            assertEquals(2, woken)
+
+            queue.markDeliveredBatch(ids)
+            assertEquals(OnionMessageProtocol.DeliveryState.DELIVERED, queue.getDeliveryStatus(ids[0]))
+            assertEquals(OnionMessageProtocol.DeliveryState.DELIVERED, queue.getDeliveryStatus(ids[1]))
+            assertTrue(queue.getPendingMessages(recipient).isEmpty())
+        } finally {
+            queue.clearAll()
+        }
     }
 }
