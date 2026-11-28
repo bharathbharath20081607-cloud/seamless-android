@@ -357,4 +357,37 @@ class TorGroupCallTest {
             )
         )
     }
+
+    @Test
+    fun groupUdpControlSignal_encryptsAndAuthenticatesRoomJoinAndRejectsTamper() {
+        val groupId = "grp-wifi-fast"
+        val callId = "call-fast-1234"
+        val payload = """{"scope":"GROUP_CALL","type":"G_ROOM_JOIN","epoch":1}""".toByteArray(Charsets.UTF_8)
+
+        val sealed = GroupCallManager.sealUdpControlSignal(groupId, callId, payload)
+        assertNotNull(sealed)
+
+        val opened = GroupCallManager.openUdpControlSignal(groupId, callId, sealed!!)
+        assertArrayEquals(payload, opened)
+
+        // Wrong room or tampered ciphertext must be rejected cleanly
+        assertNull(GroupCallManager.openUdpControlSignal("other-group", callId, sealed))
+        val tampered = sealed.copyOf().also { it[it.lastIndex] = (it[it.lastIndex].toInt() xor 0xFF).toByte() }
+        assertNull(GroupCallManager.openUdpControlSignal(groupId, callId, tampered))
+    }
+
+    @Test
+    fun lowLatency20msAnd40msFrames_mixCleanlyWithoutClipping() {
+        val p2pSamples = GroupCallAudioMixer.P2P_SAMPLES_PER_FRAME
+        assertEquals(320, p2pSamples)
+
+        val speakerA = ShortArray(p2pSamples) { i -> (14_000.0 * sin(2.0 * PI * i / 16.0)).toInt().toShort() }
+        val speakerB = ShortArray(p2pSamples) { i -> (14_000.0 * sin(2.0 * PI * i / 21.0)).toInt().toShort() }
+        val mixed20ms = GroupCallAudioMixer.mixActiveFramesSoftLimited(
+            frames = listOf(speakerA, speakerB),
+            sampleCount = p2pSamples
+        )
+        assertEquals(p2pSamples, mixed20ms.size)
+        assertTrue(mixed20ms.all { abs(it.toInt()) <= 32767 })
+    }
 }

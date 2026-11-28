@@ -11,6 +11,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.pdf.PdfDocument
 import android.graphics.pdf.PdfRenderer
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -165,7 +166,8 @@ internal object PdfDocumentTools {
         val isPdf: Boolean,
         val pageCount: Int = 0,
         val isPasswordProtected: Boolean = false,
-        val coverPreviewBytes: ByteArray? = null
+        val coverPreviewBytes: ByteArray? = null,
+        val durationMs: Int = 0
     )
 
     class PdfSession private constructor(
@@ -376,10 +378,12 @@ internal object PdfDocumentTools {
                 normMime == "application/pdf" ||
                 safeName.lowercase(Locale.US).endsWith(".pdf")
             val effectiveMime = if (isPdf) "application/pdf" else normMime
+            val isVideo = effectiveMime.startsWith("video/")
 
             var pageCount = 0
             var passwordProtected = false
             var coverPreview: ByteArray? = null
+            var durationMs = 0
 
             if (isPdf) {
                 PdfSession.open(stageFile).fold(
@@ -403,6 +407,22 @@ internal object PdfDocumentTools {
                         }
                     }
                 )
+            } else if (isVideo) {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(stageFile.absolutePath)
+                    durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                        ?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+                    val posterBmp = retriever.getFrameAtTime(150_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        ?: retriever.getFrameAtTime(0L)
+                    if (posterBmp != null) {
+                        coverPreview = compressCoverPreviewWebp(posterBmp)
+                        posterBmp.recycle()
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    runCatching { retriever.release() }
+                }
             }
 
             StagedDocument(
@@ -414,7 +434,8 @@ internal object PdfDocumentTools {
                 isPdf = isPdf,
                 pageCount = pageCount,
                 isPasswordProtected = passwordProtected,
-                coverPreviewBytes = coverPreview
+                coverPreviewBytes = coverPreview,
+                durationMs = durationMs
             )
         }
     }

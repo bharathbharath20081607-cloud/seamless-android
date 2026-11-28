@@ -55,7 +55,7 @@ class TorGroupMessaging private constructor(context: Context) {
         private const val PENDING_EVENT_TTL_MS = 24 * 60 * 60 * 1000L
         private const val INVITE_PART_TTL_MS = 10 * 60 * 1000L
         private const val MAX_SYNC_BATCH_EVENTS = 24
-        private const val SYNC_OFFER_COOLDOWN_MS = 30_000L
+        private const val SYNC_OFFER_COOLDOWN_MS = 10_000L
         private const val ECHO_SWARM_FANOUT = 2
         private const val MAX_DISAPPEARING_TTL_MS = 30L * 24L * 60L * 60L * 1000L
         private const val MIN_DISAPPEARING_TTL_MS = 60_000L
@@ -1587,6 +1587,11 @@ class TorGroupMessaging private constructor(context: Context) {
             "audio/wav" -> "wav"
             "audio/3gpp" -> "3gp"
             "audio/webm" -> "webm"
+            "video/mp4" -> "mp4"
+            "video/webm" -> "webm"
+            "video/3gpp" -> "3gp"
+            "video/quicktime" -> "mov"
+            "video/x-matroska" -> "mkv"
             "application/pdf" -> "pdf"
             "text/plain" -> "txt"
             "text/csv" -> "csv"
@@ -1621,6 +1626,7 @@ class TorGroupMessaging private constructor(context: Context) {
             ?: digest.digest().joinToString("") { "%02x".format(it) }
         val kind = when {
             normalizedMime.startsWith("audio/") -> "voice"
+            normalizedMime.startsWith("video/") -> "video"
             normalizedMime.startsWith("image/") -> "photo"
             else -> "file"
         }
@@ -1812,6 +1818,7 @@ class TorGroupMessaging private constructor(context: Context) {
         val normalizedMime = TorAttachmentTransfer.normalizeSupportedMimeType(mimeType)
         val kind = when {
             normalizedMime.startsWith("audio/") -> "voice"
+            normalizedMime.startsWith("video/") -> "video"
             normalizedMime.startsWith("image/") -> "photo"
             else -> "file"
         }

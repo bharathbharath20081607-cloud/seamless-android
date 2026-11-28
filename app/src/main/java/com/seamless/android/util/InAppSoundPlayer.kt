@@ -8,6 +8,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.seamless.android.R
 import com.seamless.android.call.CallState
+import com.seamless.android.call.GroupCallManager
 import com.seamless.android.call.SeamlessCallManager
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
@@ -30,10 +31,12 @@ object InAppSoundPlayer {
 
         val inCall = runCatching {
             val state = SeamlessCallManager.getInstance(appContext).sessionFlow.value?.state
-            state == CallState.OUTGOING_DIALING ||
+            val inDirectCall = state == CallState.OUTGOING_DIALING ||
                 state == CallState.OUTGOING_RINGING ||
                 state == CallState.INCOMING_RINGING ||
                 state == CallState.ACTIVE
+            val inGroupCall = GroupCallManager.getInstance(appContext).sessionFlow.value != null
+            inDirectCall || inGroupCall
         }.getOrDefault(false)
         if (inCall) return
 

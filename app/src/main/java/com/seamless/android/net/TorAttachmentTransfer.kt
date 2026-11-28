@@ -47,6 +47,9 @@ class TorAttachmentTransfer(private val context: Context) {
             "audio/mp4", "audio/m4a", "audio/aac", "audio/ogg",
             "audio/mpeg", "audio/wav", "audio/3gpp", "audio/webm"
         )
+        private val SUPPORTED_VIDEO_MIME_TYPES = setOf(
+            "video/mp4", "video/webm", "video/3gpp", "video/quicktime", "video/x-matroska"
+        )
         private val SUPPORTED_DOCUMENT_MIME_TYPES = setOf(
             "application/pdf",
             "text/plain",
@@ -104,8 +107,11 @@ class TorAttachmentTransfer(private val context: Context) {
             val clean = rawMime.trim().lowercase().substringBefore(';').trim()
             if (clean.isBlank()) return "application/octet-stream"
             if (clean == "image/jpg") return "image/jpeg"
+            if (clean == "video/mov") return "video/quicktime"
+            if (clean == "video/mkv") return "video/x-matroska"
             if (clean in SUPPORTED_IMAGE_MIME_TYPES ||
                 clean in SUPPORTED_AUDIO_MIME_TYPES ||
+                clean in SUPPORTED_VIDEO_MIME_TYPES ||
                 clean in SUPPORTED_DOCUMENT_MIME_TYPES
             ) {
                 return clean
@@ -199,7 +205,14 @@ class TorAttachmentTransfer(private val context: Context) {
         @Volatile var lastActivityAtMs: Long = System.currentTimeMillis()
     )
 
+    private class CachedReadRaf(
+        val raf: RandomAccessFile,
+        val fileLength: Long,
+        @Volatile var lastUsedMs: Long = System.currentTimeMillis()
+    )
+
     private val incoming = ConcurrentHashMap<String, IncomingTransfer>()
+    private val outgoingReadRafs = ConcurrentHashMap<String, CachedReadRaf>()
     private val incomingMetaByTransferId = ConcurrentHashMap<UUID, Meta>()
     private val completedIncoming = ConcurrentHashMap<String, CompletedAttachment>()
     private val transferSenders = ConcurrentHashMap<UUID, String>()
@@ -735,6 +748,19 @@ class TorAttachmentTransfer(private val context: Context) {
                 .filter { now - it.value > RECEIPT_TTL_MS }
                 .forEach { recentCompletedReceipts.remove(it.key) }
         }
+        val staleRafs = outgoingReadRafs.entries.filter { now - it.value.lastUsedMs > 120_000L }
+        for ((path, cached) in staleRafs) {
+            if (outgoingReadRafs.remove(path, cached)) {
+                synchronized(cached) { runCatching { cached.raf.close() } }
+            }
+        }
+    }
+
+    fun closeOutgoingReadHandle(sourcePath: String) {
+        if (sourcePath.isBlank()) return
+        outgoingReadRafs.remove(sourcePath)?.let { cached ->
+            synchronized(cached) { runCatching { cached.raf.close() } }
+        }
     }
 
     /** Clears resumable transfer state only after the chat row is durable. */
@@ -840,6 +866,34 @@ class TorAttachmentTransfer(private val context: Context) {
         }
     }
 
+    private fun getOrOpenReadRaf(sourceFile: File): CachedReadRaf {
+        val path = sourceFile.absolutePath
+        val now = System.currentTimeMillis()
+        val len = sourceFile.length()
+        val existing = outgoingReadRafs[path]
+        if (existing != null && existing.fileLength == len) {
+            existing.lastUsedMs = now
+            return existing
+        }
+        if (existing != null && outgoingReadRafs.remove(path, existing)) {
+            synchronized(existing) { runCatching { existing.raf.close() } }
+        }
+        if (outgoingReadRafs.size >= 16) {
+            val oldest = outgoingReadRafs.entries.minByOrNull { it.value.lastUsedMs }
+            if (oldest != null && outgoingReadRafs.remove(oldest.key, oldest.value)) {
+                synchronized(oldest.value) { runCatching { oldest.value.raf.close() } }
+            }
+        }
+        val created = CachedReadRaf(RandomAccessFile(sourceFile, "r"), len, now)
+        val raced = outgoingReadRafs.putIfAbsent(path, created)
+        if (raced != null && raced.fileLength == len) {
+            runCatching { created.raf.close() }
+            raced.lastUsedMs = now
+            return raced
+        }
+        return created
+    }
+
     fun readChunkPayloadFromFile(
         sourceFile: File,
         transferId: UUID,
@@ -851,9 +905,21 @@ class TorAttachmentTransfer(private val context: Context) {
         val expectedLen = minOf(stride, totalBytes - offset.toInt())
         require(offset >= 0L && expectedLen in 1..CHUNK_BYTES) { "Invalid disk chunk bounds ($index)" }
         val chunk = ByteArray(expectedLen)
-        RandomAccessFile(sourceFile, "r").use { raf ->
-            raf.seek(offset)
-            raf.readFully(chunk, 0, expectedLen)
+        val cached = getOrOpenReadRaf(sourceFile)
+        synchronized(cached) {
+            try {
+                cached.raf.seek(offset)
+                cached.raf.readFully(chunk, 0, expectedLen)
+                cached.lastUsedMs = System.currentTimeMillis()
+            } catch (_: Exception) {
+                if (outgoingReadRafs.remove(sourceFile.absolutePath, cached)) {
+                    runCatching { cached.raf.close() }
+                }
+                RandomAccessFile(sourceFile, "r").use { raf ->
+                    raf.seek(offset)
+                    raf.readFully(chunk, 0, expectedLen)
+                }
+            }
         }
         return encodeChunk(transferId, index, chunk)
     }
@@ -875,14 +941,33 @@ class TorAttachmentTransfer(private val context: Context) {
         require(maxLen in 1..CHUNK_BYTES) { "Invalid parity block bounds ($blockIndex)" }
         val xorBytes = ByteArray(maxLen)
         val scratch = ByteArray(stride)
-        RandomAccessFile(sourceFile, "r").use { raf ->
-            for (idx in startIdx until endIdx) {
-                val len = minOf(stride, totalBytes - idx * stride)
-                if (len <= 0) continue
-                raf.seek(idx.toLong() * stride)
-                raf.readFully(scratch, 0, len)
-                for (j in 0 until len) {
-                    xorBytes[j] = (xorBytes[j].toInt() xor (scratch[j].toInt() and 0xFF)).toByte()
+        val cached = getOrOpenReadRaf(sourceFile)
+        synchronized(cached) {
+            try {
+                for (idx in startIdx until endIdx) {
+                    val len = minOf(stride, totalBytes - idx * stride)
+                    if (len <= 0) continue
+                    cached.raf.seek(idx.toLong() * stride)
+                    cached.raf.readFully(scratch, 0, len)
+                    for (j in 0 until len) {
+                        xorBytes[j] = (xorBytes[j].toInt() xor (scratch[j].toInt() and 0xFF)).toByte()
+                    }
+                }
+                cached.lastUsedMs = System.currentTimeMillis()
+            } catch (_: Exception) {
+                if (outgoingReadRafs.remove(sourceFile.absolutePath, cached)) {
+                    runCatching { cached.raf.close() }
+                }
+                RandomAccessFile(sourceFile, "r").use { raf ->
+                    for (idx in startIdx until endIdx) {
+                        val len = minOf(stride, totalBytes - idx * stride)
+                        if (len <= 0) continue
+                        raf.seek(idx.toLong() * stride)
+                        raf.readFully(scratch, 0, len)
+                        for (j in 0 until len) {
+                            xorBytes[j] = (xorBytes[j].toInt() xor (scratch[j].toInt() and 0xFF)).toByte()
+                        }
+                    }
                 }
             }
         }
@@ -1098,6 +1183,11 @@ class TorAttachmentTransfer(private val context: Context) {
             "audio/wav" -> "wav"
             "audio/3gpp" -> "3gp"
             "audio/webm" -> "webm"
+            "video/mp4" -> "mp4"
+            "video/webm" -> "webm"
+            "video/3gpp" -> "3gp"
+            "video/quicktime" -> "mov"
+            "video/x-matroska" -> "mkv"
             "application/pdf" -> "pdf"
             "text/plain" -> "txt"
             "text/csv" -> "csv"

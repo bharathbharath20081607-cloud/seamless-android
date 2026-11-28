@@ -345,6 +345,8 @@ class TorMessagingService private constructor(private val context: Context) {
     private val secureRandom = SecureRandom()
     private val peerBulkChannels = ConcurrentHashMap<String, Channel<ByteArray>>()
     private val peerBulkWorkers = ConcurrentHashMap<String, Job>()
+    private val pendingBulkAckIds = ConcurrentHashMap<String, MutableList<UUID>>()
+    private val bulkAckFlushJobs = ConcurrentHashMap<String, Job>()
     private val directSendCounters = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
     private val directReplayWindows = ConcurrentHashMap<String, com.seamless.android.crypto.AegisTorCrypto.ReplayWindow512>()
     private val deferredFinalChunkIds = ConcurrentHashMap<String, UUID>()
@@ -476,6 +478,7 @@ class TorMessagingService private constructor(private val context: Context) {
             circuitManager.preferIncomingResolver = { peer -> shouldPreferIncomingCircuit(peer) }
             circuitManager.bulkHelloFrameProvider = { peer -> createEncryptedBulkHelloFrame(peer) }
             circuitManager.lanEndpointResolver = { peer -> phantomLanBridge.getVerifiedLanEndpoint(peer) }
+            circuitManager.lanEndpointInvalidator = { peer -> phantomLanBridge.invalidateEndpoint(peer) }
 
             // ━━━ START HIDDEN SERVICE (inbound) ━━━
             // This makes us reachable via .onion address.
@@ -586,6 +589,7 @@ class TorMessagingService private constructor(private val context: Context) {
         syncEngine.stopSyncLoop()
         phantomLanBridge.stop()
         circuitManager.lanEndpointResolver = null
+        circuitManager.lanEndpointInvalidator = null
         _lanPeersFlow.value = emptySet()
         circuitManager.disconnectAll()
         hiddenServiceManager.stop()
@@ -1018,6 +1022,7 @@ class TorMessagingService private constructor(private val context: Context) {
             val now = System.currentTimeMillis()
             val kind = when {
                 meta.mimeType.startsWith("audio/") -> "voice"
+                meta.mimeType.startsWith("video/") -> "video"
                 meta.mimeType.startsWith("image/") -> "photo"
                 else -> "file"
             }
@@ -1303,6 +1308,33 @@ class TorMessagingService private constructor(private val context: Context) {
                 )
             )
             sendMessageToOnion(contact.onionAddress, ctrl, completesUiMessage = false)
+        }
+    }
+
+    /** 1-tap retry for queued, un-acked, or failed 1-to-1 Tor P2P messages or attachments. */
+    suspend fun retryDirectMessage(contactId: String, messageId: String): Result<Unit> = runCatching {
+        val contact = requireNotNull(contactManager.getContact(contactId)) { "Contact not found" }
+        val existing = messageRepository.getMessage(messageId)
+        triggerLanDiscoveryBurst()
+        scope.launch { runCatching { refreshPeerConnection(contactId) } }
+        val woken = messageQueue.resetFailedOrPendingForUiMessage(messageId)
+        if (woken > 0) {
+            messageRepository.updateDeliveryState(messageId, OnionMessageProtocol.DeliveryState.PENDING)
+            dispatchRecipientNow(contact.onionAddress)
+            return@runCatching
+        }
+        if (existing != null && existing.isFromMe && existing.attachmentPath == null) {
+            val uuid = runCatching { UUID.fromString(existing.id) }.getOrDefault(UUID.randomUUID())
+            val replyId = TorRichChatCodec.parseReply(existing.text).replyToId
+            sendMessageToOnion(
+                recipientOnion = contact.onionAddress,
+                text = existing.text,
+                replyToId = replyId,
+                messageId = uuid
+            ).getOrThrow()
+            messageRepository.updateDeliveryState(existing.id, OnionMessageProtocol.DeliveryState.PENDING)
+        } else {
+            error("No pending Tor frames to retry")
         }
     }
 
@@ -1597,6 +1629,26 @@ class TorMessagingService private constructor(private val context: Context) {
                 scope.launch { pingPeer(canonical) }
             }
         }
+    }
+
+    fun triggerLanDiscoveryBurst() {
+        phantomLanBridge.triggerImmediateDiscoveryBurst()
+    }
+
+    suspend fun preparePeerForUrgentCallSignal(recipientOnion: String) {
+        phantomLanBridge.triggerImmediateDiscoveryBurst()
+        val canonical = canonicalPeerKey(recipientOnion)
+        if (canonical.isBlank()) return
+        if (!circuitManager.isLanDirectConnection(canonical) && circuitManager.upgradeToLanIfAvailable(canonical)) {
+            refreshLanPeersState()
+            ensureReadLoop(canonical)
+            return
+        }
+        if (circuitManager.recycleIfSilent(canonical, 8_000L)) {
+            peersIntroducedOnConnection.remove(canonical)
+            introducedConnectionIds.remove(canonical)
+        }
+        circuitManager.ensureBulkConnectionAsync(canonical)
     }
 
     /**
@@ -2568,6 +2620,9 @@ class TorMessagingService private constructor(private val context: Context) {
                                 )
                             }
                         }
+                        if (!isCallActive && messageQueue.getPendingMessages(recipientOnion).isNotEmpty()) {
+                            wakeQueueDispatcher()
+                        }
                         Log.i(TAG, "⚡ Delivered bulk burst (${slice.size} frames) to ${redactEndpoint(recipientOnion)}")
                     } else if (!isCallActive) {
                         peersIntroducedOnConnection.remove(recipientOnion)
@@ -3305,6 +3360,54 @@ class TorMessagingService private constructor(private val context: Context) {
         return true
     }
 
+    private fun enqueueCoalescedChunkAck(senderOnion: String, messageId: UUID) {
+        val canonical = canonicalPeerKey(senderOnion)
+        val batch = pendingBulkAckIds.getOrPut(canonical) { ArrayList(24) }
+        val flushNow = synchronized(batch) {
+            batch.add(messageId)
+            batch.size >= 24
+        }
+        if (flushNow) {
+            bulkAckFlushJobs.remove(canonical)?.cancel()
+            scope.launch { flushCoalescedChunkAcks(canonical) }
+            return
+        }
+        val job = bulkAckFlushJobs[canonical]
+        if (job == null || !job.isActive) {
+            bulkAckFlushJobs[canonical] = scope.launch {
+                delay(30L)
+                flushCoalescedChunkAcks(canonical)
+            }
+        }
+    }
+
+    private suspend fun flushCoalescedChunkAcks(senderOnion: String) {
+        val canonical = canonicalPeerKey(senderOnion)
+        val batch = pendingBulkAckIds[canonical] ?: return
+        val ids = synchronized(batch) {
+            if (batch.isEmpty()) emptyList()
+            else batch.toList().also { batch.clear() }
+        }
+        if (ids.isEmpty()) return
+        try {
+            val seqManager = getSequenceManager(canonical)
+            val ackFrames = ids.map { msgId ->
+                OnionMessageProtocol.createAckFrame(msgId, seqManager.nextOutbound())
+            }
+            if (circuitManager.hasActiveConnection(canonical) || circuitManager.hasActiveBulkConnection(canonical)) {
+                val wireFrames = ackFrames.map { encryptFrame(canonical, it).encode() }
+                if (circuitManager.sendBulkFramesBurst(canonical, wireFrames, allowPrimaryFallback = true)) {
+                    return
+                }
+            }
+            for (ack in ackFrames) {
+                storeAckInSenderMailbox(canonical, ack)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Coalesced chunk ACK flush failed for ${redactEndpoint(canonical)}: ${e.message}")
+        }
+    }
+
     private suspend fun sendMessageAck(senderOnion: String, messageId: UUID) {
         try {
             val ackFrame = OnionMessageProtocol.createAckFrame(
@@ -3439,10 +3542,11 @@ class TorMessagingService private constructor(private val context: Context) {
         val previewBytes = meta.previewBytes
         val kind = when {
             meta.mimeType.startsWith("audio/") -> "voice"
+            meta.mimeType.startsWith("video/") -> "video"
             meta.mimeType.startsWith("image/") -> "photo"
             else -> "file"
         }
-        val shouldCreateEarlyCard = !meta.viewOnce && ((previewBytes != null && previewBytes.isNotEmpty()) || kind == "file")
+        val shouldCreateEarlyCard = !meta.viewOnce && ((previewBytes != null && previewBytes.isNotEmpty()) || kind == "file" || kind == "video")
         if (shouldCreateEarlyCard) {
             val contact = meta.senderPublicKey
                 .takeIf { it.isNotBlank() }
@@ -3450,7 +3554,7 @@ class TorMessagingService private constructor(private val context: Context) {
                 ?: contactManager.getContactByOnion(senderOnion)
             val previewPath = previewBytes?.takeIf { it.isNotEmpty() }
                 ?.let { attachmentTransfer.savePreview(meta.transferId, it) }
-                ?: if (kind == "file") attachmentTransfer.saveStreamingPlaceholder(meta.transferId) else null
+                ?: if (kind == "file" || kind == "video") attachmentTransfer.saveStreamingPlaceholder(meta.transferId) else null
             if (contact != null && previewPath != null) {
                 val earlyText = if (kind == "photo" && meta.fileName.isBlank()) {
                     "Photo"
@@ -3531,7 +3635,7 @@ class TorMessagingService private constructor(private val context: Context) {
                 deferredFinalChunkIds[transferId.toString()] = frame.messageId
                 return true
             }
-            sendMessageAck(senderOnion, frame.messageId)
+            enqueueCoalescedChunkAck(senderOnion, frame.messageId)
             return true
         }
         return finalizeCompletedAttachment(senderOnion, frame, completed)
@@ -3550,7 +3654,7 @@ class TorMessagingService private constructor(private val context: Context) {
         }
         val completed = (result as TorAttachmentTransfer.ChunkResult.Accepted).completed
         if (completed == null) {
-            sendMessageAck(senderOnion, frame.messageId)
+            enqueueCoalescedChunkAck(senderOnion, frame.messageId)
             return true
         }
         return finalizeCompletedAttachment(senderOnion, frame, completed)
@@ -3596,6 +3700,7 @@ class TorMessagingService private constructor(private val context: Context) {
         val hadPreview = previewShownTransfers.remove(completed.transferId.toString())
         val kind = when {
             completed.mimeType.startsWith("audio/") -> "voice"
+            completed.mimeType.startsWith("video/") -> "video"
             completed.mimeType.startsWith("image/") -> "photo"
             else -> "file"
         }
@@ -3642,6 +3747,7 @@ class TorMessagingService private constructor(private val context: Context) {
             deduplicator.forget(frame.messageId)
             return false
         }
+        flushCoalescedChunkAcks(senderOnion)
         sendMessageAck(senderOnion, frame.messageId)
         deferredFinalChunkIds.remove(completed.transferId.toString())
             ?.takeIf { it != frame.messageId }
@@ -3690,6 +3796,7 @@ class TorMessagingService private constructor(private val context: Context) {
 
         if (queuedMessage != null) {
             if (!queuedMessage.completesUiMessage) return
+            queuedMessage.lazyFileSpec?.sourcePath?.let { attachmentTransfer.closeOutgoingReadHandle(it) }
             // A final photo receipt proves the mailbox/direct transfer is
             // complete. Discard its metadata and intermediate chunks together.
             messageQueue.markAttachmentDelivered(queuedMessage.uiMessageId)

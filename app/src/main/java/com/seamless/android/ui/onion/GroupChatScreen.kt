@@ -203,6 +203,21 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
     var pendingPdfStudioDoc by remember(group.groupId) { mutableStateOf<PdfDocumentTools.StagedDocument?>(null) }
     var pendingPdfBurnArmed by remember(group.groupId) { mutableStateOf(false) }
     var activePdfTarget by remember(group.groupId) { mutableStateOf<Triple<GroupMessageEntity, Int, File>?>(null) }
+    var activeVideoTarget by remember(group.groupId) { mutableStateOf<Triple<GroupMessageEntity, String, File>?>(null) }
+
+    fun openGroupVideoMessage(target: GroupMessageEntity) {
+        val file = target.attachmentPath
+            ?.takeIf { !TorAttachmentTransfer.isTemporaryAttachmentPath(it) }
+            ?.let(::File)
+            ?.takeIf { it.exists() && it.isFile }
+        if (file == null) {
+            Toast.makeText(context, "Video is still transferring or unavailable", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val desc = TorRichChatCodec.inferDescriptor(target.text, target.attachmentMimeType, target.attachmentPath)
+        val safeName = desc?.fileName?.ifBlank { file.name } ?: file.name
+        activeVideoTarget = Triple(target, safeName, file)
+    }
 
     fun openGroupPdfMessage(target: GroupMessageEntity, initialPageOneBased: Int = 1) {
         val file = target.attachmentPath
@@ -306,6 +321,36 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                     viewOnce = useViewOnce,
                     previewBytes = if (useViewOnce) null else prepared.previewBytes
                 ).onFailure { Toast.makeText(context, it.message ?: "Unable to queue photo", Toast.LENGTH_SHORT).show() }
+            } finally { isSendingMedia = false }
+        }
+    }
+
+    val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null || isSendingMedia) return@rememberLauncherForActivityResult
+        val useViewOnce = burnOnReadArmed
+        burnOnReadArmed = false
+        scope.launch {
+            isSendingMedia = true
+            try {
+                val stagedResult = withContext(Dispatchers.IO) { PdfDocumentTools.stageUriForTor(context, uri) }
+                stagedResult.onFailure { err ->
+                    Toast.makeText(context, err.message ?: "Unable to read video", Toast.LENGTH_SHORT).show()
+                }.onSuccess { staged ->
+                    try {
+                        groupService.sendGroupAttachmentFromFile(
+                            groupId = group.groupId,
+                            sourceFile = staged.file,
+                            mimeType = staged.mimeType,
+                            fileName = staged.fileName,
+                            durationMs = staged.durationMs,
+                            sha256Hex = staged.sha256Hex,
+                            viewOnce = useViewOnce,
+                            previewBytes = if (useViewOnce) null else staged.coverPreviewBytes
+                        ).onFailure { Toast.makeText(context, it.message ?: "Unable to queue video", Toast.LENGTH_SHORT).show() }
+                    } finally {
+                        runCatching { staged.file.delete() }
+                    }
+                }
             } finally { isSendingMedia = false }
         }
     }
@@ -427,6 +472,7 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
 
     androidx.activity.compose.BackHandler {
         when {
+            activeVideoTarget != null -> activeVideoTarget = null
             activePdfTarget != null -> activePdfTarget = null
             pendingPdfStudioDoc != null -> {
                 pendingPdfStudioDoc?.let { runCatching { it.file.delete() } }
@@ -766,6 +812,7 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
                                             }
                                         },
                                         onPhotoClick = { path -> fullscreenPhotoPath = path },
+                                        onOpenVideo = { openGroupVideoMessage(message) },
                                         onOpenPdf = { openGroupPdfMessage(message, 1) },
                                         onOpenReplyPdfPage = { replyId, pageOneBased ->
                                             val target = messages.firstOrNull { it.id == replyId }
@@ -819,6 +866,10 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
             onPickPhoto = {
                 groupService.speculativeWarmGroupCircuits(group.groupId, includeBulk = true)
                 photoPicker.launch("image/*")
+            },
+            onPickVideo = {
+                groupService.speculativeWarmGroupCircuits(group.groupId, includeBulk = true)
+                videoPicker.launch("video/*")
             },
             onStartVoiceNote = {
                 groupService.speculativeWarmGroupCircuits(group.groupId, includeBulk = true)
@@ -1071,6 +1122,15 @@ fun GroupChatScreen(group: PrivateGroupEntity, onNavigateBack: () -> Unit) {
             onDismiss = { activePdfTarget = null }
         )
     }
+
+    activeVideoTarget?.let { (sourceMsg, safeName, videoFile) ->
+        FullscreenEncryptedVideoDialog(
+            file = videoFile,
+            fileName = safeName,
+            mimeType = sourceMsg.attachmentMimeType ?: "video/mp4",
+            onDismiss = { activeVideoTarget = null }
+        )
+    }
 }
 
 @Composable
@@ -1186,6 +1246,7 @@ private fun GroupMessageBubble(
     onLongPress: () -> Unit,
     onQuotedMessageClick: (String) -> Unit,
     onPhotoClick: (String) -> Unit,
+    onOpenVideo: () -> Unit = {},
     onOpenPdf: () -> Unit = {},
     onOpenReplyPdfPage: (replyToId: String, pageOneBased: Int) -> Unit = { _, _ -> },
     onOpenBurnCapsule: () -> Unit,
@@ -1375,6 +1436,7 @@ private fun GroupMessageBubble(
                         isViewOnce -> {
                             val kindLabel = when {
                                 descriptor?.kind == "voice" -> "Voice Note"
+                                descriptor?.kind == "video" -> "Video"
                                 descriptor?.kind == "photo" -> "Photo"
                                 descriptor?.kind == "file" -> "File"
                                 else -> "Secret Note"
@@ -1397,6 +1459,19 @@ private fun GroupMessageBubble(
                                 filePath = message.attachmentPath,
                                 durationMsHint = descriptor.durationMs,
                                 outgoing = outgoing
+                            )
+                        }
+                        descriptor?.kind == "video" -> {
+                            OnionVideoCard(
+                                filePath = message.attachmentPath,
+                                fileName = descriptor.fileName,
+                                totalBytes = descriptor.totalBytes,
+                                durationMsHint = descriptor.durationMs,
+                                mimeType = message.attachmentMimeType,
+                                outgoing = outgoing,
+                                sha256Hex = descriptor.sha256,
+                                transferProgress = transferProgress,
+                                onOpenVideo = onOpenVideo
                             )
                         }
                         descriptor?.kind == "file" -> {

@@ -373,6 +373,10 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
             override fun onTransportConnected(generation: Int) {
                 videoEngine.clearRemoteFrameBitmap()
+                val cur = _sessionFlow.value
+                if (cur != null && !cur.forceTorOnly) {
+                    audioEngine?.setTransportMode(true)
+                }
                 _sessionFlow.update { s ->
                     if (s != null && s.state == CallState.ACTIVE && !s.forceTorOnly) {
                         s.copy(
@@ -431,6 +435,9 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
     @Volatile
     private var activeCallCrypto: AegisCallCrypto.CallKeySession? = null
+    @Volatile
+    private var preAcceptCrypto: AegisCallCrypto.CallKeySession? = null
+    private var acceptRetryJob: Job? = null
     @Volatile
     private var localEphemeralPriv: ByteArray? = null
     @Volatile
@@ -731,6 +738,8 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 remoteIdentityPubHexForCall = peerPublicKey
                 val sessionKey = ByteArray(32).also { secureRandom.nextBytes(it) }
                 bindSessionCrypto(callId, sessionKey, isCaller = true)
+                preAcceptCrypto?.zeroize()
+                preAcceptCrypto = AegisCallCrypto.deriveLegacySession(callId, isCaller = true, sessionKey)
                 val defaultCodec = CallVideoEngine.CODEC_AVC
 
                 // Transition UI state IMMEDIATELY (< 2ms) so CallOverlayScreen opens without any delay
@@ -784,9 +793,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
                         messaging.start()
                     }
                     runCatching {
-                        val cm = TorCircuitManager.getInstance(context)
-                        cm.recycleIfSilent(canonicalOnion, 75_000L)
-                        cm.ensureBulkConnectionAsync(canonicalOnion)
+                        messaging.preparePeerForUrgentCallSignal(canonicalOnion)
                     }
 
                     val supportedCodecs = if (isVideoCall) {
@@ -810,6 +817,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
                         localVideoEnabled = isVideoCall,
                         videoCodecs = supportedCodecs
                     )
+                    val sessionKeyCopy = sessionKey.copyOf()
                     AegisTorCrypto.zeroize(sessionKey)
 
                     val sent = sendCallSignalWithRetry(messaging, canonicalOnion, offerPayload, maxAttempts = 3)
@@ -824,13 +832,35 @@ class SeamlessCallManager private constructor(private val context: Context) {
                                 }
                                 startOutgoingRingbackTone()
                                 scope.launch {
-                                    delay(2_800L)
-                                    val stillDialing = _sessionFlow.value
-                                    if (stillDialing?.callId == callId && stillDialing.state == CallState.OUTGOING_DIALING) {
-                                        messaging.sendCallSignalFrame(canonicalOnion, offerPayload)
+                                    for ((idx, waitMs) in listOf(1_200L, 1_800L, 2_800L).withIndex()) {
+                                        delay(waitMs)
+                                        val stillDialing = _sessionFlow.value
+                                        if (stillDialing?.callId != callId || stillDialing.state != CallState.OUTGOING_DIALING) {
+                                            break
+                                        }
+                                        if (idx == 1) {
+                                            runCatching { messaging.preparePeerForUrgentCallSignal(canonicalOnion) }
+                                        }
+                                        val refreshedOffer = buildSignalJson(
+                                            type = "OFFER",
+                                            callId = callId,
+                                            senderOnion = myInfo.onionAddress,
+                                            senderNickname = myInfo.nickname,
+                                            senderPubKey = myInfo.publicKey,
+                                            sessionKey = sessionKeyCopy,
+                                            ephemeralPubHex = offerEphHex,
+                                            forceTorOnly = effectiveForceTor,
+                                            candidates = if (effectiveForceTor) emptyList() else localUdpCandidates.toList(),
+                                            isVideo = isVideoCall,
+                                            localVideoEnabled = isVideoCall,
+                                            videoCodecs = supportedCodecs
+                                        )
+                                        messaging.sendCallSignalFrame(canonicalOnion, refreshedOffer)
                                     }
+                                    AegisTorCrypto.zeroize(sessionKeyCopy)
                                 }
                             } else {
+                                AegisTorCrypto.zeroize(sessionKeyCopy)
                                 endCallInternal(
                                     callId = callId,
                                     reason = "Peer unreachable over Tor",
@@ -838,6 +868,8 @@ class SeamlessCallManager private constructor(private val context: Context) {
                                     logText = if (isVideoCall) "📹 Outgoing video call (Unreachable)" else "📞 Outgoing voice call (Unreachable)"
                                 )
                             }
+                        } else {
+                            AegisTorCrypto.zeroize(sessionKeyCopy)
                         }
                     }
                 }
@@ -861,7 +893,11 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 delay(60L)
 
                 val initialCandidates = if (!session.forceTorOnly) {
-                    openDirectUdpSocketFast(session.callId, session.peerOnion)
+                    if (udpSocket == null || udpSocket?.isClosed == true) {
+                        openDirectUdpSocketFast(session.callId, session.peerOnion)
+                    } else {
+                        localUdpCandidates.toList()
+                    }
                 } else {
                     emptyList()
                 }
@@ -934,10 +970,11 @@ class SeamlessCallManager private constructor(private val context: Context) {
                     startDirectP2pProbing(session.callId)
                 }
 
-                // Send ACCEPT signal back to caller immediately (with callee ephemeral X25519 pubkey for PFS)
+                // Send ACCEPT signal back to caller immediately over BOTH Direct UDP and Tor (with automatic retry until caller acknowledges)
                 val acceptEphHex = localEphemeralPubHex
                 val acceptForceTor = session.forceTorOnly
-                launch {
+                acceptRetryJob?.cancel()
+                acceptRetryJob = launch {
                     val messaging = TorMessagingService.getInstance(context)
                     val myInfo = messaging.getMyContactInfo()
                     val acceptPayload = buildSignalJson(
@@ -954,8 +991,29 @@ class SeamlessCallManager private constructor(private val context: Context) {
                         localVideoEnabled = enableLocalVideo,
                         videoCodecs = videoEngine.getSupportedHardwareCodecs()
                     )
-                    messaging.sendCallSignalFrame(session.peerOnion, acceptPayload).let { ok ->
-                        if (!ok) sendCallSignalWithRetry(messaging, session.peerOnion, acceptPayload, maxAttempts = 2)
+                    if (!acceptForceTor) {
+                        launch {
+                            for (delayMs in longArrayOf(0L, 100L, 220L, 450L, 900L)) {
+                                if (delayMs > 0L) delay(delayMs)
+                                val cur = _sessionFlow.value
+                                if (cur?.callId != session.callId || cur.state != CallState.ACTIVE) break
+                                if (preAcceptCrypto == null || rxAudioFramesCounter.get() > 0L) break
+                                sendPreAcceptUdpSignal(session.callId, acceptPayload)
+                            }
+                        }
+                    }
+                    messaging.preparePeerForUrgentCallSignal(session.peerOnion)
+                    val ok = messaging.sendCallSignalFrame(session.peerOnion, acceptPayload)
+                    if (!ok) {
+                        sendCallSignalWithRetry(messaging, session.peerOnion, acceptPayload, maxAttempts = 2)
+                    }
+                    for (retryWait in longArrayOf(1_200L, 1_800L)) {
+                        delay(retryWait)
+                        val cur = _sessionFlow.value
+                        if (cur?.callId != session.callId || cur.state != CallState.ACTIVE) break
+                        if (preAcceptCrypto == null || lastDirectP2pVerifiedAt > 0L || rxAudioFramesCounter.get() > 0L) break
+                        messaging.preparePeerForUrgentCallSignal(session.peerOnion)
+                        messaging.sendCallSignalFrame(session.peerOnion, acceptPayload)
                     }
                     if (session.isRemoteVideoEnabled) {
                         sendVideoPliRequest()
@@ -1392,6 +1450,13 @@ class SeamlessCallManager private constructor(private val context: Context) {
                         localIdentityPubHexForCall = myStaticPub
                         remoteIdentityPubHexForCall = callerPubKey
 
+                        val sessionKeyHex = json.optString("sessionKeyHex")
+                        val preAcceptKeyBytes = if (sessionKeyHex.length == 64) hexToBytes(sessionKeyHex) else null
+                        if (preAcceptKeyBytes != null) {
+                            preAcceptCrypto?.zeroize()
+                            preAcceptCrypto = AegisCallCrypto.deriveLegacySession(callId, isCaller = false, preAcceptKeyBytes)
+                        }
+
                         val peerEphHex = json.optString("ephemeralPubHex")
                         val peerEphBytes = if (peerEphHex.length == 64) AegisCallCrypto.fromHex(peerEphHex) else null
                         if (peerEphBytes != null && peerEphBytes.size == 32) {
@@ -1410,24 +1475,23 @@ class SeamlessCallManager private constructor(private val context: Context) {
                                 bindPfsSessionCrypto(pfsSession)
                             } catch (e: Exception) {
                                 Log.w(TAG, "Rejected invalid ephemeral X25519 call OFFER: ${e.message}")
+                                preAcceptKeyBytes?.let { AegisTorCrypto.zeroize(it) }
+                                preAcceptCrypto?.zeroize()
+                                preAcceptCrypto = null
                                 return@withLock
                             } finally {
                                 AegisTorCrypto.zeroize(myEph.privateKey)
                             }
+                        } else if (preAcceptKeyBytes != null) {
+                            bindSessionCrypto(callId, preAcceptKeyBytes, isCaller = false)
                         } else {
-                            val sessionKeyHex = json.optString("sessionKeyHex")
-                            if (sessionKeyHex.length == 64) {
-                                val legacyKey = hexToBytes(sessionKeyHex)
-                                bindSessionCrypto(callId, legacyKey, isCaller = false)
-                                AegisTorCrypto.zeroize(legacyKey)
-                            } else {
-                                activeCallCrypto?.zeroize()
-                                activeCallCrypto = null
-                                currentSessionKey = null
-                                currentSessionKeySpec = null
-                                currentCallUuid = runCatching { UUID.fromString(callId) }.getOrNull()
-                            }
+                            activeCallCrypto?.zeroize()
+                            activeCallCrypto = null
+                            currentSessionKey = null
+                            currentSessionKeySpec = null
+                            currentCallUuid = runCatching { UUID.fromString(callId) }.getOrNull()
                         }
+                        preAcceptKeyBytes?.let { AegisTorCrypto.zeroize(it) }
 
                         val effectiveForceTor = json.optBoolean("forceTorOnly", false) ||
                             PrivacyPreferenceManager.alwaysRouteCallsOverTor.value
@@ -1459,12 +1523,19 @@ class SeamlessCallManager private constructor(private val context: Context) {
                             }
                         )
                         _sessionFlow.value = incomingSession
+                        val calleeCandidates = if (!effectiveForceTor) {
+                            val opened = openDirectUdpSocketFast(callId, canonicalSender)
+                            startDirectP2pProbing(callId)
+                            opened
+                        } else {
+                            emptyList()
+                        }
                         CallForegroundService.start(context)
                         registerCallNetworkCallback()
                         startIncomingRingtoneAndVibration()
                         startRingTimeout(callId)
 
-                        // Reply with RINGING immediately
+                        // Reply with RINGING immediately over BOTH Direct UDP and Tor
                         launch {
                             val messaging = TorMessagingService.getInstance(context)
                             val myInfo = messaging.getMyContactInfo()
@@ -1473,18 +1544,30 @@ class SeamlessCallManager private constructor(private val context: Context) {
                                 callId = callId,
                                 senderOnion = myInfo.onionAddress,
                                 senderNickname = myInfo.nickname,
-                                senderPubKey = myInfo.publicKey
+                                senderPubKey = myInfo.publicKey,
+                                candidates = calleeCandidates
                             )
+                            if (!effectiveForceTor) {
+                                sendPreAcceptUdpSignal(callId, ringingPayload)
+                            }
                             messaging.sendCallSignalFrame(canonicalSender, ringingPayload)
                         }
                     }
 
                     "RINGING" -> {
-                        if (current?.callId == callId && current.state == CallState.OUTGOING_DIALING) {
-                            _sessionFlow.value = current.copy(
-                                state = CallState.OUTGOING_RINGING,
-                                statusMessage = "Ringing..."
-                            )
+                        if (current?.callId == callId &&
+                            (current.state == CallState.OUTGOING_DIALING || current.state == CallState.OUTGOING_RINGING)
+                        ) {
+                            if (!current.forceTorOnly) {
+                                mergeCandidatesIntoList(json.optJSONArray("p2pCandidates"))
+                                startDirectP2pProbing(callId)
+                            }
+                            if (current.state == CallState.OUTGOING_DIALING) {
+                                _sessionFlow.value = current.copy(
+                                    state = CallState.OUTGOING_RINGING,
+                                    statusMessage = "Ringing..."
+                                )
+                            }
                         }
                     }
 
@@ -1492,6 +1575,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
                         if (current?.callId == callId &&
                             (current.state == CallState.OUTGOING_DIALING || current.state == CallState.OUTGOING_RINGING)
                         ) {
+                            outgoingOfferJob?.cancel()
                             ringTimeoutJob?.cancel()
                             stopRingingAndVibration()
                             delay(60L)
@@ -1615,6 +1699,38 @@ class SeamlessCallManager private constructor(private val context: Context) {
                             if (!effectiveForceTor) {
                                 startDirectP2pProbing(callId)
                             }
+                            preAcceptCrypto?.zeroize()
+                            preAcceptCrypto = null
+                            launch {
+                                val messaging = TorMessagingService.getInstance(context)
+                                val myInfo = messaging.getMyContactInfo()
+                                val ackPayload = buildSignalJson(
+                                    type = "ACCEPT_ACK",
+                                    callId = callId,
+                                    senderOnion = myInfo.onionAddress,
+                                    senderNickname = myInfo.nickname,
+                                    senderPubKey = myInfo.publicKey
+                                )
+                                if (!effectiveForceTor) {
+                                    val udpCtrl = ByteArray(1 + ackPayload.size).also {
+                                        it[0] = VIDEO_CTRL_WEBRTC_SIG
+                                        System.arraycopy(ackPayload, 0, it, 1, ackPayload.size)
+                                    }
+                                    for (target in getActiveUdpTargets()) {
+                                        sendDirectUdpVideoControl(callId, target, udpCtrl)
+                                    }
+                                }
+                                messaging.sendCallSignalFrame(canonicalSender, ackPayload)
+                            }
+                        }
+                    }
+
+                    "ACCEPT_ACK" -> {
+                        if (current?.callId == callId && current.state == CallState.ACTIVE) {
+                            lastPeerActivityAtMs = System.currentTimeMillis()
+                            acceptRetryJob?.cancel()
+                            preAcceptCrypto?.zeroize()
+                            preAcceptCrypto = null
                         }
                     }
 
@@ -1728,7 +1844,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
                         if (current?.callId == callId) {
                             mergeCandidatesIntoList(json.optJSONArray("p2pCandidates"))
                             p2pFastBurstCounter.set(0)
-                            if (current.state == CallState.ACTIVE && !current.forceTorOnly) {
+                            if (current.state != CallState.IDLE && current.state != CallState.ENDED && !current.forceTorOnly) {
                                 startDirectP2pProbing(callId)
                             }
                         }
@@ -1987,7 +2103,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
         if (verified != null && (now - lastDirectP2pVerifiedAt) <= DIRECT_P2P_STALE_MS) {
             return listOf(verified)
         }
-        val out = ArrayList<InetSocketAddress>(2)
+        val out = ArrayList<InetSocketAddress>(4)
         val candidate = candidateDirectPeerEndpoint
         if (candidate != null) {
             out.add(candidate)
@@ -2004,11 +2120,11 @@ class SeamlessCallManager private constructor(private val context: Context) {
             }
             if (firstPublic != null && firstPrivate != null) break
         }
-        if (firstPublic != null && !out.contains(firstPublic) && out.size < 2) {
-            out.add(firstPublic)
-        }
-        if (firstPrivate != null && !out.contains(firstPrivate) && out.size < 2) {
+        if (firstPrivate != null && !out.contains(firstPrivate) && out.size < 4) {
             out.add(firstPrivate)
+        }
+        if (firstPublic != null && !out.contains(firstPublic) && out.size < 4) {
+            out.add(firstPublic)
         }
         return out
     }
@@ -2800,7 +2916,13 @@ class SeamlessCallManager private constructor(private val context: Context) {
             val callUuid = runCatching { UUID.fromString(callId) }.getOrNull() ?: return@launch
             while (isActive) {
                 val session = _sessionFlow.value
-                if (session == null || session.callId != callId || session.state != CallState.ACTIVE) break
+                if (session == null ||
+                    session.callId != callId ||
+                    session.state == CallState.IDLE ||
+                    session.state == CallState.ENDED
+                ) {
+                    break
+                }
                 if (!session.forceTorOnly) {
                     val targets = LinkedHashSet<InetSocketAddress>()
                     verifiedDirectPeerEndpoint?.let { targets.add(it) }
@@ -2846,6 +2968,46 @@ class SeamlessCallManager private constructor(private val context: Context) {
         }
     }
 
+    private fun decryptControlWithFallback(
+        cipherBytes: ByteArray,
+        nonce: ByteArray,
+        aad: ByteArray
+    ): Pair<AegisCallCrypto.CallKeySession, ByteArray>? {
+        val primary = activeCallCrypto ?: preAcceptCrypto ?: return null
+        val pPlain = decryptUdpGcm(cipherBytes, primary.recvKey, nonce, aad, primary.recvKeySpec)
+        if (pPlain != null) return primary to pPlain
+        val fallback = preAcceptCrypto
+        if (fallback != null && fallback !== primary) {
+            val fPlain = decryptUdpGcm(cipherBytes, fallback.recvKey, nonce, aad, fallback.recvKeySpec)
+            if (fPlain != null) return fallback to fPlain
+        }
+        return null
+    }
+
+    private fun sendPreAcceptUdpSignal(callId: String, payloadBytes: ByteArray) {
+        val crypto = preAcceptCrypto ?: activeCallCrypto ?: return
+        val ctrl = ByteArray(1 + payloadBytes.size).also {
+            it[0] = VIDEO_CTRL_WEBRTC_SIG
+            System.arraycopy(payloadBytes, 0, it, 1, payloadBytes.size)
+        }
+        if (ctrl.size > 1_350) return
+        val targets = LinkedHashSet<InetSocketAddress>(4).apply {
+            addAll(getActiveUdpTargets())
+            addAll(peerUdpCandidates.take(4))
+        }
+        for (target in targets) {
+            sendDirectUdpPacketWithCrypto(
+                packetType = UDP_TYPE_VIDEO_CTRL,
+                callId = callId,
+                target = target,
+                sequence = System.nanoTime(),
+                timestampMs = System.currentTimeMillis(),
+                plaintext = ctrl,
+                crypto = crypto
+            )
+        }
+    }
+
     private fun handleIncomingUdpPacket(
         callId: String,
         sender: InetSocketAddress,
@@ -2853,7 +3015,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
     ) {
         val session = _sessionFlow.value ?: return
         if (session.callId != callId || session.forceTorOnly) return
-        val crypto = activeCallCrypto ?: return
+        val crypto = activeCallCrypto ?: preAcceptCrypto ?: return
         if (data.size < 1 + 16 + 8 + DIRECT_UDP_NONCE_BYTES + 16) return
 
         val bb = ByteBuffer.wrap(data)
@@ -2874,10 +3036,15 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 bb.get(nonce)
                 val cipherBytes = ByteArray(bb.remaining())
                 bb.get(cipherBytes)
-                val plain = decryptUdpGcm(cipherBytes, crypto.recvKey, nonce, aad, crypto.recvKeySpec) ?: return
+                val (usedCrypto, plain) = decryptControlWithFallback(cipherBytes, nonce, aad) ?: return
                 if (plain.isEmpty()) return
                 val nonceSeq = extractNonceCounter(nonce)
-                if (nonceSeq >= 0L && !crypto.ctrlReplayWindow.checkAndMark(nonceSeq)) return
+                if (nonceSeq >= 0L && !usedCrypto.ctrlReplayWindow.checkAndMark(nonceSeq)) return
+                if (usedCrypto === activeCallCrypto && session.state == CallState.ACTIVE && acceptRetryJob?.isActive == true) {
+                    acceptRetryJob?.cancel()
+                    preAcceptCrypto?.zeroize()
+                    preAcceptCrypto = null
+                }
 
                 // Record candidate endpoint & echo PROBE_ACK at a bounded rate (NO unsolicited reverse PROBE storm!)
                 candidateDirectPeerEndpoint = sender
@@ -2887,7 +3054,7 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 val now = System.currentTimeMillis()
                 if (now - lastAutoProbeAckAtMs >= PROBE_ACK_MIN_INTERVAL_MS) {
                     lastAutoProbeAckAtMs = now
-                    sendDirectUdpProbe(packetCallId, sender, isAck = true, timestampMs = ts)
+                    sendDirectUdpProbe(packetCallId, sender, isAck = true, timestampMs = ts, overrideCrypto = usedCrypto)
                 }
             }
 
@@ -2903,10 +3070,10 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 bb.get(nonce)
                 val cipherBytes = ByteArray(bb.remaining())
                 bb.get(cipherBytes)
-                val plain = decryptUdpGcm(cipherBytes, crypto.recvKey, nonce, aad, crypto.recvKeySpec) ?: return
+                val (usedCrypto, plain) = decryptControlWithFallback(cipherBytes, nonce, aad) ?: return
                 if (plain.isEmpty()) return
                 val nonceSeq = extractNonceCounter(nonce)
-                if (nonceSeq >= 0L && !crypto.ctrlReplayWindow.checkAndMark(nonceSeq)) return
+                if (nonceSeq >= 0L && !usedCrypto.ctrlReplayWindow.checkAndMark(nonceSeq)) return
 
                 // Only a genuine echo of our own probe timestamp proves two-way NAT reachability.
                 val now = System.currentTimeMillis()
@@ -3042,9 +3209,9 @@ class SeamlessCallManager private constructor(private val context: Context) {
                 bb.get(nonce)
                 val cipherBytes = ByteArray(bb.remaining())
                 bb.get(cipherBytes)
-                val plainCtrl = decryptUdpGcm(cipherBytes, crypto.recvKey, nonce, aad, crypto.recvKeySpec) ?: return
+                val (usedCrypto, plainCtrl) = decryptControlWithFallback(cipherBytes, nonce, aad) ?: return
                 val nonceSeq = extractNonceCounter(nonce)
-                if (nonceSeq >= 0L && !crypto.ctrlReplayWindow.checkAndMark(nonceSeq)) return
+                if (nonceSeq >= 0L && !usedCrypto.ctrlReplayWindow.checkAndMark(nonceSeq)) return
                 if (plainCtrl.isEmpty()) return
 
                 lastPeerActivityAtMs = System.currentTimeMillis()
@@ -3076,27 +3243,41 @@ class SeamlessCallManager private constructor(private val context: Context) {
         callUuid: UUID,
         target: InetSocketAddress,
         isAck: Boolean,
-        timestampMs: Long
+        timestampMs: Long,
+        overrideCrypto: AegisCallCrypto.CallKeySession? = null
     ) {
         val socket = udpSocket ?: return
-        val crypto = activeCallCrypto ?: return
-        try {
-            val type = if (isAck) UDP_TYPE_PROBE_ACK else UDP_TYPE_PROBE
-            val aad = ByteBuffer.allocate(1 + 16 + 8)
-                .put(type)
-                .putLong(callUuid.mostSignificantBits)
-                .putLong(callUuid.leastSignificantBits)
-                .putLong(timestampMs)
-                .array()
-            val nonce = nextMonotonicNonce()
-            val cipher = encryptUdpGcm(byteArrayOf(0x50, 0x32, 0x50), crypto.sendKey, nonce, aad, crypto.sendKeySpec) ?: return
-            val packetBytes = ByteBuffer.allocate(aad.size + nonce.size + cipher.size)
-                .put(aad)
-                .put(nonce)
-                .put(cipher)
-                .array()
-            socket.send(DatagramPacket(packetBytes, packetBytes.size, target))
-        } catch (_: Exception) {}
+        val session = _sessionFlow.value
+        val sendList = if (overrideCrypto != null) {
+            listOf(overrideCrypto)
+        } else {
+            val primary = activeCallCrypto
+            val pre = preAcceptCrypto
+            if (pre != null && pre !== primary && (session?.state != CallState.ACTIVE || acceptRetryJob?.isActive == true)) {
+                listOfNotNull(primary, pre)
+            } else {
+                listOfNotNull(primary ?: pre)
+            }
+        }
+        val type = if (isAck) UDP_TYPE_PROBE_ACK else UDP_TYPE_PROBE
+        val aad = ByteBuffer.allocate(1 + 16 + 8)
+            .put(type)
+            .putLong(callUuid.mostSignificantBits)
+            .putLong(callUuid.leastSignificantBits)
+            .putLong(timestampMs)
+            .array()
+        for (crypto in sendList) {
+            try {
+                val nonce = nextMonotonicNonce()
+                val cipher = encryptUdpGcm(byteArrayOf(0x50, 0x32, 0x50), crypto.sendKey, nonce, aad, crypto.sendKeySpec) ?: continue
+                val packetBytes = ByteBuffer.allocate(aad.size + nonce.size + cipher.size)
+                    .put(aad)
+                    .put(nonce)
+                    .put(cipher)
+                    .array()
+                socket.send(DatagramPacket(packetBytes, packetBytes.size, target))
+            } catch (_: Exception) {}
+        }
     }
 
     private fun sendDirectUdpAudioPacket(
@@ -3128,8 +3309,20 @@ class SeamlessCallManager private constructor(private val context: Context) {
         timestampMs: Long,
         plaintext: ByteArray
     ): Boolean {
-        val socket = udpSocket ?: return false
         val crypto = activeCallCrypto ?: return false
+        return sendDirectUdpPacketWithCrypto(packetType, callId, target, sequence, timestampMs, plaintext, crypto)
+    }
+
+    private fun sendDirectUdpPacketWithCrypto(
+        packetType: Byte,
+        callId: String,
+        target: InetSocketAddress,
+        sequence: Long,
+        timestampMs: Long,
+        plaintext: ByteArray,
+        crypto: AegisCallCrypto.CallKeySession
+    ): Boolean {
+        val socket = udpSocket ?: return false
         return try {
             val callUuid = currentCallUuid ?: UUID.fromString(callId)
             val aad = ByteBuffer.allocate(1 + 16 + 8 + 8)
@@ -3473,6 +3666,8 @@ class SeamlessCallManager private constructor(private val context: Context) {
         torVideoSenderJob = null
         outgoingOfferJob?.cancel()
         outgoingOfferJob = null
+        acceptRetryJob?.cancel()
+        acceptRetryJob = null
         while (torVideoFrameChannel.tryReceive().isSuccess) {}
         p2pFastBurstCounter.set(0)
         lastCandidateTrickleAtMs = 0L
@@ -3507,6 +3702,8 @@ class SeamlessCallManager private constructor(private val context: Context) {
 
         activeCallCrypto?.zeroize()
         activeCallCrypto = null
+        preAcceptCrypto?.zeroize()
+        preAcceptCrypto = null
         AegisTorCrypto.zeroize(localEphemeralPriv, currentSessionKey)
         localEphemeralPriv = null
         localEphemeralPubHex = ""

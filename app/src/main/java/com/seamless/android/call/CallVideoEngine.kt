@@ -360,6 +360,7 @@ class CallVideoEngine(
     private val jpegOutStream = ByteArrayOutputStream(16_384)
     @Volatile var useExternalCameraSource: Boolean = true
     @Volatile var forceMtuSafeFragments: Boolean = false
+    @Volatile var activeVideoPeerCount: Int = 1
 
     @Volatile private var remoteTextureView: TextureView? = null
     @Volatile private var remoteCropFill: Boolean = true
@@ -598,12 +599,12 @@ class CallVideoEngine(
         val step: Int
         val jpegQuality: Int
         if (isDirect) {
-            if (isHdSource && currentRttMs in 1..85) {
+            if (isHdSource && activeVideoPeerCount <= 3 && (currentRttMs == 0 || currentRttMs <= 150)) {
                 step = 1
-                jpegQuality = 68
+                jpegQuality = 82
             } else {
                 step = if (isHdSource) 2 else 1
-                jpegQuality = if (currentRttMs > 220) 62 else 76
+                jpegQuality = if (currentRttMs > 240) 70 else 80
             }
         } else {
             step = if (isHdSource) {
@@ -611,7 +612,7 @@ class CallVideoEngine(
             } else {
                 1
             }
-            jpegQuality = if (currentRttMs > 650) 50 else 58
+            jpegQuality = if (currentRttMs > 650) 56 else 64
         }
 
         val useDeltaPulse = !isDirect && selectedCodec == CODEC_DELTA_PULSE
@@ -736,14 +737,14 @@ class CallVideoEngine(
 
                     val stripImg = YuvImage(stripNv21, ImageFormat.NV21, stripW, stripH, null)
                     val stripRect = Rect(0, 0, stripW, stripH)
-                    var q = (jpegQuality + 4).coerceAtMost(66)
+                    var q = (jpegQuality + 6).coerceAtMost(72)
                     var stripJpeg = ByteArray(0)
                     while (true) {
                         jpegOutStream.reset()
                         if (!stripImg.compressToJpeg(stripRect, q, jpegOutStream)) break
                         stripJpeg = jpegOutStream.toByteArray()
-                        if (stripJpeg.size <= 22 * 1024 || q <= 32) break
-                        q = (q - 12).coerceAtLeast(32)
+                        if (stripJpeg.size <= 26 * 1024 || q <= 36) break
+                        q = (q - 10).coerceAtLeast(36)
                     }
                     if (stripJpeg.isNotEmpty()) {
                         val deltaPayload = ByteArray(DELTA_HEADER_BYTES + stripJpeg.size)
@@ -785,13 +786,14 @@ class CallVideoEngine(
         val rect = Rect(0, 0, outW, outH)
         var quality = jpegQuality
         var jpegBytes = ByteArray(0)
-        val maxFallbackFrameBytes = 24 * 1024
+        val maxFrameBytes = if (isDirect) 58 * 1024 else 30 * 1024
+        val minQuality = if (isDirect) 52 else 34
         while (true) {
             jpegOutStream.reset()
             if (!yuvImg.compressToJpeg(rect, quality, jpegOutStream)) return 0
             jpegBytes = jpegOutStream.toByteArray()
-            if (isDirect || jpegBytes.size <= maxFallbackFrameBytes || quality <= 28) break
-            quality = (quality - 14).coerceAtLeast(28)
+            if (jpegBytes.size <= maxFrameBytes || quality <= minQuality) break
+            quality = (quality - 12).coerceAtLeast(minQuality)
         }
         if (jpegBytes.isEmpty()) return 0
 
@@ -1028,15 +1030,15 @@ class CallVideoEngine(
             lastEncodedAtMs.set(nowMs)
 
             val isHdSource = image.width >= 1200
-            var step: Int
-            var jpegQuality: Int
+            val step: Int
+            val jpegQuality: Int
             if (isDirect) {
-                if (isHdSource && currentRttMs in 1..85) {
+                if (isHdSource && activeVideoPeerCount <= 3 && (currentRttMs == 0 || currentRttMs <= 150)) {
                     step = 1
-                    jpegQuality = 68
+                    jpegQuality = 82
                 } else {
                     step = if (isHdSource) 2 else 1
-                    jpegQuality = if (currentRttMs > 220) 62 else 76
+                    jpegQuality = if (currentRttMs > 240) 70 else 80
                 }
             } else {
                 step = if (isHdSource) {
@@ -1044,13 +1046,13 @@ class CallVideoEngine(
                 } else {
                     1
                 }
-                jpegQuality = if (currentRttMs > 650) 50 else 58
+                jpegQuality = if (currentRttMs > 650) 56 else 64
             }
 
             val useDeltaAlignment = !isDirect && selectedCodec == CODEC_DELTA_PULSE
             val nv21Result = yuv420888ToNv21Sampled(image, step, useDeltaAlignment) ?: return
             val (nv21, outW, outH) = nv21Result
-            val encodedSize = encodeNv21AndDispatch(
+            encodeNv21AndDispatch(
                 nv21 = nv21,
                 outW = outW,
                 outH = outH,
@@ -1059,19 +1061,6 @@ class CallVideoEngine(
                 nowMs = nowMs,
                 isDirect = isDirect
             )
-            if (isDirect && step == 1 && encodedSize > 26_000) {
-                step = 2
-                val fallbackNv21 = yuv420888ToNv21Sampled(image, step, false) ?: return
-                encodeNv21AndDispatch(
-                    nv21 = fallbackNv21.bytes,
-                    outW = fallbackNv21.width,
-                    outH = fallbackNv21.height,
-                    rotationDeg = image.imageInfo.rotationDegrees,
-                    jpegQuality = 76,
-                    nowMs = nowMs,
-                    isDirect = true
-                )
-            }
         } catch (e: Exception) {
             Log.w(TAG, "Frame capture/encode skipped: ${e.message}")
         } finally {
@@ -1199,7 +1188,7 @@ class CallVideoEngine(
                             }
 
                             val stripOpts = BitmapFactory.Options().apply {
-                                inPreferredConfig = Bitmap.Config.RGB_565
+                                inPreferredConfig = Bitmap.Config.ARGB_8888
                                 inSampleSize = 1
                             }
                             val stripBmp = BitmapFactory.decodeByteArray(
@@ -1234,7 +1223,7 @@ class CallVideoEngine(
                                 val m = Matrix().apply { postRotate(rot.toFloat()) }
                                 Bitmap.createBitmap(base, 0, 0, base.width, base.height, m, true)
                             } else {
-                                base.copy(Bitmap.Config.RGB_565, false)
+                                base.copy(Bitmap.Config.ARGB_8888, false)
                             }
                             resolutionLabel = "360p24 Tor⚡"
                         } else {
@@ -1252,7 +1241,7 @@ class CallVideoEngine(
                                 longest /= 2
                             }
                             val opts = BitmapFactory.Options().apply {
-                                inPreferredConfig = Bitmap.Config.RGB_565
+                                inPreferredConfig = Bitmap.Config.ARGB_8888
                                 inSampleSize = sampleSize
                             }
                             val rawBmp = BitmapFactory.decodeByteArray(frame.data, 0, frame.data.size, opts)
@@ -1262,7 +1251,7 @@ class CallVideoEngine(
                                 var base = deltaBaseBitmap
                                 if (base == null || base.isRecycled || base.width != rawBmp.width || base.height != rawBmp.height) {
                                     base?.recycle()
-                                    base = Bitmap.createBitmap(rawBmp.width, rawBmp.height, Bitmap.Config.RGB_565)
+                                    base = Bitmap.createBitmap(rawBmp.width, rawBmp.height, Bitmap.Config.ARGB_8888)
                                     deltaBaseBitmap = base
                                     deltaBaseCanvas = Canvas(base)
                                 }

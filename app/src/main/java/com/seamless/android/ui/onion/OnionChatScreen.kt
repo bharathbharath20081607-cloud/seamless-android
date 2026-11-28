@@ -153,6 +153,21 @@ fun OnionChatScreen(
     var pendingPdfStudioDoc by remember(contact.id) { mutableStateOf<PdfDocumentTools.StagedDocument?>(null) }
     var pendingPdfBurnArmed by remember(contact.id) { mutableStateOf(false) }
     var activePdfTarget by remember(contact.id) { mutableStateOf<Triple<TorMessageEntity, Int, File>?>(null) }
+    var activeVideoTarget by remember(contact.id) { mutableStateOf<Triple<TorMessageEntity, String, File>?>(null) }
+
+    fun openVideoMessage(target: TorMessageEntity) {
+        val file = target.attachmentPath
+            ?.takeIf { !TorAttachmentTransfer.isTemporaryAttachmentPath(it) }
+            ?.let(::File)
+            ?.takeIf { it.exists() && it.isFile }
+        if (file == null) {
+            Toast.makeText(context, "Video is still downloading", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val desc = TorRichChatCodec.inferDescriptor(target.text, target.attachmentMimeType, target.attachmentPath)
+        val safeName = desc?.fileName?.ifBlank { file.name } ?: file.name
+        activeVideoTarget = Triple(target, safeName, file)
+    }
 
     fun openPdfMessage(target: TorMessageEntity, initialPageOneBased: Int = 1) {
         val file = target.attachmentPath
@@ -260,6 +275,47 @@ fun OnionChatScreen(
                         previewBytes = if (useViewOnce) null else prepared.previewBytes
                     ).onFailure { error ->
                         Toast.makeText(context, "Failed to queue photo: ${error.message}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } finally {
+                isSending = false
+            }
+        }
+    }
+    val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null || isSending) return@rememberLauncherForActivityResult
+        if (trustState == TorContactTrustState.BLOCKED || trustState == TorContactTrustState.KEY_CHANGED) {
+            Toast.makeText(context, "Verify this contact before sending videos", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        if (!contactAddressReady) {
+            Toast.makeText(context, "Ask them to share their ready Tor contact again", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        val useViewOnce = burnOnReadArmed
+        burnOnReadArmed = false
+        scope.launch {
+            isSending = true
+            try {
+                val stagedResult = withContext(Dispatchers.IO) { PdfDocumentTools.stageUriForTor(context, uri) }
+                stagedResult.onFailure { err ->
+                    Toast.makeText(context, err.message ?: "Unable to read video", Toast.LENGTH_SHORT).show()
+                }.onSuccess { staged ->
+                    try {
+                        messagingService.sendAttachmentFromFile(
+                            contactId = contact.id,
+                            sourceFile = staged.file,
+                            mimeType = staged.mimeType,
+                            fileName = staged.fileName,
+                            durationMs = staged.durationMs,
+                            sha256Hex = staged.sha256Hex,
+                            viewOnce = useViewOnce,
+                            previewBytes = if (useViewOnce) null else staged.coverPreviewBytes
+                        ).onFailure { error ->
+                            Toast.makeText(context, "Failed to queue video: ${error.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    } finally {
+                        runCatching { staged.file.delete() }
                     }
                 }
             } finally {
@@ -441,6 +497,7 @@ fun OnionChatScreen(
 
     androidx.activity.compose.BackHandler {
         when {
+            activeVideoTarget != null -> activeVideoTarget = null
             activePdfTarget != null -> activePdfTarget = null
             pendingPdfStudioDoc != null -> {
                 pendingPdfStudioDoc?.let { runCatching { it.file.delete() } }
@@ -903,6 +960,7 @@ fun OnionChatScreen(
                                         scope.launch { messagingService.sendDirectReaction(contact.id, message.id, emoji) }
                                     },
                                     onOpenBurnCapsule = { activeBurnTarget = message },
+                                    onOpenVideo = { openVideoMessage(message) },
                                     onOpenPdf = { openPdfMessage(message, 1) },
                                     onOpenReplyPdfPage = { replyId, pageOneBased ->
                                         val target = messagesFromDb.firstOrNull { it.id == replyId }
@@ -983,6 +1041,10 @@ fun OnionChatScreen(
                 messagingService.speculativePrewarmBulk(contact.id)
                 photoPicker.launch("image/*")
             },
+            onPickVideo = {
+                messagingService.speculativePrewarmBulk(contact.id)
+                videoPicker.launch("video/*")
+            },
             onStartVoiceNote = {
                 messagingService.speculativePrewarmBulk(contact.id)
                 val hasMic = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -1031,6 +1093,16 @@ fun OnionChatScreen(
                     actionTargetMessage = null
                     editDraft = cleanBody
                     editingMessage = target
+                }
+            } else null,
+            onRetry = if (target.isFromMe && target.deliveryState in setOf("FAILED", "PENDING", "SENDING", "SENT")) {
+                {
+                    actionTargetMessage = null
+                    scope.launch {
+                        messagingService.retryDirectMessage(contact.id, target.id)
+                            .onSuccess { Toast.makeText(context, "Retrying over Tor…", Toast.LENGTH_SHORT).show() }
+                            .onFailure { Toast.makeText(context, it.message ?: "Retry failed", Toast.LENGTH_SHORT).show() }
+                    }
                 }
             } else null,
             onDelete = if (!isDeleted && target.isFromMe) {
@@ -1197,6 +1269,15 @@ fun OnionChatScreen(
             onDismiss = { activePdfTarget = null }
         )
     }
+
+    activeVideoTarget?.let { (sourceMsg, safeName, videoFile) ->
+        FullscreenEncryptedVideoDialog(
+            file = videoFile,
+            fileName = safeName,
+            mimeType = sourceMsg.attachmentMimeType ?: "video/mp4",
+            onDismiss = { activeVideoTarget = null }
+        )
+    }
 }
 
 @Composable
@@ -1312,6 +1393,7 @@ private fun TorMessageBubble(
     onQuotedMessageClick: (String) -> Unit,
     onReactionClick: (String) -> Unit,
     onOpenBurnCapsule: () -> Unit,
+    onOpenVideo: () -> Unit = {},
     onOpenPdf: () -> Unit = {},
     onOpenReplyPdfPage: (replyToId: String, pageOneBased: Int) -> Unit = { _, _ -> }
 ) {
@@ -1403,7 +1485,9 @@ private fun TorMessageBubble(
         initialValue = null,
         key1 = attachment?.absolutePath
     ) {
-        value = if (!isDeleted && !isViewOnce && descriptor?.kind != "voice" && descriptor?.kind != "file") {
+        value = if (!isDeleted && !isViewOnce &&
+            descriptor?.kind != "voice" && descriptor?.kind != "file" && descriptor?.kind != "video"
+        ) {
             attachment?.absolutePath?.let { path ->
                 withContext(Dispatchers.IO) { decodeScaledFileBitmap(path, maxDimensionPx = 640) }
             }
@@ -1524,6 +1608,7 @@ private fun TorMessageBubble(
                         isViewOnce -> {
                             val kindLabel = when {
                                 descriptor?.kind == "voice" -> "Voice Note"
+                                descriptor?.kind == "video" -> "Video"
                                 descriptor?.kind == "photo" -> "Photo"
                                 descriptor?.kind == "file" -> "File"
                                 else -> "Secret Note"
@@ -1543,6 +1628,19 @@ private fun TorMessageBubble(
                                 filePath = attachment?.absolutePath,
                                 durationMsHint = descriptor.durationMs,
                                 outgoing = message.isFromMe
+                            )
+                        }
+                        descriptor?.kind == "video" -> {
+                            OnionVideoCard(
+                                filePath = attachment?.absolutePath,
+                                fileName = descriptor.fileName,
+                                totalBytes = descriptor.totalBytes,
+                                durationMsHint = descriptor.durationMs,
+                                mimeType = message.attachmentMimeType,
+                                outgoing = message.isFromMe,
+                                sha256Hex = descriptor.sha256,
+                                transferProgress = transferProgress,
+                                onOpenVideo = onOpenVideo
                             )
                         }
                         descriptor?.kind == "file" -> {
@@ -1634,7 +1732,7 @@ private fun TorMessageBubble(
                         }
                     }
 
-                    if (isPhotoOrAttachmentPending && descriptor?.kind != "file") {
+                    if (isPhotoOrAttachmentPending && descriptor?.kind != "file" && descriptor?.kind != "video") {
                         Spacer(Modifier.height(6.dp))
                         val frac = transferProgress?.fraction
                         if (frac != null) {

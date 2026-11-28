@@ -156,7 +156,7 @@ class TorBackendHardeningTest {
         assertEquals(1, transfer.split(ByteArray(1)).size)
         assertEquals(1, transfer.split(ByteArray(TorAttachmentTransfer.CHUNK_BYTES)).size)
 
-        val original = ByteArray(10_001) { i -> ((i * 31) xor 0x3D).toByte() }
+        val original = ByteArray(TorAttachmentTransfer.CHUNK_BYTES * 3 + 1001) { i -> ((i * 31) xor 0x3D).toByte() }
         val chunks = transfer.split(original)
         assertEquals(4, chunks.size)
         assertEquals(TorAttachmentTransfer.CHUNK_BYTES, chunks[0].size)
@@ -321,11 +321,22 @@ class TorBackendHardeningTest {
     @Config(sdk = [33])
     fun torMessageNotifier_usesStableRawSoundUriAndCreatesHighImportanceChannel() {
         val sysNotif = context.getSystemService(Context.NOTIFICATION_SERVICE) as AndroidNotificationManager
+        sysNotif.createNotificationChannel(
+            android.app.NotificationChannel(
+                "seamless_tor_messages_v3",
+                "Old Tor",
+                AndroidNotificationManager.IMPORTANCE_HIGH
+            )
+        )
         val notifier = TorMessageNotifier(context)
         notifier.ensureChannelsCreated()
 
+        assertNull(
+            "Legacy v3 Tor channel must be deleted on upgrade",
+            sysNotif.getNotificationChannel("seamless_tor_messages_v3")
+        )
         val channel = sysNotif.getNotificationChannel(TorMessageNotifier.CHANNEL_ID)
-        assertNotNull("Tor v3 notification channel must be created eagerly", channel)
+        assertNotNull("Tor v4 notification channel must be created eagerly", channel)
         assertTrue(
             "Tor channel importance must be DEFAULT or HIGH",
             channel!!.importance >= AndroidNotificationManager.IMPORTANCE_DEFAULT
@@ -344,6 +355,20 @@ class TorBackendHardeningTest {
             .grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
         val sysNotif = context.getSystemService(Context.NOTIFICATION_SERVICE) as AndroidNotificationManager
         sysNotif.cancelAll()
+        sysNotif.createNotificationChannel(
+            android.app.NotificationChannel(
+                "seamless_dm_notifications_v3",
+                "Old DM",
+                AndroidNotificationManager.IMPORTANCE_HIGH
+            )
+        )
+        sysNotif.createNotificationChannel(
+            android.app.NotificationChannel(
+                "seamless_geohash_notifications_v3",
+                "Old Geohash",
+                AndroidNotificationManager.IMPORTANCE_HIGH
+            )
+        )
 
         @Suppress("DEPRECATION")
         val fakeResources = object : android.content.res.Resources(
@@ -371,6 +396,15 @@ class TorBackendHardeningTest {
             context = wrappedContext,
             notificationManager = NotificationManagerCompat.from(wrappedContext),
             notificationIntervalManager = NotificationIntervalManager()
+        )
+
+        assertNull(
+            "Legacy v3 DM channel must be deleted on upgrade",
+            sysNotif.getNotificationChannel("seamless_dm_notifications_v3")
+        )
+        assertNull(
+            "Legacy v3 Geohash channel must be deleted on upgrade",
+            sysNotif.getNotificationChannel("seamless_geohash_notifications_v3")
         )
 
         val expectedSoundUri = "android.resource://${context.packageName}/raw/seamless_notification"

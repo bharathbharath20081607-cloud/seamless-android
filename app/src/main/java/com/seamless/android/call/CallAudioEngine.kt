@@ -397,7 +397,7 @@ class CallAudioEngine(
             SAMPLE_RATE_HZ,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(TOR_SAMPLES_PER_FRAME * 4)
+        ).coerceAtLeast(P2P_SAMPLES_PER_FRAME * 4)
 
         val record = AudioRecord(
             MediaRecorder.AudioSource.VOICE_COMMUNICATION,
@@ -417,7 +417,7 @@ class CallAudioEngine(
             SAMPLE_RATE_HZ,
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(TOR_SAMPLES_PER_FRAME * 4)
+        ).coerceAtLeast(P2P_SAMPLES_PER_FRAME * 4)
 
         val trackBuilder = AudioTrack.Builder()
             .setAudioAttributes(
@@ -876,6 +876,7 @@ class CallAudioEngine(
 
             val currentQueueSize = jitterQueue.size
             _jitterBufferMs.value = currentQueueSize * frameMs
+            _estimatedOneWayLatencyMs.value = currentQueueSize * frameMs + (jitterSnap * 0.5).toInt() + if (directMode) 20 else 40
 
             if (prebuffering) {
                 val oldest = jitterQueue.peek()

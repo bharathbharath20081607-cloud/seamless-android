@@ -56,7 +56,9 @@ class GroupCallAudioMixer(
         private const val TAG = "GroupCallAudioMixer"
         const val SAMPLE_RATE_HZ = CallAudioEngine.SAMPLE_RATE_HZ
         const val FRAME_DURATION_MS = CallAudioEngine.TOR_FRAME_DURATION_MS
+        const val P2P_FRAME_DURATION_MS = CallAudioEngine.P2P_FRAME_DURATION_MS
         const val SAMPLES_PER_FRAME = CallAudioEngine.TOR_SAMPLES_PER_FRAME // 640 samples
+        const val P2P_SAMPLES_PER_FRAME = CallAudioEngine.P2P_SAMPLES_PER_FRAME // 320 samples (20ms)
         const val MAX_ACTIVE_MIX_SPEAKERS = 4
 
         private const val DEDUP_WINDOW_SIZE = 128
@@ -162,8 +164,9 @@ class GroupCallAudioMixer(
         private var lastPlayedSeq = Long.MIN_VALUE
         private var jitterPrimed = false
         private var consecutivePlc = 0
-        private var lastGoodPcm = ShortArray(SAMPLES_PER_FRAME)
+        private var lastGoodPcm = ShortArray(P2P_SAMPLES_PER_FRAME)
         private var hasLastGoodPcm = false
+        private var pendingSecondHalf20ms: ShortArray? = null
         private var plcNoiseSeed = 0x51A7BEEF xor senderTag4
         private var lowWaterTicks = 0
         private var underruns = 0
@@ -216,10 +219,10 @@ class GroupCallAudioMixer(
         }
 
         private fun targetPrimeFrames(): Int {
-            val baseTarget = if (isDirectP2p) 2 else 3
+            val baseTarget = if (isDirectP2p) 1 else 2
             val jitterExtra = when {
-                smoothedJitterMs >= 95.0 -> 2
-                smoothedJitterMs >= 50.0 -> 1
+                smoothedJitterMs >= 90.0 -> 2
+                smoothedJitterMs >= 42.0 -> 1
                 else -> 0
             }
             val now = System.currentTimeMillis()
@@ -228,10 +231,18 @@ class GroupCallAudioMixer(
                 lastUnderrunDecayAtMs = now
             }
             val underrunBoost = underruns.coerceAtMost(2)
-            return (baseTarget + jitterExtra + underrunBoost).coerceIn(2, 8)
+            val maxPrime = if (isDirectP2p) 3 else 6
+            return (baseTarget + jitterExtra + underrunBoost).coerceIn(1, maxPrime)
         }
 
         fun pullNextFrame(): ShortArray? {
+            pendingSecondHalf20ms?.let { secondHalf ->
+                pendingSecondHalf20ms = null
+                lastGoodPcm = secondHalf
+                hasLastGoodPcm = true
+                return secondHalf
+            }
+
             if (!jitterPrimed) {
                 if (jitterQueue.size < targetPrimeFrames()) {
                     voiceLevel *= 0.85f
@@ -271,21 +282,34 @@ class GroupCallAudioMixer(
                     lowWaterTicks = 0
                 }
                 activePullTickCount++
-                // If backlog grows beyond target + 4 frames, shed stale frames or WSOLA compress
-                var usePcm: ShortArray? = null
                 val decoded = ImaAdpcmCodec.decode(frame.payload)
                 if (decoded != null) {
                     voiceLevel = (voiceLevel * 0.45f) + (decoded.voiceLevel * 0.55f)
-                    usePcm = decoded.samples
-                    if (jitterQueue.size >= target + 4 && (activePullTickCount % 3 == 0)) {
-                        usePcm = CallAudioEngine.wsolaTimeCompressPcm(usePcm)
+                    val samples = decoded.samples
+                    val firstChunk: ShortArray
+                    if (samples.size > P2P_SAMPLES_PER_FRAME) {
+                        val compress = jitterQueue.size >= target + 3 && (activePullTickCount % 3 == 0)
+                        firstChunk = samples.copyOfRange(0, P2P_SAMPLES_PER_FRAME)
+                        if (!compress) {
+                            pendingSecondHalf20ms = samples.copyOfRange(
+                                P2P_SAMPLES_PER_FRAME,
+                                min(samples.size, SAMPLES_PER_FRAME)
+                            )
+                        }
+                    } else {
+                        firstChunk = if (jitterQueue.size >= target + 4 && (activePullTickCount % 3 == 0)) {
+                            CallAudioEngine.wsolaTimeCompressPcm(samples)
+                        } else {
+                            samples
+                        }
                     }
-                    lastGoodPcm = decoded.samples
+                    lastGoodPcm = firstChunk
                     hasLastGoodPcm = true
                     lastPlayedSeq = frame.sequence
                     consecutivePlc = 0
+                    return firstChunk
                 }
-                return usePcm
+                return null
             }
 
             // Packet missing -> PLC up to MAX_PLC_FRAMES, then go silent and re-prime
@@ -311,6 +335,7 @@ class GroupCallAudioMixer(
             seenSequences.fill(Long.MIN_VALUE)
             lastPlayedSeq = Long.MIN_VALUE
             jitterPrimed = false
+            pendingSecondHalf20ms = null
             consecutivePlc = 0
             hasLastGoodPcm = false
             voiceLevel = 0f
@@ -324,6 +349,7 @@ class GroupCallAudioMixer(
     private val running = AtomicBoolean(false)
     private val muted = AtomicBoolean(false)
     private val speakerphone = AtomicBoolean(true)
+    private val lowLatencyDirectMode = AtomicBoolean(false)
     private val outboundSequence = AtomicLong(0L)
 
     private var previousAudioMode = AudioManager.MODE_NORMAL
@@ -380,13 +406,13 @@ class GroupCallAudioMixer(
             SAMPLE_RATE_HZ,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(SAMPLES_PER_FRAME * 8)
+        ).coerceAtLeast(P2P_SAMPLES_PER_FRAME * 4)
 
         val minPlayBuf = AudioTrack.getMinBufferSize(
             SAMPLE_RATE_HZ,
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(SAMPLES_PER_FRAME * 6)
+        ).coerceAtLeast(P2P_SAMPLES_PER_FRAME * 4)
 
         return try {
             val rec = AudioRecord(
@@ -452,6 +478,10 @@ class GroupCallAudioMixer(
         if (isMuted) _localVoiceLevel.value = 0f
     }
 
+    fun setLowLatencyDirectMode(enabled: Boolean) {
+        lowLatencyDirectMode.set(enabled)
+    }
+
     fun updatePeerTransport(senderTag4: Int, isDirectP2p: Boolean) {
         peerStreams[senderTag4]?.isDirectP2p = isDirectP2p
     }
@@ -485,7 +515,9 @@ class GroupCallAudioMixer(
     private fun startCaptureThread(rec: AudioRecord) {
         captureThread = Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-            val pcm = ShortArray(SAMPLES_PER_FRAME)
+            val pcm20 = ShortArray(P2P_SAMPLES_PER_FRAME)
+            val pcm40 = ShortArray(SAMPLES_PER_FRAME)
+            var collectedFor40 = false
             val encoder = ImaAdpcmCodec.Encoder()
             val dspState = CallAudioEngine.Companion.MicDspState()
             var hangoverRemaining = 0
@@ -494,35 +526,56 @@ class GroupCallAudioMixer(
 
             while (running.get()) {
                 var readTotal = 0
-                while (readTotal < SAMPLES_PER_FRAME && running.get()) {
-                    val r = rec.read(pcm, readTotal, SAMPLES_PER_FRAME - readTotal)
+                while (readTotal < P2P_SAMPLES_PER_FRAME && running.get()) {
+                    val r = rec.read(pcm20, readTotal, P2P_SAMPLES_PER_FRAME - readTotal)
                     if (r <= 0) break
                     readTotal += r
                 }
-                if (!running.get() || readTotal < SAMPLES_PER_FRAME) continue
+                if (!running.get() || readTotal < P2P_SAMPLES_PER_FRAME) continue
 
-                val seq = outboundSequence.incrementAndGet()
+                val activeBuf: ShortArray
+                val activeCount: Int
+                if (lowLatencyDirectMode.get()) {
+                    collectedFor40 = false
+                    activeBuf = pcm20
+                    activeCount = P2P_SAMPLES_PER_FRAME
+                } else if (!collectedFor40) {
+                    System.arraycopy(pcm20, 0, pcm40, 0, P2P_SAMPLES_PER_FRAME)
+                    collectedFor40 = true
+                    continue
+                } else {
+                    System.arraycopy(pcm20, 0, pcm40, P2P_SAMPLES_PER_FRAME, P2P_SAMPLES_PER_FRAME)
+                    collectedFor40 = false
+                    activeBuf = pcm40
+                    activeCount = SAMPLES_PER_FRAME
+                }
+
                 val nowMs = System.currentTimeMillis()
+                val sidTickLimit = if (activeCount == P2P_SAMPLES_PER_FRAME) {
+                    DTX_HEARTBEAT_INTERVAL_FRAMES * 2
+                } else {
+                    DTX_HEARTBEAT_INTERVAL_FRAMES
+                }
 
                 if (muted.get()) {
                     _localVoiceLevel.value = 0f
                     hangoverRemaining = 0
                     ticksSinceSid++
-                    if (ticksSinceSid >= DTX_HEARTBEAT_INTERVAL_FRAMES) {
+                    if (ticksSinceSid >= sidTickLimit) {
                         ticksSinceSid = 0
-                        onEncodedFrameReady(seq, nowMs, true, CallAudioEngine.encodeDtxSidFrame())
+                        onEncodedFrameReady(outboundSequence.get(), nowMs, true, CallAudioEngine.encodeDtxSidFrame())
                     }
                     continue
                 }
 
                 CallAudioEngine.applyDcBlockAndSmoothSpeechGain(
-                    pcm = pcm,
-                    length = SAMPLES_PER_FRAME,
+                    pcm = activeBuf,
+                    length = activeCount,
                     state = dspState,
                     hardwareAgcActive = hwAgcOn
                 )
 
-                val rms = computeFrameRms(pcm, SAMPLES_PER_FRAME)
+                val rms = computeFrameRms(activeBuf, activeCount)
                 val normalizedLevel = (rms.toFloat() / 6500f).coerceIn(0f, 1f)
                 _localVoiceLevel.value = (_localVoiceLevel.value * 0.4f) + (normalizedLevel * 0.6f)
 
@@ -532,22 +585,30 @@ class GroupCallAudioMixer(
                     rms >= VAD_RMS_ENTER_THRESHOLD
                 }
 
+                val hangoverTarget = if (activeCount == P2P_SAMPLES_PER_FRAME) {
+                    VAD_HANGOVER_FRAMES * 2
+                } else {
+                    VAD_HANGOVER_FRAMES
+                }
+
                 if (isSpeech) {
-                    hangoverRemaining = VAD_HANGOVER_FRAMES
+                    hangoverRemaining = hangoverTarget
                     ticksSinceSid = 0
-                    val adpcm = encoder.encode(pcm, SAMPLES_PER_FRAME)
+                    val seq = outboundSequence.incrementAndGet()
+                    val adpcm = encoder.encode(activeBuf, activeCount)
                     onEncodedFrameReady(seq, nowMs, false, adpcm)
                 } else if (hangoverRemaining > 0) {
                     hangoverRemaining--
                     ticksSinceSid = 0
-                    val adpcm = encoder.encode(pcm, SAMPLES_PER_FRAME)
+                    val seq = outboundSequence.incrementAndGet()
+                    val adpcm = encoder.encode(activeBuf, activeCount)
                     onEncodedFrameReady(seq, nowMs, false, adpcm)
                 } else {
                     _localVoiceLevel.value *= 0.55f
                     ticksSinceSid++
-                    if (ticksSinceSid >= DTX_HEARTBEAT_INTERVAL_FRAMES) {
+                    if (ticksSinceSid >= sidTickLimit) {
                         ticksSinceSid = 0
-                        onEncodedFrameReady(seq, nowMs, true, CallAudioEngine.encodeDtxSidFrame())
+                        onEncodedFrameReady(outboundSequence.get(), nowMs, true, CallAudioEngine.encodeDtxSidFrame())
                     }
                 }
             }
@@ -557,11 +618,11 @@ class GroupCallAudioMixer(
     private fun startMixerPlaybackThread(track: AudioTrack) {
         mixerThread = Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-            val mixedOut = ShortArray(SAMPLES_PER_FRAME)
+            val mixedOut = ShortArray(P2P_SAMPLES_PER_FRAME)
             val activeFrames = ArrayList<ShortArray>(8)
             val activeGains = ArrayList<Float>(8)
             var nextTickNs = SystemClock.elapsedRealtimeNanos()
-            val tickNs = FRAME_DURATION_MS * 1_000_000L
+            val tickNs = P2P_FRAME_DURATION_MS * 1_000_000L
             var tickCounter = 0
 
             while (running.get()) {
@@ -581,20 +642,20 @@ class GroupCallAudioMixer(
 
                 mixActiveFramesSoftLimited(
                     frames = activeFrames,
-                    sampleCount = SAMPLES_PER_FRAME,
+                    sampleCount = P2P_SAMPLES_PER_FRAME,
                     maxActiveSpeakers = MAX_ACTIVE_MIX_SPEAKERS,
                     outBuffer = mixedOut,
                     gains = activeGains
                 )
 
                 try {
-                    track.write(mixedOut, 0, SAMPLES_PER_FRAME)
+                    track.write(mixedOut, 0, P2P_SAMPLES_PER_FRAME)
                 } catch (_: Exception) {
                     if (!running.get()) break
                 }
 
                 tickCounter++
-                if ((tickCounter and 1) == 0) { // ~12.5 Hz smooth level snapshot
+                if ((tickCounter and 3) == 0) { // ~12.5 Hz smooth level snapshot
                     _peerVoiceLevels.value = levelMap
                 }
 

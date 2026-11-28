@@ -65,10 +65,11 @@ class TorCircuitManager private constructor(private val context: Context) {
         const val DEAD_CONNECTION_MS = 90_000L
         // An existing connection that received frames within this window is considered
         // healthy when a simultaneous dial or incoming socket arrives.
-        private const val ACTIVE_CONNECTION_HEALTHY_MS = 45_000L
-        private const val SOCKET_BUFFER_BYTES = 65_536
-        private const val STREAM_BUFFER_BYTES = 65_536
-        private const val HEDGE_STAGGER_MS = 3_200L
+        private const val ACTIVE_CONNECTION_HEALTHY_MS = 12_000L
+        private const val TOR_SOCKET_BUFFER_BYTES = 262_144
+        private const val LAN_SOCKET_BUFFER_BYTES = 524_288
+        private const val STREAM_BUFFER_BYTES = 131_072
+        private const val HEDGE_STAGGER_MS = 1_800L
         // Mid-frame stall tolerance: this many consecutive read timeouts inside a
         // single frame are tolerated before the connection is declared broken.
         private const val MAX_MID_FRAME_STALLS = 3
@@ -81,7 +82,7 @@ class TorCircuitManager private constructor(private val context: Context) {
         const val MAX_RECONNECT_DELAY_MS = 60_000L
         private const val SLOW_RECONNECT_DELAY_MS = 300_000L
         private const val BULK_IDLE_TIMEOUT_MS = 180_000L
-        private const val BULK_DIAL_COOLDOWN_MS = 45_000L
+        private const val BULK_DIAL_COOLDOWN_MS = 12_000L
 
         @Volatile
         private var instance: TorCircuitManager? = null
@@ -161,6 +162,10 @@ class TorCircuitManager private constructor(private val context: Context) {
     @Volatile
     var lanEndpointResolver: ((String) -> InetSocketAddress?)? = null
 
+    /** Optional invalidator to evict unreachable cached LAN endpoints immediately. */
+    @Volatile
+    var lanEndpointInvalidator: ((String) -> Unit)? = null
+
     // Emits a peer key whenever a connection (in or out) becomes usable.
     private val _connectionEvents = MutableSharedFlow<String>(extraBufferCapacity = 32)
     val connectionEvents: SharedFlow<String> = _connectionEvents.asSharedFlow()
@@ -206,8 +211,9 @@ class TorCircuitManager private constructor(private val context: Context) {
             socket.soTimeout = READ_TIMEOUT_MS
             socket.tcpNoDelay = true
             socket.keepAlive = true
-            socket.sendBufferSize = SOCKET_BUFFER_BYTES
-            socket.receiveBufferSize = SOCKET_BUFFER_BYTES
+            val bufBytes = if (isLanSocket(socket)) LAN_SOCKET_BUFFER_BYTES else TOR_SOCKET_BUFFER_BYTES
+            socket.sendBufferSize = bufBytes
+            socket.receiveBufferSize = bufBytes
         } catch (_: Exception) {
         }
     }
@@ -222,11 +228,12 @@ class TorCircuitManager private constructor(private val context: Context) {
         return withContext(Dispatchers.IO) {
             val sock = Socket()
             try {
-                sock.connect(lanAddr, 350)
+                sock.connect(lanAddr, 280)
                 configureSocket(sock)
                 sock
             } catch (_: Exception) {
                 runCatching { sock.close() }
+                runCatching { lanEndpointInvalidator?.invoke(canonicalKey) }
                 null
             }
         }
@@ -649,7 +656,7 @@ class TorCircuitManager private constructor(private val context: Context) {
                         val activeHealthy = active.hasReceivedFrame &&
                             (now - active.lastReceivedAt) <= ACTIVE_CONNECTION_HEALTHY_MS
                         val freshOutboundHandshake = !active.hasReceivedFrame &&
-                            (now - active.connectedAt) <= 20_000L
+                            (now - active.connectedAt) <= 6_000L
                         val keepActive = when {
                             incomingIsLan && !active.isLanBypass -> false
                             !incomingIsLan && active.isLanBypass && (activeHealthy || freshOutboundHandshake) -> true
@@ -1210,7 +1217,7 @@ class TorCircuitManager private constructor(private val context: Context) {
                         val activeHealthy = active.hasReceivedFrame &&
                             (now - active.lastReceivedAt) <= ACTIVE_CONNECTION_HEALTHY_MS
                         val freshOutboundHandshake = !active.hasReceivedFrame &&
-                            (now - active.connectedAt) <= 20_000L
+                            (now - active.connectedAt) <= 6_000L
                         val keepActive = when {
                             incomingIsLan && !active.isLanBypass -> false
                             !incomingIsLan && active.isLanBypass && (activeHealthy || freshOutboundHandshake) -> true
